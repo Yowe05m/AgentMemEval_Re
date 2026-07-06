@@ -1,13 +1,6 @@
 # AgentMemEval Rebuild
 
-一个面向 **LLM Agent 记忆机制评估** 的独立重构项目。它以论文 *An Empirical Study of Memory Mechanisms in Agentic Systems* 为语义基线，以原始仓库的外显行为作为只读参考，把 AgentMemEval 整理成一个可安装、可离线运行、可测试、可扩展的 Python 实验平台。
-
-这个仓库适合用于：
-
-- 复现和扩展 Fact、Expr、FactExprSync、FactExprAsync 等记忆机制；
-- 在无 API key 环境中用 deterministic mock Provider 跑通完整实验闭环；
-- 研究人格提示、记忆检索、经验更新和对手暴露对 Agent 表现的影响；
-- 从原始运行工件重新生成指标、图表和 Markdown 报告。
+论文 *An Empirical Study of Memory Mechanisms in Agentic Systems* 复现 + 扩展中。
 
 ## 项目状态
 
@@ -119,17 +112,9 @@ src/agentmemeval/
 `- storage/       # JSONL、快照和标准工件写入
 ```
 
-更多设计文档：
-
-- [`docs/reimplementation_spec.md`](docs/reimplementation_spec.md)：论文语义到代码对象的映射；
-- [`docs/architecture.md`](docs/architecture.md)：分层架构和可替换接口；
-- [`docs/decisions.md`](docs/decisions.md)：关键设计决策和保守假设；
-- [`docs/development.md`](docs/development.md)：开发、测试和扩展流程；
-- [`docs/experiment_roadmap.md`](docs/experiment_roadmap.md)：实验路线图。
-
 ## 使用真实 Provider
 
-默认验证路径只使用 `mock`。如需接入 OpenAI-compatible 服务，请先提供环境变量，再运行 doctor 或实验配置。
+目前项目处于 `mock` 阶段。如需接入 OpenAI-compatible 服务，需先提供环境变量，再运行 doctor 或实验配置。
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
@@ -141,7 +126,6 @@ python -m agentmemeval doctor --provider openai_compatible --config configs/prov
 
 ## 复现边界
 
-- 本项目不是原始仓库的直接 fork，而是语义对齐后的独立工程化实现。
 - `configs/base.yaml` 保留论文默认语义；smoke 配置故意使用较小手数，便于快速离线验证。
 - 本地 Hold'em 环境覆盖核心评估流程，但还不是完整赌场级扑克引擎；复杂边池、淘汰赛结构等属于后续增强。
 - 经验记忆更新当前采用确定性摘要，便于测试稳定；后续可以替换为真实 LLM 修订器。
