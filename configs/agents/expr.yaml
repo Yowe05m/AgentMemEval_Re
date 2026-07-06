@@ -1,0 +1,4 @@
+agent:
+  mechanism: expr
+  memory_scope: per_agent
+  window_size: 8

@@ -1,0 +1,12 @@
+docs/
+outputs/
+.venv/
+tmp/*
+!tmp/.gitkeep
+.env
+.pytest_cache/
+pytest-cache-files-*/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.egg-info/

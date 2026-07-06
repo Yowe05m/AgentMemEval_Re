@@ -1,0 +1,8 @@
+agent:
+  mechanism: fact_expr_async
+  memory_scope: per_agent
+  top_k: 8
+  window_size: 8
+  sweep_every: 3
+  evidence_k: 6
+  max_records: 500

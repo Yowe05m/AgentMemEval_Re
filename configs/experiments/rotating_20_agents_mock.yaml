@@ -1,0 +1,29 @@
+extends: ../base.yaml
+
+agent:
+  mechanism: fact_expr_async
+  memory_scope: per_agent
+  top_k: 6
+  window_size: 5
+  sweep_every: 2
+  evidence_k: 4
+  max_records: 200
+
+personas:
+  - INTJ
+  - ENFP
+  - ISTP
+  - ESFJ
+
+experiment:
+  scenario: rotating_table
+  seed: 20260705
+  output_root: outputs
+  agent_count: 20
+  table_size: 4
+  rounds: 3
+  hands_per_table_round: 1
+  rotation_mode: balanced
+  update_memory_train: true
+  rebuy_busted: true
+  update_memory_test: false

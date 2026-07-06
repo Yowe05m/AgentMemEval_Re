@@ -1,0 +1,11 @@
+provider:
+  provider: openai_compatible
+  model: example-compatible-model
+  base_url_env: OPENAI_BASE_URL
+  api_key_env: OPENAI_API_KEY
+  temperature: 0.2
+  max_output_tokens: 512
+  timeout_seconds: 30
+  max_retries: 1
+  rate_limit_policy: manual
+  structured_output_mode: json_object

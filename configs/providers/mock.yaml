@@ -1,0 +1,9 @@
+provider:
+  provider: mock
+  model: mock-deterministic-v1
+  temperature: 0.0
+  max_output_tokens: 256
+  timeout_seconds: 30
+  max_retries: 0
+  rate_limit_policy: none
+  structured_output_mode: json_object

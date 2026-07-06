@@ -1,0 +1,6 @@
+agent:
+  mechanism: fact_expr_sync
+  memory_scope: per_agent
+  top_k: 8
+  window_size: 8
+  max_records: 500

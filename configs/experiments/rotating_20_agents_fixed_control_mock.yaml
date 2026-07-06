@@ -1,0 +1,13 @@
+extends: rotating_20_agents_mock.yaml
+
+experiment:
+  scenario: rotating_table
+  seed: 20260705
+  output_root: outputs
+  agent_count: 20
+  table_size: 4
+  rounds: 3
+  hands_per_table_round: 1
+  rotation_mode: fixed
+  update_memory_train: true
+  rebuy_busted: true

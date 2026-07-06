@@ -1,0 +1,22 @@
+extends: ../base.yaml
+
+agent:
+  mechanism: fact
+  memory_scope: per_agent
+  top_k: 8
+  max_records: 500
+
+opponent_agent:
+  mechanism: no_memory
+  memory_scope: per_agent
+
+experiment:
+  scenario: fixed_evolving_table
+  seed: 20260705
+  output_root: outputs
+  train_hands: 8
+  test_hands: 4
+  table_size: 4
+  target_agent_id: agent_00
+  update_memory_train: true
+  update_memory_test: false

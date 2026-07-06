@@ -1,0 +1,3 @@
+agent:
+  mechanism: no_memory
+  memory_scope: per_agent
