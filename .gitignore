@@ -1,14 +1,40 @@
-docs/
-outputs/
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+pytest-cache-files-*/
+
+# 虚拟环境
 .venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# 环境变量与密钥
+.env
+*.key
+*.pem
+
+# 实验结果
+outputs/
+docs/
+
+# 缓存
+.cache/
+huggingface_cache/
+.ruff_cache/
+
+# 临时文件
 tmp/*
 !tmp/.gitkeep
-.env
-.pytest_cache/
-pytest-cache-files-*/
-.ruff_cache/
-__pycache__/
-*.pyc
-*.egg-info/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
 code.txt
 docs_merged.md

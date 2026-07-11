@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-
 # These extensions describe source or configuration maintained with this project.
 INCLUDED_SUFFIXES = {".py", ".yaml", ".yml", ".toml"}
 EXCLUDED_DIR_NAMES = {
