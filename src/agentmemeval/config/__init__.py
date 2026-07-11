@@ -6,6 +6,12 @@
 不负责：不执行配置加载。
 """
 
-from agentmemeval.config.loader import deep_merge, dump_yaml, load_config, validate_config
+from agentmemeval.config.loader import (
+    deep_merge,
+    dump_yaml,
+    load_config,
+    load_raw_config,
+    validate_config,
+)
 
-__all__ = ["load_config", "validate_config", "deep_merge", "dump_yaml"]
+__all__ = ["load_config", "load_raw_config", "validate_config", "deep_merge", "dump_yaml"]

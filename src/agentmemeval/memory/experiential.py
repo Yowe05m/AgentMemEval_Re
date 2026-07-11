@@ -18,6 +18,7 @@ from agentmemeval.core.domain import (
     MemorySnapshot,
     utc_now_iso,
 )
+from agentmemeval.memory.base import trajectory_quality
 
 INITIAL_EXPERIENCE = """# 我的经验
 
@@ -83,6 +84,7 @@ class ExperientialMemory:
         self.max_chars = max_chars
         self.update_period = max(1, update_period)
         self.trajectories: list[HandTrajectory] = []
+        self.skipped_trajectory_hand_ids: list[str] = []
         self.revision_log: list[dict[str, object]] = []
         self.history: list[ExperienceDocument] = [
             ExperienceDocument(
@@ -153,6 +155,9 @@ class ExperientialMemory:
         设计说明：每次更新记录来源手牌和窗口大小，支持复现实验审计。
         """
 
+        if not trajectory_quality(trajectory)["memory_eligible"]:
+            self.skipped_trajectory_hand_ids.append(trajectory.hand_id)
+            return
         self.trajectories.append(trajectory)
         if len(self.trajectories) % self.update_period != 0:
             return
@@ -202,6 +207,7 @@ class ExperientialMemory:
                 "update_period": self.update_period,
                 "history": [doc.to_dict() for doc in self.history],
                 "revision_log": list(self.revision_log),
+                "skipped_trajectory_hand_ids": list(self.skipped_trajectory_hand_ids),
             },
         )
 
@@ -223,6 +229,9 @@ class ExperientialMemory:
         history = snapshot.payload.get("history", [])
         self.history = [ExperienceDocument(**doc) for doc in history] or self.history
         self.revision_log = list(snapshot.payload.get("revision_log", []))
+        self.skipped_trajectory_hand_ids = list(
+            snapshot.payload.get("skipped_trajectory_hand_ids", [])
+        )
         self.trajectories = []
 
     def metrics(self) -> dict[str, object]:
@@ -243,6 +252,7 @@ class ExperientialMemory:
             "experience_chars": len(self.current.body),
             "revision_count": len(self.revision_log),
             "last_revision": self.revision_log[-1] if self.revision_log else {},
+            "skipped_fallback_trajectories": len(self.skipped_trajectory_hand_ids),
         }
 
     def _revise_from_window(self, recent: list[HandTrajectory]) -> dict[str, object]:

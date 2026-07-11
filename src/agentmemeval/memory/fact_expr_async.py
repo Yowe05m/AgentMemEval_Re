@@ -21,6 +21,7 @@ from agentmemeval.core.domain import (
     utc_now_iso,
 )
 from agentmemeval.core.seeds import make_rng
+from agentmemeval.memory.base import trajectory_quality
 from agentmemeval.memory.experiential import ExperientialMemory
 from agentmemeval.memory.factual import FactualMemory
 from agentmemeval.memory.rag import hybrid_top_k_records
@@ -98,6 +99,8 @@ class FactExprAsyncMemory:
         self.sweep_log: list[dict[str, object]] = []
         self.fact_state: dict[str, dict[str, object]] = {}
         self.hand_counter = 0
+        self.eligible_hand_counter = 0
+        self.skipped_trajectory_hand_ids: list[str] = []
 
     def build_context(self, observation: AgentObservation) -> MemoryContext:
         """
@@ -180,10 +183,15 @@ class FactExprAsyncMemory:
         设计说明：sweep 日志记录触发手牌、窗口、证据 ID 和版本变化。
         """
 
+        quality = trajectory_quality(trajectory)
         before_ids = {record.record_id for record in self.fact.records}
         self.fact.on_hand_finished(trajectory)
         for record in self.fact.records:
-            if record.record_id not in before_ids and record.record_id not in self.fact_state:
+            if (
+                record.record_id not in before_ids
+                and record.record_id not in self.fact_state
+                and record.source.get("memory_eligible", True)
+            ):
                 self.fact_state[record.record_id] = {
                     "stability": self.stability_init,
                     "last_accessed_hand": self.hand_counter + 1,
@@ -191,9 +199,13 @@ class FactExprAsyncMemory:
                     "linked_exp_revs": [],
                 }
         self.hand_counter += 1
+        if not quality["memory_eligible"]:
+            self.skipped_trajectory_hand_ids.append(trajectory.hand_id)
+            return
+        self.eligible_hand_counter += 1
         self.recent.append(trajectory)
         self.recent = self.recent[-self.window_size :]
-        if self.hand_counter % self.sweep_every != 0 or not trajectory.decision_events:
+        if self.eligible_hand_counter % self.sweep_every != 0 or not trajectory.decision_events:
             return
         trigger_observation = trajectory.decision_events[-1].observation
         evidence_groups = self._recall_for_sweep(trigger_observation)
@@ -253,6 +265,8 @@ class FactExprAsyncMemory:
                 "sweep_log": list(self.sweep_log),
                 "fact_state": self.fact_state,
                 "hand_counter": self.hand_counter,
+                "eligible_hand_counter": self.eligible_hand_counter,
+                "skipped_trajectory_hand_ids": list(self.skipped_trajectory_hand_ids),
             },
         )
 
@@ -287,6 +301,12 @@ class FactExprAsyncMemory:
             for record_id, state in dict(snapshot.payload.get("fact_state", {})).items()
         }
         self.hand_counter = int(snapshot.payload.get("hand_counter", 0))
+        self.eligible_hand_counter = int(
+            snapshot.payload.get("eligible_hand_counter", self.hand_counter)
+        )
+        self.skipped_trajectory_hand_ids = list(
+            snapshot.payload.get("skipped_trajectory_hand_ids", [])
+        )
         self.recent = []
         self.fact.restore(
             MemorySnapshot("fact", self.agent_id, self.scope, snapshot.payload.get("fact", {}))
@@ -310,12 +330,15 @@ class FactExprAsyncMemory:
         return {
             "mechanism": self.name,
             "fact_count": fact["fact_count"],
+            "eligible_fact_count": fact.get("eligible_fact_count", fact["fact_count"]),
+            "excluded_fallback_fact_count": fact.get("excluded_fallback_fact_count", 0),
             "experience_updates": expr["experience_updates"],
             "experience_chars": expr.get("experience_chars", 0),
             "async_sweeps": len(self.sweep_log),
             "last_retrieved_fact_ids": fact.get("last_retrieved_fact_ids", []),
             "salience_threshold": self.salience_threshold,
             "fact_state_count": len(self.fact_state),
+            "skipped_fallback_trajectories": len(self.skipped_trajectory_hand_ids),
         }
 
     def _sweep(self, evidence: list[object]) -> dict[str, object]:
@@ -425,12 +448,18 @@ class FactExprAsyncMemory:
         """
 
         if not self.fact_state:
-            return list(self.fact.records)
+            return [
+                record
+                for record in self.fact.records
+                if record.source.get("memory_eligible", True)
+                and record.agent_id == observation.agent_id
+            ]
         return [
             record
             for record in self.fact.records
             if self._salience(record.record_id, self.hand_counter + 1) >= self.salience_threshold
             and record.agent_id == observation.agent_id
+            and record.source.get("memory_eligible", True)
         ]
 
     def _mirror_record(
@@ -458,6 +487,7 @@ class FactExprAsyncMemory:
             record
             for record in self.fact.records
             if record.record_id not in retrieved_ids
+            and record.source.get("memory_eligible", True)
             and self.salience_threshold
             <= self._salience(record.record_id, self.hand_counter + 1)
             < self.salience_mirror_threshold

@@ -1,0 +1,5 @@
+extends: local_base_small.yaml
+
+agent:
+  mechanism: expr
+  window_size: 6

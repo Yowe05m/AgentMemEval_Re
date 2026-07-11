@@ -1,0 +1,6 @@
+extends: local_base_small.yaml
+
+agent:
+  mechanism: fact
+  top_k: 6
+  max_records: 300

@@ -1,0 +1,16 @@
+extends: local_base_small.yaml
+
+agent:
+  mechanism: no_memory
+
+experiment:
+  scenario: fixed_evolving_table
+  seed: 42
+  output_root: outputs
+  train_hands: 150
+  test_hands: 25
+  table_size: 8
+  target_agent_id: agent_00
+  update_memory_train: true
+  update_memory_test: false
+  all_agents_same_mechanism: false

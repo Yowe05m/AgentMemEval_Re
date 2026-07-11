@@ -12,7 +12,7 @@ import argparse
 import json
 from pathlib import Path
 
-from agentmemeval.config.loader import load_config
+from agentmemeval.config.loader import load_raw_config
 from agentmemeval.core.errors import AgentMemEvalError
 from agentmemeval.evaluation.reporting import rebuild_report
 from agentmemeval.experiments.runner import run_config
@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentmemeval", description="AgentMemEval 重构版 CLI")
     sub = parser.add_subparsers(dest="command")
     doctor = sub.add_parser("doctor", help="检查 Provider 和离线环境")
-    doctor.add_argument("--provider", default="mock", help="Provider 名称")
+    doctor.add_argument("--provider", help="Provider 名称；不提供时优先使用配置文件中的 provider")
     doctor.add_argument("--config", help="可选配置文件；提供后优先读取 provider 段")
     run = sub.add_parser("run", help="运行实验配置")
     run.add_argument("--config", required=True, help="YAML 配置路径")
@@ -81,11 +81,16 @@ def _doctor(args: argparse.Namespace) -> int:
     """
 
     if args.config:
-        config = load_config(args.config)
-        provider_config = dict(config["provider"])
+        config = load_raw_config(args.config)
+        provider_config = dict(config.get("provider", config))
     else:
-        provider_config = {"provider": args.provider, "model": "mock-deterministic-v1"}
-    provider_config["provider"] = args.provider or provider_config.get("provider", "mock")
+        provider_name = args.provider or "mock"
+        provider_config = {"provider": provider_name}
+        if provider_name == "mock":
+            provider_config["model"] = "mock-deterministic-v1"
+    if args.provider:
+        provider_config["provider"] = args.provider
+    provider_config["provider"] = provider_config.get("provider", "mock")
     print(json.dumps(provider_health(provider_config), ensure_ascii=False, indent=2))
     return 0
 

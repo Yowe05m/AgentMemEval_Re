@@ -8,13 +8,29 @@
 
 from __future__ import annotations
 
+import re
+from collections import Counter
+
 from agentmemeval.core.domain import AgentObservation, FactualMemoryRecord, MemoryContext
+from agentmemeval.environment.hand_evaluator import RANKS, SUITS, evaluate_best
+from agentmemeval.environment.raise_sizing import RaiseSizingPlan
+
+PROMPT_TEMPLATE_VERSION = "2026-07-11-v3"
 
 BASE_SYSTEM_PROMPT = (
-    "你是一个德州扑克 Agent。你只能使用用户消息中给出的可见信息。\n"
+    "你是一个德州扑克决策 Agent。目标是在遵守规则的前提下最大化长期期望筹码收益，"
+    "不要把保守、探索或任何人格特征机械映射成固定动作。\n"
+    "你只能使用用户消息中给出的可见信息。先比较牌力与听牌、位置、底池赔率、"
+    "有效筹码和本手公开行动，再从用户列出的合法动作中选择。\n"
+    "用户消息中的确定性牌型、听牌和成本分析由规则引擎计算，优先级高于你的自行识别、"
+    "人格偏好和历史记忆；不要声称不存在的对子、两对、同花、顺子或听牌。\n"
     "请输出严格 JSON："
     '{"action_type": "fold|check|call|raise", "amount": null 或整数, '
     '"confidence": 0到1, "reason_summary": "一句简短理由"}。\n'
+    "action_type 必须来自本次给出的合法动作。raise 的 amount 表示加注到的总额，"
+    "必须位于给出的闭区间内；fold、check、call 的 amount 必须是 null。\n"
+    "reason_summary 必须与最终 action_type 一致，只概括关键可见证据。\n"
+    "接近最大 raise 金额通常意味着全下；不要仅因探索性、位置优势或对手可能诈唬而用边缘牌全下。\n"
     "不要输出长思维链，不要假设你看到了对手私有手牌。"
 )
 
@@ -36,7 +52,11 @@ def render_system_prompt(context: MemoryContext) -> str:
     return BASE_SYSTEM_PROMPT
 
 
-def render_user_prompt(observation: AgentObservation, context: MemoryContext) -> str:
+def render_user_prompt(
+    observation: AgentObservation,
+    context: MemoryContext,
+    raise_sizing: RaiseSizingPlan | None = None,
+) -> str:
     """
     功能：渲染用户提示词。
     参数：
@@ -48,10 +68,9 @@ def render_user_prompt(observation: AgentObservation, context: MemoryContext) ->
     设计说明：提示词只使用 AgentObservation，不访问环境私有状态。
     """
 
+    player_labels = _relative_player_labels(observation)
     lines = [
         "## 当前局面",
-        f"- 桌号：{observation.table_id}",
-        f"- 手牌：{observation.hand_id}",
         f"- 阶段：{observation.phase}",
         f"- 我的座位：{observation.seat}",
         f"- 我的手牌：{' '.join(observation.hole_cards)}",
@@ -60,11 +79,15 @@ def render_user_prompt(observation: AgentObservation, context: MemoryContext) ->
         f"- 当前下注线：{observation.current_bet}",
         f"- 需要补齐：{observation.to_call}",
         "",
+        "## 规则引擎确定性分析（必须以此为准）",
+        *_render_deterministic_analysis(observation),
+        "",
         "## 玩家公开状态",
     ]
     for player in observation.players:
         lines.append(
-            f"- {player.agent_id}: seat={player.seat}, stack={player.stack}, "
+            f"- {player_labels.get(player.agent_id, '某对手')}: seat={player.seat}, "
+            f"stack={player.stack}, "
             f"bet={player.current_bet}, folded={player.folded}, all_in={player.all_in}"
         )
     lines.extend(["", "## 合法动作"])
@@ -76,11 +99,17 @@ def render_user_prompt(observation: AgentObservation, context: MemoryContext) ->
             )
         else:
             lines.append(f"- {action.action_type}")
+    if raise_sizing is not None and raise_sizing.allowed_amounts is not None:
+        amounts = ", ".join(str(amount) for amount in raise_sizing.allowed_amounts)
+        lines.append(
+            f"- 本地离散 raise-to 候选：[{amounts}]；选择 raise 时 amount 只能取其中一个。"
+        )
     lines.extend(["", "## 近期公开行动"])
     if observation.action_history:
         for event in observation.action_history[-12:]:
             lines.append(
-                f"- {event.get('phase')} {event.get('agent_id')} "
+                f"- {event.get('phase')} "
+                f"{player_labels.get(str(event.get('agent_id')), '某对手')} "
                 f"{event.get('action_type')} {event.get('amount') or ''}".rstrip()
             )
     else:
@@ -98,6 +127,89 @@ def render_user_prompt(observation: AgentObservation, context: MemoryContext) ->
     return "\n".join(lines)
 
 
+def _render_deterministic_analysis(observation: AgentObservation) -> list[str]:
+    """Render authoritative made-hand, draw, and stack-risk facts for small models."""
+
+    cards = [*observation.hole_cards, *observation.community_cards]
+    if len(cards) >= 5:
+        rank = evaluate_best(cards)
+        hand_line = (
+            f"- 当前已成牌：{rank.class_name}；最佳五张：{' '.join(rank.best_cards)}。"
+        )
+        current_class = rank.score[0]
+    else:
+        paired = observation.hole_cards[0][0] == observation.hole_cards[1][0]
+        suited = observation.hole_cards[0][1] == observation.hole_cards[1][1]
+        hand_line = (
+            f"- 翻前牌型：{'Pocket Pair' if paired else 'Unpaired'}；"
+            f"两张手牌{'同花色' if suited else '不同花色'}。"
+        )
+        current_class = -1
+
+    lines = [hand_line]
+    if observation.phase == "river":
+        lines.append("- 听牌状态：河牌已结束，没有未来补牌；未完成的听牌没有摊牌价值。")
+    elif observation.phase in {"flop", "turn"}:
+        known = set(cards)
+        suit_counts = Counter(card[1] for card in cards)
+        flush_suit, flush_known = max(suit_counts.items(), key=lambda item: item[1])
+        flush_outs = 13 - flush_known if flush_known == 4 and current_class < 5 else 0
+        straight_outs = []
+        if current_class < 4:
+            for rank_code in RANKS:
+                for suit_code in SUITS:
+                    candidate = rank_code + suit_code
+                    if candidate in known:
+                        continue
+                    if evaluate_best([*cards, candidate]).score[0] in {4, 8}:
+                        straight_outs.append(candidate)
+        draw_parts = []
+        if flush_outs:
+            draw_parts.append(f"{flush_suit} 花色一张成同花，共 {flush_outs} 张未见同花 outs")
+        if straight_outs:
+            draw_parts.append(
+                f"一张成顺子，共 {len(straight_outs)} 张未见 outs（"
+                f"{' '.join(straight_outs)}）"
+            )
+        draw_summary = (
+            "；".join(draw_parts) if draw_parts else "没有规则引擎确认的同花或顺子听牌。"
+        )
+        lines.append("- 一张牌听牌：" + draw_summary)
+    else:
+        lines.append("- 听牌状态：翻前尚无公共牌，不把同花手牌或连张直接视为已成牌/已成听牌。")
+
+    self_state = next(
+        player for player in observation.players if player.agent_id == observation.agent_id
+    )
+    call_cost = min(max(0, observation.to_call), max(0, self_state.stack))
+    if call_cost:
+        required_equity = call_cost / max(1, observation.pot + call_cost)
+        stack_ratio = call_cost / max(1, self_state.stack)
+        lines.append(
+            f"- 跟注成本：实际最多投入 {call_cost}（显示需补齐 {observation.to_call}）；"
+            f"需要约 {required_equity:.1%} 胜率；占剩余筹码 {stack_ratio:.1%}；"
+            f"{'这是全下跟注。' if call_cost >= self_state.stack else '跟注后仍有剩余筹码。'}"
+        )
+    else:
+        lines.append("- 跟注成本：0，可以过牌时不要虚构跟注成本。")
+
+    raise_rule = observation.legal_actions.rule_for("raise")
+    if raise_rule and raise_rule.min_amount is not None and raise_rule.max_amount is not None:
+        min_cost = min(
+            self_state.stack,
+            max(0, raise_rule.min_amount - self_state.current_bet),
+        )
+        max_cost = min(
+            self_state.stack,
+            max(0, raise_rule.max_amount - self_state.current_bet),
+        )
+        lines.append(
+            f"- 加注风险：最小额外投入 {min_cost}，最大额外投入 {max_cost}；"
+            f"最大 raise {'等同全下' if max_cost >= self_state.stack else '不是全下'}。"
+        )
+    return lines
+
+
 def _render_facts(facts: list[FactualMemoryRecord]) -> str:
     """
     功能：渲染事实证据列表。
@@ -113,8 +225,35 @@ def _render_facts(facts: list[FactualMemoryRecord]) -> str:
         return "### 事实证据\n无"
     lines = ["### 事实证据"]
     for fact in facts:
+        fact_label = fact.record_id.removeprefix(f"{fact.agent_id}-")
         lines.append(
-            f"- {fact.record_id}: {fact.state_summary}; {fact.action_summary}; "
+            f"- {fact_label}: {_sanitize_agent_ids(fact.state_summary, fact.agent_id)}; "
+            f"{_sanitize_agent_ids(fact.action_summary, fact.agent_id)}; "
             f"final_reward={fact.final_reward}"
         )
     return "\n".join(lines)
+
+
+def _relative_player_labels(observation: AgentObservation) -> dict[str, str]:
+    """按相对座位生成每手匿名标签，避免跨手绑定稳定 Agent ID。"""
+
+    labels = {observation.agent_id: "我"}
+    opponents = sorted(
+        (player for player in observation.players if player.agent_id != observation.agent_id),
+        key=lambda player: (player.seat - observation.seat) % max(1, len(observation.players)),
+    )
+    for index, player in enumerate(opponents, start=1):
+        labels[player.agent_id] = f"下家{index}"
+    return labels
+
+
+_AGENT_ID_PATTERN = re.compile(r"\b(?:agent|heldout)_\d+\b", re.IGNORECASE)
+
+
+def _sanitize_agent_ids(text: str, owner_id: str) -> str:
+    """从长期记忆文本中移除稳定玩家 ID，只保留自我/某对手语义。"""
+
+    def replace(match: re.Match[str]) -> str:
+        return "我" if match.group(0).lower() == owner_id.lower() else "某对手"
+
+    return _AGENT_ID_PATTERN.sub(replace, str(text))

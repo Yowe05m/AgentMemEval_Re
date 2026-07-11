@@ -36,24 +36,105 @@ def compute_metrics(
     设计说明：指标从原始工件重建，避免场景代码内散落统计逻辑。
     """
 
+    per_agent = _compute_per_agent(
+        hand_summaries,
+        events,
+        big_blind=big_blind,
+        memory_metrics=memory_metrics,
+    )
+    stages = sorted(
+        {str(hand.get("stage", "unknown")) for hand in hand_summaries}
+        | {
+            str(event.get("stage", "unknown"))
+            for event in events
+            if event.get("event") == "action"
+        }
+    )
+    stage_per_agent = {
+        stage: _compute_per_agent(
+            [hand for hand in hand_summaries if str(hand.get("stage", "unknown")) == stage],
+            [event for event in events if str(event.get("stage", "unknown")) == stage],
+            big_blind=big_blind,
+        )
+        for stage in stages
+    }
+    train = stage_per_agent.get("train", {})
+    test = stage_per_agent.get("test", {})
+    comparable_agents = sorted(set(train) & set(test))
+    generalization_gap_chip_delta = {
+        agent_id: train[agent_id]["chip_delta"] - test[agent_id]["chip_delta"]
+        for agent_id in comparable_agents
+    }
+    generalization_gap_bb_per_100 = {
+        agent_id: train[agent_id]["bb_per_100"] - test[agent_id]["bb_per_100"]
+        for agent_id in comparable_agents
+    }
+    quality = _decision_quality(events)
+    stage_quality = {
+        stage: _decision_quality(
+            [event for event in events if str(event.get("stage", "unknown")) == stage]
+        )
+        for stage in stages
+    }
+    return {
+        "primary_metrics": {
+            "per_agent": per_agent,
+            "per_agent_scope": "all stages combined; use stage_per_agent for analysis",
+            "stage_per_agent": stage_per_agent,
+            "generalization_gap_chip_delta": generalization_gap_chip_delta,
+            "generalization_gap_bb_per_100": generalization_gap_bb_per_100,
+            "generalization_gap_definition": "train minus test; only agents present in both stages",
+        },
+        "exploratory_metrics": {
+            "action_behavior": {
+                agent_id: dict(metrics["action_counts"])
+                for agent_id, metrics in per_agent.items()
+            },
+            "opponent_diversity": exposure_stats or {},
+            "bluff_rate": {
+                "proxy_high_card_showdown_after_postflop_raise": {
+                    agent_id: metrics["proxy_bluff_rate"]
+                    for agent_id, metrics in per_agent.items()
+                },
+                "intent_keyword_after_postflop_raise": {
+                    agent_id: metrics["intent_bluff_rate"]
+                    for agent_id, metrics in per_agent.items()
+                },
+            },
+            "decision_quality": {"combined": quality, "by_stage": stage_quality},
+            "raise_sizing": _raise_sizing_quality(events),
+        },
+        "run_counters": {
+            "hands": len(hand_summaries),
+            "actions": quality["decision_count"],
+            "agents": len(per_agent),
+        },
+    }
+
+
+def _compute_per_agent(
+    hand_summaries: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    big_blind: int,
+    memory_metrics: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compute one internally consistent metric table for one stage or all stages."""
+
     rewards_by_agent: dict[str, int] = defaultdict(int)
     hands_by_agent: dict[str, int] = defaultdict(int)
     wins_by_agent: dict[str, int] = defaultdict(int)
-    stage_rewards: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for hand in hand_summaries:
-        stage = str(hand.get("stage", "unknown"))
-        rewards = hand.get("rewards", {}) or {}
-        for agent_id, reward in rewards.items():
+        for agent_id, reward in (hand.get("rewards", {}) or {}).items():
             value = int(reward)
             rewards_by_agent[agent_id] += value
-            stage_rewards[stage][agent_id] += value
             hands_by_agent[agent_id] += 1
             if value > 0:
                 wins_by_agent[agent_id] += 1
+
     action_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     vpip_hands: dict[str, set[str]] = defaultdict(set)
-    faced_raise = defaultdict(int)
-    folded_to_raise = defaultdict(int)
+    faced_raise: dict[str, int] = defaultdict(int)
+    folded_to_raise: dict[str, int] = defaultdict(int)
     postflop_raise_hands: dict[str, set[str]] = defaultdict(set)
     intent_bluff_hands: dict[str, set[str]] = defaultdict(set)
     for event in events:
@@ -69,28 +150,31 @@ def compute_metrics(
             faced_raise[agent_id] += 1
             if action == "fold":
                 folded_to_raise[agent_id] += 1
-        effective_raise = bool(event.get("effective_raise", False))
-        if action == "raise" and str(event.get("phase")) in POSTFLOP_PHASES and effective_raise:
+        if (
+            action == "raise"
+            and str(event.get("phase")) in POSTFLOP_PHASES
+            and bool(event.get("effective_raise", False))
+        ):
             postflop_raise_hands[agent_id].add(hand_id)
-            raw_decision = event.get("raw_decision", {}) or {}
-            if _has_bluff_intent(raw_decision):
+            if _has_bluff_intent(event.get("raw_decision", {}) or {}):
                 intent_bluff_hands[agent_id].add(hand_id)
-    showdown_ranks_by_hand: dict[str, dict[str, str]] = {}
-    for hand in hand_summaries:
-        ranks = hand.get("showdown_ranks", {}) or {}
-        if ranks:
-            showdown_ranks_by_hand[str(hand.get("hand_id"))] = {
-                str(agent_id): str(rank) for agent_id, rank in dict(ranks).items()
-            }
+
+    showdown_ranks_by_hand = {
+        str(hand.get("hand_id")): {
+            str(agent_id): str(rank)
+            for agent_id, rank in dict(hand.get("showdown_ranks", {}) or {}).items()
+        }
+        for hand in hand_summaries
+        if hand.get("showdown_ranks")
+    }
     proxy_bluff = _compute_proxy_bluff_rates(postflop_raise_hands, showdown_ranks_by_hand)
     intent_bluff = {
-        agent_id: (
-            len(intent_bluff_hands.get(agent_id, set())) / len(hands)
-            if hands
-            else 0.0
-        )
-        for agent_id, hands in postflop_raise_hands.items()
+        agent_id: len(intent_bluff_hands.get(agent_id, set())) / len(hand_ids)
+        if hand_ids
+        else 0.0
+        for agent_id, hand_ids in postflop_raise_hands.items()
     }
+
     per_agent: dict[str, Any] = {}
     for agent_id in sorted(hands_by_agent):
         hands = max(1, hands_by_agent[agent_id])
@@ -117,32 +201,68 @@ def compute_metrics(
             "action_counts": counts,
             "memory": (memory_metrics or {}).get(agent_id, {}),
         }
-    train = stage_rewards.get("train", {})
-    test = stage_rewards.get("test", {})
-    generalization_gap = {
-        agent_id: train.get(agent_id, 0) - test.get(agent_id, 0)
-        for agent_id in sorted(set(train) | set(test))
-    }
+    return per_agent
+
+
+def _decision_quality(events: list[dict[str, Any]]) -> dict[str, int | float]:
+    """Report how often provider output required normalization or semantic fallback."""
+
+    actions = [event for event in events if event.get("event") == "action"]
+    repaired = sum(bool(event.get("guard_repaired")) for event in actions)
+    fallback = sum(bool(event.get("fallback_used")) for event in actions)
+    changed = sum(
+        isinstance(event.get("raw_decision"), dict)
+        and event["raw_decision"].get("action_type") != event.get("action_type")
+        for event in actions
+    )
+    count = len(actions)
     return {
-        "primary_metrics": {
-            "per_agent": per_agent,
-            "generalization_gap_chip_delta": generalization_gap,
-        },
-        "exploratory_metrics": {
-            "action_behavior": {
-                agent_id: dict(counts) for agent_id, counts in action_counts.items()
-            },
-            "opponent_diversity": exposure_stats or {},
-            "bluff_rate": {
-                "proxy_high_card_showdown_after_postflop_raise": proxy_bluff,
-                "intent_keyword_after_postflop_raise": intent_bluff,
-            },
-        },
-        "run_counters": {
-            "hands": len(hand_summaries),
-            "actions": sum(sum(counts.values()) for counts in action_counts.values()),
-            "agents": len(per_agent),
-        },
+        "decision_count": count,
+        "repaired_count": repaired,
+        "repaired_rate": repaired / count if count else 0.0,
+        "fallback_count": fallback,
+        "fallback_rate": fallback / count if count else 0.0,
+        "action_type_changed_count": changed,
+        "action_type_changed_rate": changed / count if count else 0.0,
+    }
+
+
+def _raise_sizing_quality(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Audit policy use, native all-in selections, and discrete enum compliance."""
+
+    policy_action_counts: dict[str, int] = defaultdict(int)
+    policy_raise_counts: dict[str, int] = defaultdict(int)
+    native_max_selected: dict[str, int] = defaultdict(int)
+    enum_violations: dict[str, int] = defaultdict(int)
+    for event in events:
+        if event.get("event") != "action":
+            continue
+        sizing = event.get("raise_sizing") or {}
+        policy = str(sizing.get("policy", "unknown")) if isinstance(sizing, dict) else "unknown"
+        policy_action_counts[policy] += 1
+        if event.get("action_type") != "raise":
+            continue
+        policy_raise_counts[policy] += 1
+        amount = int(event.get("amount") or 0)
+        native_max = sizing.get("native_max_amount") if isinstance(sizing, dict) else None
+        if native_max is not None and amount == int(native_max):
+            native_max_selected[policy] += 1
+        allowed = sizing.get("allowed_amounts") if isinstance(sizing, dict) else None
+        if isinstance(allowed, list) and allowed and amount not in {
+            int(candidate) for candidate in allowed
+        }:
+            enum_violations[policy] += 1
+    policies = sorted(set(policy_action_counts) | set(policy_raise_counts))
+    return {
+        "by_policy": {
+            policy: {
+                "action_count": policy_action_counts[policy],
+                "raise_count": policy_raise_counts[policy],
+                "native_max_selected_count": native_max_selected[policy],
+                "discrete_enum_violation_count": enum_violations[policy],
+            }
+            for policy in policies
+        }
     }
 
 

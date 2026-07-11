@@ -1,0 +1,5 @@
+extends: local_paper_exp1_no_memory.yaml
+
+agent:
+  mechanism: expr
+  window_size: 8

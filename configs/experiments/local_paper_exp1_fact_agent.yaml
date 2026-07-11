@@ -1,0 +1,6 @@
+extends: local_paper_exp1_no_memory.yaml
+
+agent:
+  mechanism: fact
+  top_k: 8
+  max_records: 800

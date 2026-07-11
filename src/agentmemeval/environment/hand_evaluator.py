@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from itertools import combinations
 
 RANKS = "23456789TJQKA"
+SUITS = "cdhs"
+MAX_HOLDEM_CARDS = 7
 RANK_CLASS_NAMES = {
     8: "Straight Flush",
     7: "Four of a Kind",
@@ -55,8 +57,7 @@ def evaluate_best(cards: list[str]) -> PokerHandRank:
     设计说明：作为本地默认 evaluator，保留原版 treys 的牌型名称能力。
     """
 
-    if len(cards) < 5:
-        raise ValueError("评估德州牌力至少需要五张牌")
+    cards = _validate_cards(cards, min_count=5, max_count=MAX_HOLDEM_CARDS)
     best_score: tuple[int, tuple[int, ...]] = (-1, ())
     best_cards: tuple[str, ...] = ()
     for combo in combinations(cards, 5):
@@ -82,8 +83,7 @@ def score_five(cards: list[str]) -> tuple[int, tuple[int, ...]]:
     设计说明：覆盖标准德州扑克九类牌型，含 A2345 轮子顺。
     """
 
-    if len(cards) != 5:
-        raise ValueError("score_five 需要恰好五张牌")
+    cards = _validate_cards(cards, min_count=5, max_count=5)
     ranks = sorted((RANKS.index(card[0]) + 2 for card in cards), reverse=True)
     suits = [card[1] for card in cards]
     counts = {rank: ranks.count(rank) for rank in set(ranks)}
@@ -113,6 +113,30 @@ def score_five(cards: list[str]) -> tuple[int, tuple[int, ...]]:
         kickers = tuple(rank for rank in ranks if rank != pair)
         return (1, (pair, *kickers))
     return (0, tuple(ranks))
+
+
+def _validate_cards(cards: list[str], min_count: int, max_count: int) -> list[str]:
+    if not isinstance(cards, list):
+        raise ValueError("cards must be a list of two-character card codes")
+    if len(cards) < min_count or len(cards) > max_count:
+        raise ValueError(f"expected {min_count} to {max_count} cards, got {len(cards)}")
+    normalized = [_normalize_card(card) for card in cards]
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(f"duplicate cards are not allowed: {cards!r}")
+    return normalized
+
+
+def _normalize_card(card: str) -> str:
+    if not isinstance(card, str):
+        raise ValueError(f"card code must be a string, got {type(card).__name__}")
+    value = card.strip()
+    if len(value) != 2:
+        raise ValueError(f"invalid card code {card!r}; expected rank+suit such as 'As'")
+    rank = value[0].upper()
+    suit = value[1].lower()
+    if rank not in RANKS or suit not in SUITS:
+        raise ValueError(f"invalid card code {card!r}; valid ranks={RANKS}, suits={SUITS}")
+    return rank + suit
 
 
 def split_side_pots(

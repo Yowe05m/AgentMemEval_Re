@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 
 from agentmemeval.core.domain import (
@@ -21,8 +22,13 @@ from agentmemeval.core.domain import (
 )
 from agentmemeval.core.protocols import LLMClient, MemoryMechanism
 from agentmemeval.environment.action_guard import ActionGuard
+from agentmemeval.environment.raise_sizing import build_raise_sizing_plan
 from agentmemeval.llm.schemas import LLMCallStats, LLMRequest
-from agentmemeval.prompts.decision import render_system_prompt, render_user_prompt
+from agentmemeval.prompts.decision import (
+    PROMPT_TEMPLATE_VERSION,
+    render_system_prompt,
+    render_user_prompt,
+)
 
 
 class LLMDecisionAgent:
@@ -47,6 +53,7 @@ class LLMDecisionAgent:
         llm_client: LLMClient,
         model: str = "mock-deterministic-v1",
         guard: ActionGuard | None = None,
+        raise_sizing_policy: str = "native_no_limit",
     ) -> None:
         """
         功能：初始化通用 Agent。
@@ -67,6 +74,7 @@ class LLMDecisionAgent:
         self.llm_client = llm_client
         self.model = model
         self.guard = guard or ActionGuard()
+        self.raise_sizing_policy = raise_sizing_policy
 
     def decide(
         self,
@@ -83,20 +91,29 @@ class LLMDecisionAgent:
         """
 
         context = self.memory.build_context(observation)
+        raise_sizing = build_raise_sizing_plan(observation, self.raise_sizing_policy)
         system_prompt = render_system_prompt(context)
-        user_prompt = render_user_prompt(observation, context)
+        user_prompt = render_user_prompt(observation, context, raise_sizing=raise_sizing)
         request = LLMRequest(
             observation=observation,
             memory_context=context,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             provider_config={"model": self.model},
-            metadata={"seed": observation.seed},
+            metadata={
+                "seed": observation.seed,
+                "raise_sizing": raise_sizing.to_dict(),
+            },
         )
         started = time.perf_counter()
         raw_decision = self.llm_client.generate_structured(request, ActionDecision)
         elapsed_ms = (time.perf_counter() - started) * 1000
-        guard_result = self.guard.guard(raw_decision, observation.legal_actions, strict=False)
+        guard_result = self.guard.guard(
+            raw_decision,
+            observation.legal_actions,
+            strict=False,
+            allowed_raise_amounts=raise_sizing.allowed_amounts,
+        )
         stats = LLMCallStats(
             provider=getattr(self.llm_client, "provider", "unknown"),
             model=getattr(self.llm_client, "model", self.model),
@@ -110,6 +127,14 @@ class LLMDecisionAgent:
             "guard_errors": list(guard_result.errors),
             "fallback_used": guard_result.fallback_used,
             "llm": stats.to_dict(),
+            "raise_sizing": raise_sizing.to_dict(),
+            "prompt": {
+                "template_version": PROMPT_TEMPLATE_VERSION,
+                "system_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
+                "user_sha256": hashlib.sha256(user_prompt.encode("utf-8")).hexdigest(),
+                "system_chars": len(system_prompt),
+                "user_chars": len(user_prompt),
+            },
         }
         return guard_result.action, context, metadata
 

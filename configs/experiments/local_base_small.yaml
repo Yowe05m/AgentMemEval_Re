@@ -1,0 +1,46 @@
+extends: ../base.yaml
+
+provider:
+  provider: openai_compatible
+  model: qwen/qwen3.5-9b
+  base_url_env: LOCAL_LLM_BASE_URL
+  api_key_env: LOCAL_LLM_API_KEY
+  api_key_required: false
+  temperature: 0.0
+  max_output_tokens: 1024
+  timeout_seconds: 120
+  max_retries: 1
+  rate_limit_policy: local_manual
+  structured_output_mode: json_schema
+
+agent:
+  mechanism: fact
+  raise_sizing_policy: local_discrete
+  memory_scope: per_agent
+  top_k: 6
+  window_size: 6
+  sweep_every: 2
+  evidence_k: 4
+  max_records: 300
+
+opponent_agent:
+  mechanism: no_memory
+  raise_sizing_policy: local_discrete
+  memory_scope: per_agent
+
+heldout_agent:
+  mechanism: no_memory
+  raise_sizing_policy: local_discrete
+  memory_scope: per_agent
+
+experiment:
+  scenario: fixed_evolving_table
+  seed: 20260709
+  output_root: outputs
+  train_hands: 12
+  test_hands: 4
+  table_size: 4
+  target_agent_id: agent_00
+  update_memory_train: true
+  update_memory_test: false
+  all_agents_same_mechanism: false

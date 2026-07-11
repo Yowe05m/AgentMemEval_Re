@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 from agentmemeval.agents.base import LLMDecisionAgent
 from agentmemeval.agents.llm_agent import build_agent
 from agentmemeval.analysis.plots import plot_stack_curves
@@ -67,12 +69,14 @@ class RotatingTableScenario:
         scheduler = TableRotationScheduler(agent_ids, table_size=table_size, seed=seed, mode=mode)
         executed_rounds: list[RotationRound] = []
         hand_counter = 0
+        table_hand_counters: dict[str, int] = defaultdict(int)
         for round_index in range(rounds):
             rotation = scheduler.schedule_round(round_index)
             executed_rounds.append(rotation)
             artifacts.log_event({"event": "rotation", **rotation.to_dict()})
             for table_assignment in rotation.tables:
                 for local_hand in range(hands_per_round):
+                    table_hand_index = table_hand_counters[table_assignment.table_id]
                     result = run_single_hand(
                         agents=agents,
                         table_id=table_assignment.table_id,
@@ -91,7 +95,10 @@ class RotatingTableScenario:
                         max_raises_per_street=max_raises,
                         update_memory=update_memory,
                         artifacts=artifacts,
+                        dealer_index=table_hand_index % len(table_assignment.seats),
+                        hand_number=table_hand_index + 1,
                     )
+                    table_hand_counters[table_assignment.table_id] += 1
                     hand_counter += 1
                     if rebuy_busted:
                         for agent_id, stack in list(result.final_stacks.items()):

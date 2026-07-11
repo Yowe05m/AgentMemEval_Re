@@ -176,7 +176,10 @@ class FactExprSyncMemory:
         return {
             "mechanism": self.name,
             "fact_count": fact["fact_count"],
+            "eligible_fact_count": fact.get("eligible_fact_count", fact["fact_count"]),
+            "excluded_fallback_fact_count": fact.get("excluded_fallback_fact_count", 0),
             "experience_updates": expr["experience_updates"],
+            "skipped_fallback_trajectories": expr.get("skipped_fallback_trajectories", 0),
             "experience_chars": expr.get("experience_chars", 0),
             "last_retrieved_fact_ids": fact.get("last_retrieved_fact_ids", []),
         }

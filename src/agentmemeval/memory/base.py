@@ -150,3 +150,26 @@ def filter_records_by_scope(
     if scope == "per_agent":
         return [record for record in records if record.agent_id == observation.agent_id]
     return [record for record in records if record.agent_id == observation.agent_id]
+
+
+def trajectory_quality(trajectory: HandTrajectory) -> dict[str, int | bool]:
+    """Summarize guard interventions before a trajectory is used for learning."""
+
+    fallback_count = sum(
+        bool(event.llm_metadata.get("fallback_used"))
+        for event in trajectory.decision_events
+    )
+    repaired_count = sum(
+        bool(event.llm_metadata.get("guard_repaired"))
+        for event in trajectory.decision_events
+    )
+    action_mismatch_count = sum(
+        event.decision.action_type != event.committed_action.action_type
+        for event in trajectory.decision_events
+    )
+    return {
+        "fallback_count": fallback_count,
+        "repaired_count": repaired_count,
+        "action_mismatch_count": action_mismatch_count,
+        "memory_eligible": fallback_count == 0 and action_mismatch_count == 0,
+    }

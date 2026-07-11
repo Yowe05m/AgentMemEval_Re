@@ -18,7 +18,7 @@ from agentmemeval.core.domain import (
     MemorySnapshot,
 )
 from agentmemeval.environment.observation import observation_to_compact_text
-from agentmemeval.memory.base import filter_records_by_scope
+from agentmemeval.memory.base import filter_records_by_scope, trajectory_quality
 from agentmemeval.memory.rag import build_retrieval_query, hybrid_top_k_records
 from agentmemeval.memory.retrievers import observation_features, top_k_records
 
@@ -84,7 +84,10 @@ class FactualMemory:
         设计说明：检索过滤先按作用域执行，再按可解释特征排序。
         """
 
-        candidates = filter_records_by_scope(self.records, observation, self.scope)
+        eligible_records = [
+            record for record in self.records if record.source.get("memory_eligible", True)
+        ]
+        candidates = filter_records_by_scope(eligible_records, observation, self.scope)
         if self.retrieval_backend == "feature_jaccard":
             scored = top_k_records(observation, candidates, self.top_k)
             retrieved = [record for record, _score in scored]
@@ -128,6 +131,7 @@ class FactualMemory:
                 "retrieved_fact_ids": list(self.last_retrieval),
                 "retrieval_scores": list(self.last_scores),
                 "candidate_count": len(candidates),
+                "excluded_fallback_fact_count": len(self.records) - len(eligible_records),
             },
         )
 
@@ -156,6 +160,7 @@ class FactualMemory:
         if not trajectory.decision_events:
             return
         last_event = trajectory.decision_events[-1]
+        quality = trajectory_quality(trajectory)
         decisions = [_decision_view(event) for event in trajectory.decision_events]
         action_summary = "; ".join(
             f"{item['phase']}:{item['action_type']}"
@@ -182,6 +187,7 @@ class FactualMemory:
                 "retrieval_query": build_retrieval_query(last_event.observation),
                 "fact_text": fact_text,
                 "compact_state": observation_to_compact_text(last_event.observation),
+                **quality,
             },
         )
         self.records.append(record)
@@ -203,6 +209,7 @@ class FactualMemory:
             agent_id=self.agent_id,
             scope=self.scope,
             payload={
+                "schema_version": 2,
                 "top_k": self.top_k,
                 "max_records": self.max_records,
                 "retrieval_backend": self.retrieval_backend,
@@ -231,10 +238,17 @@ class FactualMemory:
         )
         self.semantic_weight = float(snapshot.payload.get("semantic_weight", self.semantic_weight))
         self.feature_weight = float(snapshot.payload.get("feature_weight", self.feature_weight))
-        self.records = [
-            FactualMemoryRecord(**record)
-            for record in snapshot.payload.get("records", [])
-        ]
+        schema_version = int(snapshot.payload.get("schema_version", 1))
+        restored_records: list[FactualMemoryRecord] = []
+        for raw_record in snapshot.payload.get("records", []):
+            record = dict(raw_record)
+            source = dict(record.get("source", {}))
+            if schema_version < 2 and "memory_eligible" not in source:
+                source["memory_eligible"] = False
+                source["legacy_unverified"] = True
+            record["source"] = source
+            restored_records.append(FactualMemoryRecord(**record))
+        self.records = restored_records
 
     def metrics(self) -> dict[str, object]:
         """
@@ -249,6 +263,12 @@ class FactualMemory:
         return {
             "mechanism": self.name,
             "fact_count": len(self.records),
+            "eligible_fact_count": sum(
+                record.source.get("memory_eligible", True) for record in self.records
+            ),
+            "excluded_fallback_fact_count": sum(
+                not record.source.get("memory_eligible", True) for record in self.records
+            ),
             "experience_updates": 0,
             "last_retrieved_fact_ids": list(self.last_retrieval),
             "retrieval_backend": self.retrieval_backend,
@@ -274,8 +294,12 @@ def _decision_view(event: DecisionEvent) -> dict[str, object]:
         "pot_before": event.observation.pot,
         "to_call": event.observation.to_call,
         "action_type": event.committed_action.action_type,
+        "raw_action_type": event.decision.action_type,
+        "committed_action_type": event.committed_action.action_type,
         "amount": event.committed_action.amount,
         "intent": event.decision.reason_summary or event.committed_action.reason_summary,
+        "guard_repaired": bool(event.llm_metadata.get("guard_repaired")),
+        "fallback_used": bool(event.llm_metadata.get("fallback_used")),
     }
 
 

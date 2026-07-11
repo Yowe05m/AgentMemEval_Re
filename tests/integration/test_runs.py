@@ -6,6 +6,7 @@
 不负责：不调用真实在线 API。
 """
 
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -75,9 +76,30 @@ def test_fixed_table_run_and_report() -> None:
     result = run_resolved_config(config)
     run_dir = Path(result.artifacts["run_dir"])
     assert (run_dir / "manifest.json").exists()
+    assert (run_dir / "protocol_audit.json").exists()
     assert (run_dir / "memory_snapshots" / "agent_00_after_train.json").exists()
     rebuilt = rebuild_report(run_dir, big_blind=2)
     assert Path(rebuilt["report_path"]).exists()
+    hands = [
+        json.loads(line)
+        for line in (run_dir / "hand_summaries.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    train_hands = [hand for hand in hands if hand["stage"] == "train"]
+    assert [hand["dealer_index"] for hand in train_hands] == [0, 1]
+    assert [hand["hand_number"] for hand in train_hands] == [1, 2]
+    assert train_hands[0]["small_blind_agent_id"] == "agent_01"
+    assert train_hands[1]["small_blind_agent_id"] == "agent_02"
+    events = [
+        json.loads(line)
+        for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    action_event = next(event for event in events if event.get("event") == "action")
+    assert action_event["prompt"]["template_version"] == "2026-07-11-v3"
+    assert len(action_event["prompt"]["user_sha256"]) == 64
+    assert "stage_per_agent" in rebuilt["metrics"]["primary_metrics"]
+    protocol = json.loads((run_dir / "protocol_audit.json").read_text(encoding="utf-8"))
+    assert protocol["paper_evolving_roster_match"] is False
+    assert protocol["dealer_rotation"] == "hand_index modulo table_size"
 
 
 def test_rotating_20_agents_run() -> None:

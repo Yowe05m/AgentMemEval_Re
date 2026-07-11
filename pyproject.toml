@@ -18,6 +18,9 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.5",
 ]
+poker = [
+  "treys>=0.1.8",
+]
 
 [project.scripts]
 agentmemeval = "agentmemeval.cli.main:main"

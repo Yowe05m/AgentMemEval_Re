@@ -1,0 +1,9 @@
+extends: local_paper_exp2_persona_intj.yaml
+
+agent:
+  mechanism: fact_expr_sync
+  memory_scope: per_agent
+  top_k: 8
+  window_size: 8
+  max_records: 800
+  persona: ISTP

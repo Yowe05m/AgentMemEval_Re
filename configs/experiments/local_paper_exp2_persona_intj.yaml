@@ -1,0 +1,21 @@
+extends: local_base_small.yaml
+
+agent:
+  mechanism: fact_expr_sync
+  memory_scope: per_agent
+  top_k: 8
+  window_size: 8
+  max_records: 800
+  persona: INTJ
+
+experiment:
+  scenario: fixed_evolving_table
+  seed: 42
+  output_root: outputs
+  train_hands: 150
+  test_hands: 25
+  table_size: 4
+  target_agent_id: agent_00
+  update_memory_train: true
+  update_memory_test: false
+  all_agents_same_mechanism: false

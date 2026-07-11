@@ -64,6 +64,7 @@ class ActionGuard:
         decision: ActionDecision,
         legal_actions: LegalActionSet,
         strict: bool = False,
+        allowed_raise_amounts: tuple[int, ...] | None = None,
     ) -> GuardResult:
         """
         功能：将候选动作校验为合法动作。
@@ -77,15 +78,32 @@ class ActionGuard:
         设计说明：生产实验采用回退保证赛程完成，单元测试可用 strict 断言边界。
         """
 
-        errors = self._validate(decision, legal_actions)
+        errors = self._validate(decision, legal_actions, allowed_raise_amounts)
         if not errors:
             return GuardResult(action=decision)
         if strict:
             raise ActionValidationError("；".join(errors))
+        repaired_raise = self._repair_raise(
+            decision,
+            legal_actions,
+            allowed_raise_amounts,
+        )
+        if repaired_raise is not None:
+            return GuardResult(
+                action=repaired_raise,
+                repaired=True,
+                errors=errors,
+                fallback_used=False,
+            )
         fallback = self._fallback(legal_actions)
         return GuardResult(action=fallback, repaired=True, errors=errors, fallback_used=True)
 
-    def _validate(self, decision: ActionDecision, legal_actions: LegalActionSet) -> list[str]:
+    def _validate(
+        self,
+        decision: ActionDecision,
+        legal_actions: LegalActionSet,
+        allowed_raise_amounts: tuple[int, ...] | None = None,
+    ) -> list[str]:
         """
         功能：收集动作不合法的原因。
         参数：
@@ -109,9 +127,46 @@ class ActionGuard:
                 errors.append(f"raise amount={decision.amount} 小于最小值 {rule.min_amount}")
             elif rule.max_amount is not None and decision.amount > rule.max_amount:
                 errors.append(f"raise amount={decision.amount} 大于最大值 {rule.max_amount}")
+            elif (
+                allowed_raise_amounts is not None
+                and decision.amount not in allowed_raise_amounts
+            ):
+                errors.append(
+                    f"raise amount={decision.amount} 不在离散候选 {list(allowed_raise_amounts)}"
+                )
         elif decision.amount not in (None, 0):
             errors.append(f"{decision.action_type} 动作不应携带 amount={decision.amount}")
         return errors
+
+    def _repair_raise(
+        self,
+        decision: ActionDecision,
+        legal_actions: LegalActionSet,
+        allowed_raise_amounts: tuple[int, ...] | None = None,
+    ) -> ActionDecision | None:
+        """把方向正确但金额越界的 raise 裁剪到当前合法区间。"""
+
+        if decision.action_type != "raise":
+            return None
+        rule = legal_actions.rule_for("raise")
+        if rule is None or rule.min_amount is None:
+            return None
+        amount = rule.min_amount if decision.amount is None else decision.amount
+        amount = max(rule.min_amount, amount)
+        if rule.max_amount is not None:
+            amount = min(rule.max_amount, amount)
+        if allowed_raise_amounts:
+            amount = min(
+                allowed_raise_amounts,
+                key=lambda candidate: (abs(candidate - amount), candidate),
+            )
+        return ActionDecision(
+            action_type="raise",
+            amount=amount,
+            confidence=decision.confidence,
+            reason_summary=decision.reason_summary,
+            raw_response=dict(decision.raw_response),
+        )
 
     def _fallback(self, legal_actions: LegalActionSet) -> ActionDecision:
         """
@@ -164,11 +219,14 @@ def coerce_decision(payload: object) -> ActionDecision:
             amount = int(amount)
         except (TypeError, ValueError) as exc:
             raise ActionValidationError(f"amount 不是整数：{payload!r}") from exc
+    if action_type != "raise":
+        amount = None
     confidence = payload.get("confidence", 1.0)
     try:
         confidence = float(confidence)
     except (TypeError, ValueError):
         confidence = 0.0
+    confidence = min(1.0, max(0.0, confidence))
     reason = payload.get("reason_summary") or payload.get("reason") or ""
     return ActionDecision(
         action_type=action_type,

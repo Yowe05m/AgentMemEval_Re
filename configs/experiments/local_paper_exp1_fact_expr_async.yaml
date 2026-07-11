@@ -1,0 +1,9 @@
+extends: local_paper_exp1_no_memory.yaml
+
+agent:
+  mechanism: fact_expr_async
+  top_k: 8
+  window_size: 8
+  sweep_every: 3
+  evidence_k: 6
+  max_records: 800

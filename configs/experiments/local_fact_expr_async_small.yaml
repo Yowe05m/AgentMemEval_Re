@@ -1,0 +1,8 @@
+extends: local_base_small.yaml
+
+agent:
+  mechanism: fact_expr_async
+  top_k: 6
+  window_size: 6
+  sweep_every: 2
+  evidence_k: 4

@@ -13,21 +13,40 @@ from agentmemeval.core.errors import ActionValidationError
 from agentmemeval.environment.action_guard import ActionGuard, coerce_decision
 
 
-def test_action_guard_fallbacks_to_check() -> None:
+def test_action_guard_clamps_invalid_raise_without_fallback() -> None:
     """
-    功能：验证非法 raise 会回退到 check。
+    功能：验证方向正确但金额越界的 raise 会裁剪到合法下界。
     参数：无。
     返回：无。
     副作用：无。
     异常：断言失败时由 pytest 报告。
-    设计说明：解析失败不能变成随机激进动作。
+    设计说明：保留模型动作意图，避免金额格式问题被扭曲成 fold/check。
     """
 
     legal = LegalActionSet([LegalAction("fold"), LegalAction("check"), LegalAction("raise", 8, 20)])
     result = ActionGuard().guard(ActionDecision("raise", amount=2), legal)
-    assert result.fallback_used is True
-    assert result.action.action_type == "check"
+    assert result.fallback_used is False
+    assert result.repaired is True
+    assert result.action.action_type == "raise"
+    assert result.action.amount == 8
     assert result.errors
+
+
+def test_guard_repairs_raise_to_nearest_discrete_candidate() -> None:
+    guard = ActionGuard()
+    legal = LegalActionSet(
+        [LegalAction("fold"), LegalAction("call"), LegalAction("raise", 4, 1000)]
+    )
+
+    result = guard.guard(
+        ActionDecision("raise", amount=1000),
+        legal,
+        allowed_raise_amounts=(4, 7),
+    )
+
+    assert result.repaired is True
+    assert result.fallback_used is False
+    assert result.action.amount == 7
 
 
 def test_action_guard_strict_raises_error() -> None:
@@ -58,3 +77,25 @@ def test_coerce_decision_accepts_legacy_type_key() -> None:
     decision = coerce_decision({"type": "call", "amount": None, "reason": "ok"})
     assert decision.action_type == "call"
     assert decision.reason_summary == "ok"
+
+
+def test_coerce_decision_drops_amount_for_non_raise() -> None:
+    """
+    功能：验证兼容模型给 call/check/fold 附带 amount 时自动归一。
+    参数：无。
+    返回：无。
+    副作用：无。
+    异常：断言失败时由 pytest 报告。
+    设计说明：LM Studio 本地模型常把 call 的补齐额写入 amount，不能因此回退成 fold。
+    """
+
+    decision = coerce_decision({"action_type": "call", "amount": 2, "reason": "call 2"})
+    assert decision.action_type == "call"
+    assert decision.amount is None
+
+
+def test_coerce_decision_clamps_confidence() -> None:
+    """Provider 自报置信度必须落入公开 schema 的 0 到 1 范围。"""
+
+    assert coerce_decision({"action_type": "check", "confidence": 3}).confidence == 1.0
+    assert coerce_decision({"action_type": "check", "confidence": -2}).confidence == 0.0

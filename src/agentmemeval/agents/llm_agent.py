@@ -109,4 +109,10 @@ def build_agent(
     """
 
     memory = build_memory(agent_id, config)
-    return LLMDecisionAgent(agent_id, memory, llm_client, model=model)
+    return LLMDecisionAgent(
+        agent_id,
+        memory,
+        llm_client,
+        model=model,
+        raise_sizing_policy=str(config.get("raise_sizing_policy", "native_no_limit")),
+    )

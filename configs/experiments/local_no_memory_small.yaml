@@ -1,0 +1,4 @@
+extends: local_base_small.yaml
+
+agent:
+  mechanism: no_memory

@@ -10,3 +10,5 @@ pytest-cache-files-*/
 __pycache__/
 *.pyc
 *.egg-info/
+code.txt
+docs_merged.md

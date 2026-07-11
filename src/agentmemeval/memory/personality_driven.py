@@ -20,28 +20,48 @@ from agentmemeval.core.protocols import MemoryMechanism
 
 DEFAULT_PERSONAS: dict[str, dict[str, str]] = {
     "INTJ": {
-        "description": "重逻辑、重长期规划，偏好经过验证的规律。",
-        "decision_prompt": "决策时优先要求证据充分，避免无根据冒险。",
-        "filter_prompt": "筛选记忆时优先保留结构清晰、样本支持较强的事实。",
-        "update_prompt": "更新经验时强调校准和反例。",
+        "description": (
+            "你偏好逻辑建模、长期规划和可验证的规律，习惯检查假设是否与证据一致。"
+        ),
+        "decision_prompt": (
+            "先完成与其他人格相同的牌力、位置、赔率和有效筹码分析；"
+            "人格只影响证据权重与接近等价选项的取舍，不得机械映射成固定动作。"
+        ),
+        "filter_prompt": "保留证据链清晰且能被反例校准的记忆，不按单手输赢裁决质量。",
+        "update_prompt": "更新经验时区分决策质量和随机结果，并记录反例。",
     },
     "ENFP": {
-        "description": "好奇、探索、愿意尝试新线。",
-        "decision_prompt": "决策时允许更高探索性，但仍服从合法动作。",
-        "filter_prompt": "筛选记忆时保留新颖和情境差异大的片段。",
-        "update_prompt": "更新经验时记录可能性和灵感，但避免绑定具体玩家。",
+        "description": (
+            "你偏好探索多种可能、关注情境变化和新信息，愿意比较不止一种合理方案。"
+        ),
+        "decision_prompt": (
+            "先完成与其他人格相同的牌力、位置、赔率和有效筹码分析；"
+            "探索性只用于预期收益接近的选项，不得机械映射成固定动作。"
+        ),
+        "filter_prompt": "保留能代表不同情境的记忆，同时维持证据相关性。",
+        "update_prompt": "记录可迁移的新可能性，但不绑定具体玩家身份。",
     },
     "ISTP": {
-        "description": "务实、机会主义、关注即时价格。",
-        "decision_prompt": "决策时优先比较成本和直接收益。",
-        "filter_prompt": "筛选记忆时保留可操作、和当前局面直接相关的事实。",
-        "update_prompt": "更新经验时删除空泛判断。",
+        "description": (
+            "你偏好具体事实、即时反馈和可执行方案，习惯根据当前信息灵活调整。"
+        ),
+        "decision_prompt": (
+            "先完成与其他人格相同的牌力、位置、赔率和有效筹码分析；"
+            "务实性只影响证据表达和接近等价选项的取舍，不得机械映射成固定动作。"
+        ),
+        "filter_prompt": "保留与当前局面直接相关且可操作的事实，但不删除必要反例。",
+        "update_prompt": "把经验写成可执行判断，删除无法验证的空泛表述。",
     },
     "ESFJ": {
-        "description": "稳妥、重视已验证模式和低波动。",
-        "decision_prompt": "决策时偏向降低波动和避免边缘投入。",
-        "filter_prompt": "筛选记忆时优先保留稳定、重复出现的经验。",
-        "update_prompt": "更新经验时强调稳健性。",
+        "description": (
+            "你偏好可重复模式、可靠反馈和情境一致性，重视已有证据是否稳定。"
+        ),
+        "decision_prompt": (
+            "先完成与其他人格相同的牌力、位置、赔率和有效筹码分析；"
+            "稳定性只用于预期收益接近的选项，不得机械映射成固定动作。"
+        ),
+        "filter_prompt": "保留重复出现的模式和必要反例，不按收益正负删除事实。",
+        "update_prompt": "强调结论的复现条件，并保留与结论冲突的证据。",
     },
 }
 
@@ -103,6 +123,7 @@ class PersonalityDrivenMemory:
         """
 
         context = self.wrapped.build_context(observation)
+        raw_fact_count = len(context.facts)
         filtered = self._filter_facts(context.facts)
         context.facts = filtered
         context.persona = {
@@ -113,7 +134,8 @@ class PersonalityDrivenMemory:
             **context.metadata,
             "persona_enabled": True,
             "persona_name": self.persona_name,
-            "raw_fact_count": len(context.facts),
+            "persona_filter_mode": "preserve_retrieval_order",
+            "raw_fact_count": raw_fact_count,
             "filtered_fact_count": len(filtered),
         }
         return context
@@ -210,15 +232,4 @@ class PersonalityDrivenMemory:
         设计说明：这是离线可测的替代逻辑；真实人格 LLM 筛选可替换该函数。
         """
 
-        persona = self.persona_name.upper()
-        if persona == "INTJ":
-            return sorted(
-                facts,
-                key=lambda item: (item.final_reward, item.created_at),
-                reverse=True,
-            )
-        if persona == "ENFP":
-            return list(reversed(facts))
-        if persona == "ESFJ":
-            return [fact for fact in facts if fact.final_reward >= 0] or facts[:1]
-        return facts
+        return list(facts)

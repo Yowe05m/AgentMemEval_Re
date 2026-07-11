@@ -103,8 +103,11 @@ class HoldemEnvironment:
         self.current_bet = 0
         self.current_seat: int | None = None
         self.dealer_index = 0
+        self.small_blind_agent_id: AgentId | None = None
+        self.big_blind_agent_id: AgentId | None = None
         self.acted: set[int] = set()
         self.raise_count = 0
+        self.last_raise_size = 0
         self.action_history: list[dict[str, object]] = []
         self.finished = True
         self.hand_id = "uninitialized"
@@ -133,7 +136,8 @@ class HoldemEnvironment:
         self.seed = seed
         self.rng = make_rng(seed, table_spec.table_id)
         self._hand_counter += 1
-        self.hand_id = f"{table_spec.table_id}-h{self._hand_counter}-{seed}"
+        hand_number = max(1, int(table_spec.hand_number))
+        self.hand_id = f"{table_spec.table_id}-h{hand_number}-{seed}"
         self.players = [
             _PlayerState(agent_id=agent_id, seat=seat, stack=table_spec.starting_stacks[agent_id])
             for seat, agent_id in enumerate(table_spec.agent_ids)
@@ -148,10 +152,13 @@ class HoldemEnvironment:
         self.current_bet = 0
         self.acted = set()
         self.raise_count = 0
+        self.last_raise_size = table_spec.big_blind
         self.action_history = []
         self.finished = False
         self.final_result = None
-        self.dealer_index = (self._hand_counter - 1) % len(self.players)
+        self.dealer_index = int(table_spec.dealer_index) % len(self.players)
+        self.small_blind_agent_id = None
+        self.big_blind_agent_id = None
         for player in self.players:
             player.hole_cards = [self.deck.pop(), self.deck.pop()]
             player.current_bet = 0
@@ -255,8 +262,13 @@ class HoldemEnvironment:
             actions.append(LegalAction("check"))
         else:
             actions.append(LegalAction("call"))
-        if self.raise_count < self.table_spec.max_raises_per_street and player.stack > to_call:
-            min_to = self.current_bet + self.table_spec.big_blind
+        already_acted_facing_short_allin = to_call > 0 and player.seat in self.acted
+        can_raise_again = (
+            self.table_spec.max_raises_per_street <= 0
+            or self.raise_count < self.table_spec.max_raises_per_street
+        )
+        if can_raise_again and player.stack > to_call and not already_acted_facing_short_allin:
+            min_to = self.current_bet + self.last_raise_size
             max_to = player.current_bet + player.stack
             if max_to >= min_to:
                 actions.append(LegalAction("raise", min_amount=min_to, max_amount=max_to))
@@ -302,12 +314,17 @@ class HoldemEnvironment:
                 raise EnvironmentError("raise 动作缺少 amount")
             committed = min(max(0, target - player.current_bet), player.stack)
             old_bet = self.current_bet
+            previous_last_raise = self.last_raise_size
             self._commit(player, committed)
             if player.current_bet > old_bet:
+                raise_increment = player.current_bet - old_bet
                 self.current_bet = player.current_bet
                 rule = legal.rule_for("raise")
-                effective_raise = bool(rule and rule.reopens)
+                effective_raise = bool(
+                    rule and rule.reopens and raise_increment >= previous_last_raise
+                )
                 if effective_raise:
+                    self.last_raise_size = raise_increment
                     self.raise_count += 1
                     self.acted = set()
         self.acted.add(player.seat)
@@ -324,6 +341,7 @@ class HoldemEnvironment:
             "pot_before": pot_before,
             "pot_after": self.pot,
             "effective_raise": effective_raise,
+            "last_raise_size": self.last_raise_size,
         }
         self.action_history.append(event)
         self._advance_after_action(player.seat)
@@ -395,6 +413,8 @@ class HoldemEnvironment:
             bb = self._next_active_player(sb.seat)
         self._commit(sb, min(sb.stack, self.table_spec.small_blind))
         self._commit(bb, min(bb.stack, self.table_spec.big_blind))
+        self.small_blind_agent_id = sb.agent_id
+        self.big_blind_agent_id = bb.agent_id
         self.current_bet = max(sb.current_bet, bb.current_bet)
 
     def _first_preflop_seat(self) -> int | None:
@@ -477,6 +497,7 @@ class HoldemEnvironment:
             player.current_bet = 0
         self.current_bet = 0
         self.raise_count = 0
+        self.last_raise_size = self.table_spec.big_blind if self.table_spec else 0
         self.acted = set()
         self.phase_index += 1
         if self.phase_index == 1:

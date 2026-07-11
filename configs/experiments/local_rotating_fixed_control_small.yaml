@@ -1,0 +1,4 @@
+extends: local_rotating_20_agents_small.yaml
+
+experiment:
+  rotation_mode: fixed

@@ -79,6 +79,8 @@ class FixedTableScenario:
                 max_raises_per_street=max_raises,
                 update_memory=update_train,
                 artifacts=artifacts,
+                dealer_index=hand_index % table_size,
+                hand_number=hand_index + 1,
             )
         train_snapshot_paths = {
             agent_id: artifacts.save_snapshot(
@@ -111,6 +113,8 @@ class FixedTableScenario:
                     max_raises_per_street=max_raises,
                     update_memory=update_test,
                     artifacts=artifacts,
+                    dealer_index=hand_index % table_size,
+                    hand_number=hand_index + 1,
                 )
             agents.update({target_id: heldout_agents[target_id]})
         final_snapshot_paths = {
@@ -120,6 +124,42 @@ class FixedTableScenario:
         hands = artifacts.hand_summaries.read_all()
         events = artifacts.events.read_all()
         memory_metrics = {agent_id: agent.memory_metrics() for agent_id, agent in agents.items()}
+        mechanism_counts: dict[str, int] = {}
+        for agent_id in train_ids:
+            mechanism = str(memory_metrics[agent_id].get("mechanism", "unknown"))
+            mechanism_counts[mechanism] = mechanism_counts.get(mechanism, 0) + 1
+        protocol_audit = {
+            "scenario": self.name,
+            "train_hands": train_hands,
+            "test_hands": test_hands,
+            "table_size": table_size,
+            "target_agent_id": target_id,
+            "train_agent_mechanisms": {
+                agent_id: memory_metrics[agent_id].get("mechanism", "unknown")
+                for agent_id in train_ids
+            },
+            "train_agent_raise_sizing_policies": {
+                agent_id: agents[agent_id].raise_sizing_policy for agent_id in train_ids
+            },
+            "train_mechanism_counts": mechanism_counts,
+            "memory_update_train": update_train,
+            "memory_update_test": update_test,
+            "dealer_rotation": "hand_index modulo table_size",
+            "generalization_schedule": "final_snapshot_only",
+            "paper_evolving_roster_match": mechanism_counts
+            == {
+                "fact": 2,
+                "expr": 2,
+                "fact_expr_sync": 2,
+                "fact_expr_async": 2,
+            },
+            "known_protocol_gaps": [
+                "Only the configured target is evaluated against heldout opponents.",
+                "Generalization runs only after the final training hand, not every 10 hands.",
+                "Experience revisions are deterministic Python summaries, not LLM revisions.",
+            ],
+        }
+        protocol_audit_path = artifacts.write_json("protocol_audit.json", protocol_audit)
         metrics = compute_metrics(hands, events, big_blind=big_blind, memory_metrics=memory_metrics)
         aggregate = aggregate_metrics([metrics])
         plot_path = plot_stack_curves(hands, artifacts.run_dir / "plots")
@@ -148,6 +188,7 @@ class FixedTableScenario:
                 "train_snapshots": train_snapshot_paths,
                 "final_snapshots": final_snapshot_paths,
                 "plot": plot_path,
+                "protocol_audit": protocol_audit_path,
             },
             notes=[
                 "固定桌训练和泛化测试均可离线运行。",

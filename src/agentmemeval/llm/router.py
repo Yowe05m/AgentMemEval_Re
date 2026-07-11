@@ -12,9 +12,10 @@ from agentmemeval.core.errors import ProviderError
 from agentmemeval.core.protocols import LLMClient
 from agentmemeval.llm.mock import MockLLMClient
 from agentmemeval.llm.providers.openai_compatible import OpenAICompatibleClient
-from agentmemeval.llm.providers.placeholders import PlaceholderProviderClient
-
-PLACEHOLDER_PROVIDERS = {"openai", "anthropic", "google", "xai", "deepseek", "qwen"}
+from agentmemeval.llm.providers.placeholders import (
+    PLACEHOLDER_PROVIDERS,
+    PlaceholderProviderClient,
+)
 
 
 def build_llm_client(config: dict[str, object]) -> LLMClient:

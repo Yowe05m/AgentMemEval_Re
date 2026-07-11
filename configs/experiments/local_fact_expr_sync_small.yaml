@@ -1,0 +1,6 @@
+extends: local_base_small.yaml
+
+agent:
+  mechanism: fact_expr_sync
+  top_k: 6
+  window_size: 6

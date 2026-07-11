@@ -1,0 +1,12 @@
+provider:
+  provider: openai_compatible
+  model: qwen/qwen3.5-9b
+  base_url_env: LOCAL_LLM_BASE_URL
+  api_key_env: LOCAL_LLM_API_KEY
+  api_key_required: false
+  temperature: 0.0
+  max_output_tokens: 1024
+  timeout_seconds: 120
+  max_retries: 1
+  rate_limit_policy: local_manual
+  structured_output_mode: json_schema

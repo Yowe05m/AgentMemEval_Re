@@ -424,6 +424,8 @@ class TableSpec(Serializable):
     small_blind: int = 1
     big_blind: int = 2
     max_raises_per_street: int = 4
+    dealer_index: int = 0
+    hand_number: int = 1
 
 
 @dataclass(slots=True)

@@ -1,0 +1,7 @@
+extends: local_paper_exp1_no_memory.yaml
+
+agent:
+  mechanism: fact_expr_sync
+  top_k: 8
+  window_size: 8
+  max_records: 800

@@ -27,6 +27,22 @@ def load_config(path: str | Path) -> dict[str, Any]:
     设计说明：配置集中在 YAML，避免实验参数散落在 Python 常量中。
     """
 
+    config = load_raw_config(path)
+    validate_config(config)
+    return config
+
+
+def load_raw_config(path: str | Path) -> dict[str, Any]:
+    """
+    功能：加载 YAML 配置并处理 extends，但不做实验字段校验。
+    参数：
+        path：配置文件路径。
+    返回：合并后的原始配置字典。
+    副作用：读取文件。
+    异常：文件不存在或 YAML 结构非法时抛出 ConfigError。
+    设计说明：doctor 需要读取 provider-only 配置；run 仍使用 load_config 做完整校验。
+    """
+
     config_path = Path(path).resolve()
     if not config_path.exists():
         raise ConfigError(f"配置文件不存在：{config_path}")
@@ -34,9 +50,8 @@ def load_config(path: str | Path) -> dict[str, Any]:
     parent_name = config.pop("extends", None)
     if parent_name:
         parent_path = (config_path.parent / str(parent_name)).resolve()
-        parent = load_config(parent_path)
+        parent = load_raw_config(parent_path)
         config = deep_merge(parent, config)
-    validate_config(config)
     config["_config_path"] = str(config_path)
     return config
 

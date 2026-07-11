@@ -34,6 +34,8 @@ def run_single_hand(
     max_raises_per_street: int,
     update_memory: bool,
     artifacts: ArtifactManager,
+    dealer_index: int = 0,
+    hand_number: int = 1,
     max_actions: int = 200,
 ) -> HandResult:
     """
@@ -64,6 +66,8 @@ def run_single_hand(
         small_blind=small_blind,
         big_blind=big_blind,
         max_raises_per_street=max_raises_per_street,
+        dealer_index=dealer_index,
+        hand_number=hand_number,
     )
     env = HoldemEnvironment()
     env.reset(table_spec, seed=seed)
@@ -98,6 +102,8 @@ def run_single_hand(
                 "guard_errors": metadata.get("guard_errors", []),
                 "fallback_used": metadata.get("fallback_used", False),
                 "llm": metadata.get("llm", {}),
+                "prompt": metadata.get("prompt", {}),
+                "raise_sizing": metadata.get("raise_sizing", {}),
                 "raw_decision": metadata.get("raw_decision", {}),
                 "memory_context": memory_context.to_dict(),
             }
@@ -137,6 +143,11 @@ def run_single_hand(
             "table_id": table_id,
             "hand_id": result.hand_id,
             "seed": seed,
+            "hand_number": hand_number,
+            "dealer_index": env.dealer_index,
+            "dealer_agent_id": agent_ids[env.dealer_index],
+            "small_blind_agent_id": env.small_blind_agent_id,
+            "big_blind_agent_id": env.big_blind_agent_id,
             "agent_ids": list(agent_ids),
             "rewards": dict(result.rewards),
             "final_stacks": dict(result.final_stacks),
