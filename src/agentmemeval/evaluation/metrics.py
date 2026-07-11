@@ -103,6 +103,24 @@ def compute_metrics(
             },
             "decision_quality": {"combined": quality, "by_stage": stage_quality},
             "raise_sizing": _raise_sizing_quality(events),
+            "call_risk": {
+                "combined": _call_risk_quality(hand_summaries, events),
+                "by_stage": {
+                    stage: _call_risk_quality(
+                        [
+                            hand
+                            for hand in hand_summaries
+                            if str(hand.get("stage", "unknown")) == stage
+                        ],
+                        [
+                            event
+                            for event in events
+                            if str(event.get("stage", "unknown")) == stage
+                        ],
+                    )
+                    for stage in stages
+                },
+            },
         },
         "run_counters": {
             "hands": len(hand_summaries),
@@ -263,6 +281,69 @@ def _raise_sizing_quality(events: list[dict[str, Any]]) -> dict[str, Any]:
             }
             for policy in policies
         }
+    }
+
+
+def _call_risk_quality(
+    hand_summaries: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Audit calls that commit at least half the remaining stack or go all-in."""
+
+    rewards = {
+        (str(hand.get("hand_id")), str(agent_id)): int(reward)
+        for hand in hand_summaries
+        for agent_id, reward in (hand.get("rewards", {}) or {}).items()
+    }
+    calls = [
+        event
+        for event in events
+        if event.get("event") == "action" and event.get("action_type") == "call"
+    ]
+    by_agent_events: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for event in calls:
+        by_agent_events[str(event.get("agent_id"))].append(event)
+
+    def summarize(agent_calls: list[dict[str, Any]]) -> dict[str, Any]:
+        high_risk = [
+            event
+            for event in agent_calls
+            if float((event.get("call_risk") or {}).get("stack_fraction", 0.0)) >= 0.5
+        ]
+        all_in = [
+            event
+            for event in agent_calls
+            if bool((event.get("call_risk") or {}).get("is_all_in", False))
+        ]
+        high_risk_hands = {
+            (str(event.get("hand_id")), str(event.get("agent_id"))) for event in high_risk
+        }
+        made_hands: dict[str, int] = defaultdict(int)
+        for event in high_risk:
+            made_hand = str((event.get("call_risk") or {}).get("made_hand_class", "unknown"))
+            made_hands[made_hand] += 1
+        count = len(agent_calls)
+        return {
+            "call_count": count,
+            "high_risk_call_count": len(high_risk),
+            "high_risk_call_rate": len(high_risk) / count if count else 0.0,
+            "all_in_call_count": len(all_in),
+            "high_risk_hand_count": len(high_risk_hands),
+            "high_risk_hand_net_reward": sum(
+                rewards.get(hand_agent, 0) for hand_agent in high_risk_hands
+            ),
+            "high_risk_made_hand_counts": dict(sorted(made_hands.items())),
+            "missing_call_risk_metadata": sum(
+                not isinstance(event.get("call_risk"), dict) for event in agent_calls
+            ),
+        }
+
+    return {
+        "all_agents": summarize(calls),
+        "by_agent": {
+            agent_id: summarize(agent_calls)
+            for agent_id, agent_calls in sorted(by_agent_events.items())
+        },
     }
 
 

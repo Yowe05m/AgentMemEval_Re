@@ -18,6 +18,7 @@ from agentmemeval.core.domain import (
     HandTrajectory,
     TableSpec,
 )
+from agentmemeval.environment.action_risk import build_call_risk
 from agentmemeval.environment.holdem_adapter import HoldemEnvironment
 from agentmemeval.storage.artifacts import ArtifactManager
 
@@ -78,6 +79,7 @@ def run_single_hand(
         if current is None:
             break
         observation = env.current_observation(current)
+        call_risk = build_call_risk(observation)
         action, memory_context, metadata = agents[current].decide(observation)
         raw_payload = metadata.get("raw_decision", action.to_dict())
         raw_decision = ActionDecision(**raw_payload) if isinstance(raw_payload, dict) else action
@@ -104,6 +106,7 @@ def run_single_hand(
                 "llm": metadata.get("llm", {}),
                 "prompt": metadata.get("prompt", {}),
                 "raise_sizing": metadata.get("raise_sizing", {}),
+                "call_risk": call_risk.to_dict(),
                 "raw_decision": metadata.get("raw_decision", {}),
                 "memory_context": memory_context.to_dict(),
             }

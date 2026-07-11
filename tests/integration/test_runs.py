@@ -96,6 +96,8 @@ def test_fixed_table_run_and_report() -> None:
     action_event = next(event for event in events if event.get("event") == "action")
     assert action_event["prompt"]["template_version"] == "2026-07-11-v3"
     assert len(action_event["prompt"]["user_sha256"]) == 64
+    assert "call_cost" in action_event["call_risk"]
+    assert "made_hand_class" in action_event["call_risk"]
     assert "stage_per_agent" in rebuilt["metrics"]["primary_metrics"]
     protocol = json.loads((run_dir / "protocol_audit.json").read_text(encoding="utf-8"))
     assert protocol["paper_evolving_roster_match"] is False

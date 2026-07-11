@@ -108,3 +108,41 @@ def test_metrics_audit_native_max_raise_and_discrete_compliance() -> None:
     assert audit["raise_count"] == 1
     assert audit["native_max_selected_count"] == 0
     assert audit["discrete_enum_violation_count"] == 0
+
+
+def test_metrics_audit_high_risk_calls_by_agent_and_stage() -> None:
+    hands = [
+        {
+            "stage": "train",
+            "hand_id": "train-1",
+            "rewards": {"agent_00": -100},
+            "showdown_ranks": {},
+        }
+    ]
+    event = {
+        "event": "action",
+        "stage": "train",
+        "agent_id": "agent_00",
+        "hand_id": "train-1",
+        "action_type": "call",
+        "amount": None,
+        "to_call": 100,
+        "raw_decision": {"action_type": "call"},
+        "call_risk": {
+            "stack_before": 100,
+            "call_cost": 100,
+            "stack_fraction": 1.0,
+            "required_equity": 0.4,
+            "is_all_in": True,
+            "made_hand_class": "Pair",
+        },
+    }
+
+    metrics = compute_metrics(hands, [event], big_blind=2)
+    audit = metrics["exploratory_metrics"]["call_risk"]
+    combined = audit["combined"]["by_agent"]["agent_00"]
+    assert combined["high_risk_call_count"] == 1
+    assert combined["all_in_call_count"] == 1
+    assert combined["high_risk_hand_net_reward"] == -100
+    assert combined["high_risk_made_hand_counts"] == {"Pair": 1}
+    assert audit["by_stage"]["train"]["all_agents"]["high_risk_call_count"] == 1
