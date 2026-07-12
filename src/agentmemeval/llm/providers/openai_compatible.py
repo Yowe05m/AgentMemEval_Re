@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import TypeVar
 
 from agentmemeval.core.domain import ActionDecision
@@ -22,6 +24,14 @@ from agentmemeval.llm.retry import retry_call
 from agentmemeval.llm.schemas import LLMRequest
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class _CompletionResult:
+    """OpenAI-compatible 单次完成结果及停止原因。"""
+
+    content: str
+    finish_reason: str
 
 
 class OpenAICompatibleClient:
@@ -78,11 +88,17 @@ class OpenAICompatibleClient:
             raise ProviderError(f"{self.provider} 缺少环境变量 {self.api_key_env}")
 
         def _call() -> ActionDecision:
-            content = self._post(base_url, api_key or "", request)
+            completion = self._post(base_url, api_key or "", request)
             try:
-                payload = _load_json_object(content)
-            except json.JSONDecodeError as exc:
-                raise ProviderError(f"模型响应不是 JSON：{content[:200]}") from exc
+                payload = _load_json_object(completion.content)
+            except json.JSONDecodeError as first_error:
+                payload = self._repair_or_recover_json(
+                    base_url,
+                    api_key or "",
+                    request,
+                    completion,
+                    first_error,
+                )
             return coerce_decision(payload)
 
         result, _ = retry_call(_call, self.max_retries)
@@ -116,7 +132,66 @@ class OpenAICompatibleClient:
             ),
         }
 
-    def _post(self, base_url: str, api_key: str, request: LLMRequest) -> str:
+    def _repair_or_recover_json(
+        self,
+        base_url: str,
+        api_key: str,
+        request: LLMRequest,
+        completion: _CompletionResult,
+        first_error: json.JSONDecodeError,
+    ) -> dict[str, object]:
+        """用紧凑请求修复截断 JSON，失败后保守恢复完整动作字段。"""
+
+        repair_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是 JSON 修复器。只输出一个符合 schema 的 JSON 对象，不要解释。"
+                    "reason_summary 最多 40 个汉字；不得输出思维过程。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "修复下面未完成或格式错误的动作 JSON。保留已经明确的动作字段；"
+                    "若理由被截断，将其改写为一句极短摘要。\n"
+                    + completion.content
+                ),
+            },
+        ]
+        repair_error: Exception | None = None
+        try:
+            repaired = self._post(
+                base_url,
+                api_key,
+                request,
+                messages=repair_messages,
+                max_tokens=int(self.config.get("repair_max_output_tokens", 256)),
+            )
+            return _load_json_object(repaired.content)
+        except (ProviderError, json.JSONDecodeError) as exc:
+            repair_error = exc
+
+        recovered = _recover_truncated_action_object(completion.content)
+        if recovered is not None:
+            return recovered
+
+        reason = completion.finish_reason or "unknown"
+        raise ProviderError(
+            "模型响应不是完整 JSON；"
+            f"finish_reason={reason}；原始响应={completion.content[:200]}；"
+            f"紧凑修复失败={repair_error}"
+        ) from first_error
+
+    def _post(
+        self,
+        base_url: str,
+        api_key: str,
+        request: LLMRequest,
+        *,
+        messages: list[dict[str, str]] | None = None,
+        max_tokens: int | None = None,
+    ) -> _CompletionResult:
         """
         功能：执行一次 Chat Completions HTTP 请求。
         参数：
@@ -133,8 +208,9 @@ class OpenAICompatibleClient:
         payload = {
             "model": self.model,
             "temperature": float(self.config.get("temperature", 0.2)),
-            "max_tokens": int(self.config.get("max_output_tokens", 256)),
-            "messages": [
+            "max_tokens": max_tokens or int(self.config.get("max_output_tokens", 256)),
+            "messages": messages
+            or [
                 {"role": "system", "content": request.system_prompt},
                 {"role": "user", "content": request.user_prompt},
             ],
@@ -167,8 +243,10 @@ class OpenAICompatibleClient:
         elapsed = (time.perf_counter() - started) * 1000
         try:
             parsed = json.loads(body)
-            message = parsed["choices"][0]["message"]
+            choice = parsed["choices"][0]
+            message = choice["message"]
             content = message.get("content") or ""
+            finish_reason = str(choice.get("finish_reason") or "")
             if not content and message.get("reasoning_content"):
                 raise ProviderError(
                     f"{self.provider} 只返回 reasoning_content，未返回最终 content；"
@@ -176,7 +254,7 @@ class OpenAICompatibleClient:
                 )
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise ProviderError(f"{self.provider} 响应结构无法解析，耗时 {elapsed:.1f}ms") from exc
-        return str(content)
+        return _CompletionResult(str(content), finish_reason)
 
 
 def _response_format(
@@ -321,3 +399,31 @@ def _find_first_json_object(text: str) -> str:
             if depth == 0:
                 return text[start : index + 1]
     raise json.JSONDecodeError("JSON object end not found", text, start)
+
+
+def _recover_truncated_action_object(content: str) -> dict[str, object] | None:
+    """仅当三个关键动作字段均完整时，从截断 JSON 中保守恢复动作。"""
+
+    action_match = re.search(
+        r'"action_type"\s*:\s*"(fold|check|call|raise)"',
+        content,
+    )
+    amount_match = re.search(r'"amount"\s*:\s*(null|-?\d+)', content)
+    confidence_match = re.search(
+        r'"confidence"\s*:\s*(-?(?:\d+(?:\.\d*)?|\.\d+))',
+        content,
+    )
+    if not (action_match and amount_match and confidence_match):
+        return None
+
+    amount_text = amount_match.group(1)
+    confidence = float(confidence_match.group(1))
+    if not 0.0 <= confidence <= 1.0:
+        return None
+    return {
+        "action_type": action_match.group(1),
+        "amount": None if amount_text == "null" else int(amount_text),
+        "confidence": confidence,
+        "reason_summary": "模型理由被截断，已恢复完整动作字段并交由规则校验",
+        "provider_recovered_from_truncation": True,
+    }

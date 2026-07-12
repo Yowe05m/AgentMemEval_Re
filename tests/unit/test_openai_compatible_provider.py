@@ -22,6 +22,7 @@ from agentmemeval.core.domain import (
 from agentmemeval.core.errors import ProviderError
 from agentmemeval.llm.providers.openai_compatible import (
     OpenAICompatibleClient,
+    _CompletionResult,
     _response_format,
 )
 from agentmemeval.llm.schemas import LLMRequest
@@ -72,11 +73,14 @@ def test_local_service_can_skip_api_key_and_parse_fenced_json(
     monkeypatch.setattr(
         client,
         "_post",
-        lambda base_url, api_key, request: (
-            "```json\n"
-            '{"action_type": "call", "amount": null, "confidence": 0.8, '
-            '"reason_summary": "跟注观察"}\n'
-            "```"
+        lambda base_url, api_key, request: _CompletionResult(
+            (
+                "```json\n"
+                '{"action_type": "call", "amount": null, "confidence": 0.8, '
+                '"reason_summary": "跟注观察"}\n'
+                "```"
+            ),
+            "stop",
         ),
     )
 
@@ -86,6 +90,106 @@ def test_local_service_can_skip_api_key_and_parse_fenced_json(
     decision = client.generate_structured(object(), ActionDecision)  # type: ignore[arg-type]
     assert decision.action_type == "call"
     assert decision.amount is None
+
+
+def test_truncated_json_uses_compact_repair_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """首次输出截断时，应以短提示修复 JSON，而不是直接终止实验。"""
+
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
+    client = OpenAICompatibleClient(
+        {
+            "base_url_env": "LOCAL_LLM_BASE_URL",
+            "api_key_required": False,
+            "max_retries": 0,
+        }
+    )
+    completions = iter(
+        [
+            _CompletionResult(
+                '{"action_type":"call","amount":null,"confidence":0.9,'
+                '"reason_summary":"过长理由',
+                "length",
+            ),
+            _CompletionResult(
+                '{"action_type":"call","amount":null,"confidence":0.9,'
+                '"reason_summary":"赔率可接受"}',
+                "stop",
+            ),
+        ]
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_post(*args: object, **kwargs: object) -> _CompletionResult:
+        calls.append(kwargs)
+        return next(completions)
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    decision = client.generate_structured(object(), ActionDecision)  # type: ignore[arg-type]
+
+    assert decision.action_type == "call"
+    assert decision.reason_summary == "赔率可接受"
+    assert len(calls) == 2
+    assert calls[1]["max_tokens"] == 256
+    assert "JSON 修复器" in calls[1]["messages"][0]["content"]  # type: ignore[index]
+
+
+def test_truncated_json_conservatively_recovers_complete_action_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """修复请求也失败时，只恢复截断前已经完整返回的动作字段。"""
+
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
+    client = OpenAICompatibleClient(
+        {
+            "base_url_env": "LOCAL_LLM_BASE_URL",
+            "api_key_required": False,
+            "max_retries": 0,
+        }
+    )
+    completions = iter(
+        [
+            _CompletionResult(
+                '{"action_type":"fold","amount":null,"confidence":0.7,'
+                '"reason_summary":"未完成',
+                "length",
+            ),
+            _CompletionResult("仍然不是 JSON", "length"),
+        ]
+    )
+    monkeypatch.setattr(client, "_post", lambda *args, **kwargs: next(completions))
+
+    decision = client.generate_structured(object(), ActionDecision)  # type: ignore[arg-type]
+
+    assert decision.action_type == "fold"
+    assert decision.confidence == 0.7
+    assert decision.raw_response["provider_recovered_from_truncation"] is True
+
+
+def test_irrecoverable_truncation_reports_finish_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """关键字段不完整时应保留 length 诊断信息并安全失败。"""
+
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
+    client = OpenAICompatibleClient(
+        {
+            "base_url_env": "LOCAL_LLM_BASE_URL",
+            "api_key_required": False,
+            "max_retries": 0,
+        }
+    )
+    completions = iter(
+        [
+            _CompletionResult('{"action_type":"call', "length"),
+            _CompletionResult("坏响应", "length"),
+        ]
+    )
+    monkeypatch.setattr(client, "_post", lambda *args, **kwargs: next(completions))
+
+    with pytest.raises(ProviderError, match="finish_reason=length"):
+        client.generate_structured(object(), ActionDecision)  # type: ignore[arg-type]
 
 
 def test_online_compatible_provider_still_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:
