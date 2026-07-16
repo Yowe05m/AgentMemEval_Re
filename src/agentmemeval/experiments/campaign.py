@@ -301,6 +301,15 @@ def _resolve_run_config(
             "protocol_label": str(spec.get("protocol_label", "unspecified")),
         }
     )
+    # Embedding caches are mutable acceleration artifacts.  A campaign must not
+    # reuse the base config's agent-only path across seeds or conditions.
+    run_dir = (campaign_dir / "runs" / run_id).resolve()
+    config["agent"] = {
+        **dict(config.get("agent", {})),
+        "embedding_cache_path": str(
+            run_dir / "embedding_cache" / "{agent_id}.json"
+        ),
+    }
     if str(spec["design"]) == "target_vs_seven_no_memory":
         target_id = str(spec.get("target_agent_id", "target_00"))
         mechanism = str(condition["target_mechanism"])

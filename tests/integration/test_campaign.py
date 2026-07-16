@@ -22,7 +22,11 @@ def test_campaign_e_runs_append_only_matrix_and_resumes(tmp_path: Path) -> None:
                     "max_raises_per_street": 4,
                     "lifecycle": "continuous_rebuy",
                 },
-                "agent": {"mechanism": "fact", "memory_scope": "per_agent"},
+                "agent": {
+                    "mechanism": "fact",
+                    "memory_scope": "per_agent",
+                    "embedding_cache_path": str(tmp_path / "shared" / "{agent_id}.json"),
+                },
                 "opponent_agent": {
                     "mechanism": "no_memory",
                     "memory_scope": "per_agent",
@@ -95,6 +99,15 @@ def test_campaign_e_runs_append_only_matrix_and_resumes(tmp_path: Path) -> None:
     campaign_dir = Path(first["campaign_dir"])
     run_dirs = sorted((campaign_dir / "runs").iterdir())
     assert len(run_dirs) == 5
+    cache_paths = []
+    for run_dir in run_dirs:
+        resolved = yaml.safe_load(
+            (run_dir / "resolved_config.yaml").read_text(encoding="utf-8")
+        )
+        cache_path = Path(resolved["agent"]["embedding_cache_path"])
+        assert cache_path == run_dir / "embedding_cache" / "{agent_id}.json"
+        cache_paths.append(cache_path)
+    assert len(set(cache_paths)) == 5
     state_lines_before = (campaign_dir / "state.tsv").read_text(
         encoding="utf-8"
     ).splitlines()
