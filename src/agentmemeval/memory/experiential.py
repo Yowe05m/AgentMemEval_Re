@@ -27,7 +27,7 @@ from agentmemeval.memory.base import trajectory_quality
 from agentmemeval.prompts.experience_update import EXPERIENCE_UPDATE_PROMPT
 
 EXPERIENCE_REVISION_SCHEMA_VERSION = "experience_revision_v1"
-EXPERIENCE_PROMPT_VERSION = "2026-07-15-v1"
+EXPERIENCE_PROMPT_VERSION = "2026-07-17-v2-length-bounded"
 
 INITIAL_EXPERIENCE = """# 我的经验
 
@@ -325,6 +325,8 @@ class ExperientialMemory:
             "你负责修订可迁移的德州扑克经验文档。只使用给定轨迹与事实证据，不写具体玩家身份，"
             "输出 JSON 对象，必须包含 keep,new_md,calibration_note,self_check,"
             "supporting_fact_ids,contradicting_fact_ids,noise_fact_ids。"
+            f"new_md 最多 {self.max_chars} 个字符；calibration_note 与 self_check "
+            "各最多 240 个字符；只保留简洁结论，不输出思维过程。"
         )
         user_prompt = (
             f"{EXPERIENCE_UPDATE_PROMPT}\n\n旧文档：\n{self.current.body}\n\n"
@@ -360,6 +362,8 @@ class ExperientialMemory:
             metadata={
                 "response_schema": EXPERIENCE_REVISION_SCHEMA_VERSION,
                 "evidence_ids": evidence_ids,
+                "experience_max_chars": self.max_chars,
+                "experience_aux_max_chars": 240,
             },
         )
         try:

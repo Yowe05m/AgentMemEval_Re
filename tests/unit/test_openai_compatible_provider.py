@@ -192,6 +192,108 @@ def test_irrecoverable_truncation_reports_finish_reason(
         client.generate_structured(object(), ActionDecision)  # type: ignore[arg-type]
 
 
+def _experience_request() -> LLMRequest:
+    return LLMRequest(
+        observation=object(),  # type: ignore[arg-type]
+        memory_context=MemoryContext(),
+        system_prompt="experience system",
+        user_prompt="experience evidence",
+        metadata={
+            "response_schema": "experience_revision_v1",
+            "evidence_ids": ["h1", "h2"],
+            "experience_max_chars": 1600,
+            "experience_aux_max_chars": 240,
+        },
+    )
+
+
+def _experience_payload() -> str:
+    return json.dumps(
+        {
+            "keep": False,
+            "new_md": "# 经验\n保持简洁。",
+            "calibration_note": "已校准",
+            "self_check": "仅使用可见证据",
+            "supporting_fact_ids": ["h1"],
+            "contradicting_fact_ids": [],
+            "noise_fact_ids": ["h2"],
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_experience_revision_uses_independent_output_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
+    client = OpenAICompatibleClient(
+        {
+            "base_url_env": "LOCAL_LLM_BASE_URL",
+            "api_key_required": False,
+            "max_retries": 0,
+            "max_output_tokens": 256,
+            "experience_max_output_tokens": 3072,
+        }
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_post(*args: object, **kwargs: object) -> _CompletionResult:
+        calls.append(kwargs)
+        return _CompletionResult(_experience_payload(), "stop")
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    payload = client.generate_structured(_experience_request(), dict)
+    assert payload["new_md"] == "# 经验\n保持简洁。"
+    assert calls[0]["max_tokens"] == 3072
+
+
+def test_experience_revision_truncation_uses_compact_schema_aware_regeneration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
+    client = OpenAICompatibleClient(
+        {
+            "base_url_env": "LOCAL_LLM_BASE_URL",
+            "api_key_required": False,
+            "max_retries": 0,
+            "structured_output_mode": "json_schema",
+            "experience_max_output_tokens": 3072,
+            "experience_repair_max_output_tokens": 2048,
+        }
+    )
+    completions = iter(
+        [
+            _CompletionResult('{"keep": false, "new_md": "未闭合', "length"),
+            _CompletionResult(_experience_payload(), "stop"),
+        ]
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_post(*args: object, **kwargs: object) -> _CompletionResult:
+        calls.append(kwargs)
+        return next(completions)
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    payload = client.generate_structured(_experience_request(), dict)
+    assert payload["keep"] is False
+    assert len(calls) == 2
+    assert calls[0]["max_tokens"] == 3072
+    assert calls[1]["max_tokens"] == 2048
+    assert "经验 JSON 压缩修复器" in calls[1]["messages"][0]["content"]  # type: ignore[index]
+
+
+def test_experience_revision_schema_bounds_long_text_and_evidence_arrays() -> None:
+    response_format = _response_format("json_schema", _experience_request())
+    assert response_format is not None
+    schema = response_format["json_schema"]["schema"]  # type: ignore[index]
+    properties = schema["properties"]  # type: ignore[index]
+    assert properties["new_md"]["minLength"] == 1
+    assert properties["new_md"]["maxLength"] == 1600
+    assert properties["calibration_note"]["maxLength"] == 240
+    assert properties["self_check"]["maxLength"] == 240
+    assert properties["supporting_fact_ids"]["maxItems"] == 2
+
+
 def test_online_compatible_provider_still_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     功能：验证默认 OpenAI-compatible 配置仍要求 API key。

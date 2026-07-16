@@ -75,6 +75,14 @@ def test_paper_main_config_contains_reviewed_protocol_choices() -> None:
     assert experiment["multiple_comparison_method"] == "holm"
 
 
+def test_task4_real_pilot_has_independent_experience_revision_budget() -> None:
+    config = load_config("configs/experiments/task4_real_pilot_base.yaml")
+    assert config["provider"]["max_output_tokens"] == 2048
+    assert config["provider"]["experience_max_output_tokens"] == 3072
+    assert config["provider"]["experience_repair_max_output_tokens"] == 2048
+    assert config["provider"]["service_startup_parameters"]["max_model_len"] == 16384
+
+
 def test_validate_config_rejects_incomplete_A7_R_preregistration() -> None:
     config = _valid_config()
     config["experiment"].update(  # type: ignore[union-attr]

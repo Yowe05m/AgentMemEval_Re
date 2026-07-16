@@ -272,7 +272,9 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
         "service": {
             key: provider.get(key)
             for key in (
-                "provider", "temperature", "max_output_tokens", "timeout_seconds",
+                "provider", "temperature", "max_output_tokens",
+                "experience_max_output_tokens",
+                "experience_repair_max_output_tokens", "timeout_seconds",
                 "max_retries", "structured_output_mode", "rate_limit_policy",
                 "service_startup_parameters", "served_model_name",
                 "runtime_probe_python",

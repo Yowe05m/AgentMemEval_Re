@@ -88,7 +88,23 @@ class OpenAICompatibleClient:
             raise ProviderError(f"{self.provider} 缺少环境变量 {self.api_key_env}")
 
         def _call() -> ActionDecision | dict[str, object]:
-            completion = self._post(base_url, api_key or "", request)
+            metadata = getattr(request, "metadata", {})
+            response_schema = str(metadata.get("response_schema", ""))
+            max_tokens = (
+                int(
+                    self.config.get(
+                        "experience_max_output_tokens",
+                        self.config.get("max_output_tokens", 256),
+                    )
+                )
+                if schema is dict and response_schema == "experience_revision_v1"
+                else None
+            )
+            completion = (
+                self._post(base_url, api_key or "", request, max_tokens=max_tokens)
+                if max_tokens is not None
+                else self._post(base_url, api_key or "", request)
+            )
             try:
                 payload = _load_json_object(completion.content)
             except json.JSONDecodeError as first_error:
@@ -141,6 +157,47 @@ class OpenAICompatibleClient:
         first_error: json.JSONDecodeError,
     ) -> dict[str, object]:
         """用紧凑请求修复截断 JSON，失败后保守恢复完整动作字段。"""
+
+        metadata = getattr(request, "metadata", {})
+        if metadata.get("response_schema") == "experience_revision_v1":
+            max_chars = int(metadata.get("experience_max_chars", 1600))
+            aux_chars = int(metadata.get("experience_aux_max_chars", 240))
+            repair_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是经验 JSON 压缩修复器。只输出符合 response schema 的完整 "
+                        "JSON，不输出解释或思维过程。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"重新生成紧凑经验修订：new_md 最多 {max_chars} 字符，"
+                        f"calibration_note 与 self_check 各最多 {aux_chars} 字符。"
+                        "必须闭合 JSON，并保留全部必需字段。\n\n" + request.user_prompt
+                    ),
+                },
+            ]
+            repair_error: Exception | None = None
+            try:
+                repaired = self._post(
+                    base_url,
+                    api_key,
+                    request,
+                    messages=repair_messages,
+                    max_tokens=int(
+                        self.config.get("experience_repair_max_output_tokens", 2048)
+                    ),
+                )
+                return _load_json_object(repaired.content)
+            except (ProviderError, json.JSONDecodeError) as exc:
+                repair_error = exc
+            raise ProviderError(
+                "经验修订响应不是完整 JSON；"
+                f"finish_reason={completion.finish_reason or 'unknown'}；"
+                f"紧凑重生成失败={repair_error}"
+            ) from first_error
 
         repair_messages = [
             {
@@ -279,7 +336,14 @@ def _response_format(
             request is not None
             and request.metadata.get("response_schema") == "experience_revision_v1"
         ):
-            string_array = {"type": "array", "items": {"type": "string"}}
+            max_chars = int(request.metadata.get("experience_max_chars", 1600))
+            aux_chars = int(request.metadata.get("experience_aux_max_chars", 240))
+            evidence_count = max(1, len(request.metadata.get("evidence_ids", [])))
+            string_array = {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": evidence_count,
+            }
             return {
                 "type": "json_schema",
                 "json_schema": {
@@ -289,9 +353,19 @@ def _response_format(
                         "type": "object",
                         "properties": {
                             "keep": {"type": "boolean"},
-                            "new_md": {"type": "string"},
-                            "calibration_note": {"type": "string"},
-                            "self_check": {"type": "string"},
+                            "new_md": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": max_chars,
+                            },
+                            "calibration_note": {
+                                "type": "string",
+                                "maxLength": aux_chars,
+                            },
+                            "self_check": {
+                                "type": "string",
+                                "maxLength": aux_chars,
+                            },
                             "supporting_fact_ids": string_array,
                             "contradicting_fact_ids": string_array,
                             "noise_fact_ids": string_array,

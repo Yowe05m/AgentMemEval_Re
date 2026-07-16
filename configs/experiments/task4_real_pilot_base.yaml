@@ -30,6 +30,8 @@ provider:
   api_key_required: false
   temperature: 0.0
   max_output_tokens: 2048
+  experience_max_output_tokens: 3072
+  experience_repair_max_output_tokens: 2048
   repair_max_output_tokens: 256
   timeout_seconds: 120
   max_retries: 1
