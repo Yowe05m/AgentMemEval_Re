@@ -14,6 +14,7 @@ from pathlib import Path
 
 from agentmemeval.config.loader import load_raw_config
 from agentmemeval.core.errors import AgentMemEvalError
+from agentmemeval.evaluation.formal_freeze import generate_formal_freeze_bundle
 from agentmemeval.evaluation.pilot import (
     build_pilot_freeze_proposal_from_paths,
     build_pilot_power_plan,
@@ -50,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
             return _pilot_plan(args)
         if args.command == "pilot-freeze":
             return _pilot_freeze(args)
+        if args.command == "formal-freeze":
+            return _formal_freeze(args)
         if args.command == "report":
             return _report(args)
         parser.print_help()
@@ -100,6 +103,18 @@ def build_parser() -> argparse.ArgumentParser:
     pilot_freeze.add_argument("--campaign-e", required=True, help="Campaign E aggregate JSON")
     pilot_freeze.add_argument("--campaign-p-dir", required=True, help="Campaign P 目录")
     pilot_freeze.add_argument("--output", required=True, help="新冻结提案 JSON；拒绝覆盖")
+    formal_freeze = sub.add_parser(
+        "formal-freeze", help="从 ready Pilot 提案生成不可变 P/E 正式配置包"
+    )
+    formal_freeze.add_argument("--proposal", required=True, help="ready Pilot freeze JSON")
+    formal_freeze.add_argument("--runtime-lock", required=True, help="双服务运行时锁 JSON")
+    formal_freeze.add_argument("--campaign-p-template", required=True)
+    formal_freeze.add_argument("--campaign-e-template", required=True)
+    formal_freeze.add_argument("--formal-p-template", required=True)
+    formal_freeze.add_argument("--formal-e-template", required=True)
+    formal_freeze.add_argument("--output-dir", required=True, help="全新输出目录；拒绝覆盖")
+    formal_freeze.add_argument("--freeze-id", required=True, help="不可变冻结标识")
+    formal_freeze.add_argument("--seed-start", type=int, default=2026071801)
     report = sub.add_parser("report", help="从 run 目录重建报告")
     report.add_argument("--input", required=True, help="outputs/<run_id> 目录")
     report.add_argument("--big-blind", type=int, default=2, help="重算 BB/100 使用的大盲")
@@ -189,6 +204,24 @@ def _pilot_freeze(args: argparse.Namespace) -> int:
     with output.open("x", encoding="utf-8") as handle:
         json.dump(proposal, handle, ensure_ascii=False, indent=2)
     print(json.dumps({"output": str(output), **proposal}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _formal_freeze(args: argparse.Namespace) -> int:
+    """Generate self-contained formal configs only from a ready frozen proposal."""
+
+    result = generate_formal_freeze_bundle(
+        proposal_path=args.proposal,
+        runtime_lock_path=args.runtime_lock,
+        campaign_p_template_path=args.campaign_p_template,
+        campaign_e_template_path=args.campaign_e_template,
+        formal_p_template_path=args.formal_p_template,
+        formal_e_template_path=args.formal_e_template,
+        output_dir=args.output_dir,
+        freeze_id=args.freeze_id,
+        seed_start=args.seed_start,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
