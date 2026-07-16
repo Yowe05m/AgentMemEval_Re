@@ -5,6 +5,44 @@ import yaml
 from agentmemeval.experiments.campaign import aggregate_campaign, run_campaign
 
 
+def test_mixed_nonformal_campaign_is_complete_descriptive_only(tmp_path: Path) -> None:
+    """A complete mixed-table Pilot/smoke is a valid descriptive power input."""
+
+    base_path = Path("configs/experiments/paper_exp1_mixed_mock.yaml").resolve()
+    campaign_path = tmp_path / "campaign-p.yaml"
+    campaign_path.write_text(
+        yaml.safe_dump(
+            {
+                "campaign": {
+                    "campaign_id": "campaign_p_descriptive_smoke",
+                    "design": "mixed_table",
+                    "protocol_label": "not_for_paper_smoke",
+                    "base_experiment_config": str(base_path),
+                    "output_root": str(tmp_path / "campaigns"),
+                    "max_parallel_runs": 1,
+                    "seeds": [2026071701],
+                    "conditions": [
+                        {
+                            "condition_id": "mixed_table",
+                            "target_mechanism": "mixed",
+                        }
+                    ],
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_campaign(campaign_path)
+
+    assert result["completed_matrix_units"] == 1
+    assert result["failed_this_invocation"] == 0
+    assert result["aggregate_status"] == "descriptive_only"
+    aggregate = yaml.safe_load(Path(result["aggregate_path"]).read_text(encoding="utf-8"))
+    assert aggregate["status"] == "descriptive_only"
+
+
 def test_campaign_e_runs_append_only_matrix_and_resumes(tmp_path: Path) -> None:
     base_path = tmp_path / "base.yaml"
     base_path.write_text(

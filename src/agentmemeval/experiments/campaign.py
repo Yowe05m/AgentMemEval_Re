@@ -425,14 +425,14 @@ def _aggregate_campaign(
     if str(spec["design"]) == "mixed_table":
         metrics = [_read_json(Path(item["run_dir"]) / "metrics.json") for item in completed_runs]
         aggregate = aggregate_metrics(metrics)
-        status = (
-            aggregate.get("inference_status")
-            if len(completed_runs) == expected
-            else "incomplete_matrix"
-        )
-        if str(base_config["experiment"].get("run_mode", "smoke")) == "formal" and not (
-            homogeneity.get("formal_aggregation_allowed")
-        ):
+        run_mode = str(base_config["experiment"].get("run_mode", "smoke"))
+        if len(completed_runs) != expected:
+            status = "incomplete_matrix"
+        elif run_mode != "formal":
+            status = "descriptive_only"
+        else:
+            status = aggregate.get("inference_status")
+        if run_mode == "formal" and not homogeneity.get("formal_aggregation_allowed"):
             status = "blocked_runtime_heterogeneity"
         return {
             "schema_version": "agentmemeval_campaign_aggregate_v1",
