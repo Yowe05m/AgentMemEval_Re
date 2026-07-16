@@ -103,6 +103,11 @@ def build_parser() -> argparse.ArgumentParser:
     pilot_freeze.add_argument("--campaign-e", required=True, help="Campaign E aggregate JSON")
     pilot_freeze.add_argument("--campaign-p-dir", required=True, help="Campaign P 目录")
     pilot_freeze.add_argument("--campaign-e-dir", required=True, help="Campaign E 目录")
+    pilot_freeze.add_argument(
+        "--retrieval-review-audit",
+        required=True,
+        help="独立人工相关性标签生成的检索阈值审计 JSON",
+    )
     pilot_freeze.add_argument("--output", required=True, help="新冻结提案 JSON；拒绝覆盖")
     formal_freeze = sub.add_parser(
         "formal-freeze", help="从 ready Pilot 提案生成不可变 P/E 正式配置包"
@@ -198,7 +203,11 @@ def _pilot_freeze(args: argparse.Namespace) -> int:
     """Generate an immutable fail-closed freeze proposal from completed Pilot evidence."""
 
     proposal = build_pilot_freeze_proposal_from_paths(
-        args.campaign_p, args.campaign_e, args.campaign_p_dir, args.campaign_e_dir
+        args.campaign_p,
+        args.campaign_e,
+        args.campaign_p_dir,
+        args.campaign_e_dir,
+        args.retrieval_review_audit,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

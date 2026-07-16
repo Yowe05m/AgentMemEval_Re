@@ -133,15 +133,34 @@ python -m agentmemeval pilot-plan `
   --output outputs/campaigns/pilot_power_plan_<utc>.json
 ```
 
-行为、执行、检索和功效的联合冻结提案只读取 P campaign 中 state 为
+先从完整 P/E Pilot 的真实语义检索事件生成 240 条分层、结果盲化的人工审查表。
+`blind_review.jsonl` 不含检索分数或牌局收益；人工填写 `human_labels.tsv` 后，
+审计命令才会按预注册精度下界和空检索率约束冻结阈值。模型标签不能冒充人工标签：
+
+```powershell
+python tools/task4/retrieval_relevance_review.py build `
+  --campaign-dir outputs/campaigns/<p> `
+  --campaign-dir outputs/campaigns/<e> `
+  --output-dir outputs/campaigns/retrieval_review_<utc>
+
+python tools/task4/retrieval_relevance_review.py audit `
+  --review-key outputs/campaigns/retrieval_review_<utc>/review_key.json `
+  --labels outputs/campaigns/retrieval_review_<utc>/human_labels.tsv `
+  --output outputs/campaigns/retrieval_review_<utc>/relevance_audit.json
+```
+
+行为、执行、检索和功效的联合冻结提案只读取 P/E campaign 中 state 为
 `complete` 的 leaf；partial、failed 或 interrupted run 会被排除。行为门槛采用
-预注册分位数裕量和不可放宽的领域退化上限，任何越界都会 NO-GO：
+预注册分位数裕量和不可放宽的领域退化上限；人工相关性审计缺失或任何门槛越界
+都会 NO-GO：
 
 ```powershell
 python -m agentmemeval pilot-freeze `
   --campaign-p outputs/campaigns/<p>/campaign_aggregate_<utc>.json `
   --campaign-e outputs/campaigns/<e>/campaign_aggregate_<utc>.json `
   --campaign-p-dir outputs/campaigns/<p> `
+  --campaign-e-dir outputs/campaigns/<e> `
+  --retrieval-review-audit outputs/campaigns/retrieval_review_<utc>/relevance_audit.json `
   --output outputs/campaigns/pilot_freeze_proposal_<utc>.json
 ```
 

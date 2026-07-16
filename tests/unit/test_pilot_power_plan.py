@@ -110,6 +110,16 @@ def _metrics(*, fold_rate: float = 0.40) -> dict[str, object]:
     }
 
 
+def _review() -> dict[str, object]:
+    return {
+        "schema_version": "task4_retrieval_relevance_audit_v1",
+        "review_status": "human_labels_verified",
+        "retrieval_threshold_status": "frozen",
+        "minimum_retrieval_score": 0.42,
+        "blockers": [],
+    }
+
+
 def test_behavior_freeze_uses_quantiles_and_domain_caps() -> None:
     freeze = calibrate_behavior_thresholds([_metrics(), _metrics(), _metrics()])
     assert freeze["status"] == "frozen"
@@ -129,27 +139,25 @@ def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
     p_audits = [{"execution_health": {"valid": True}} for _ in metrics]
     e_audits = [{"execution_health": {"valid": True}} for _ in range(6)]
     proposal = build_pilot_freeze_proposal(
-        _p(), _e(), metrics, p_audits, metrics * 2, e_audits
+        _p(), _e(), metrics, p_audits, metrics * 2, e_audits, _review()
     )
     assert proposal["status"] == "ready_to_generate_immutable_formal_configs"
     assert proposal["retrieval_freeze"] == {
         "retrieval_threshold_status": "frozen",
-        "minimum_retrieval_score": 0.0,
-        "reason": (
-            "pilot has no independent human relevance labels; freeze zero rather "
-            "than tune retrieval on reward or test outcomes"
-        ),
+        "minimum_retrieval_score": 0.42,
+        "reason": "independent outcome-blind human relevance review",
+        "review_audit_schema_version": "task4_retrieval_relevance_audit_v1",
     }
     p_audits[0] = {"execution_health": {"valid": False}}
     blocked = build_pilot_freeze_proposal(
-        _p(), _e(), metrics, p_audits, metrics * 2, e_audits
+        _p(), _e(), metrics, p_audits, metrics * 2, e_audits, _review()
     )
     assert blocked["status"] == "no_go_pilot_freeze_blocked"
     assert blocked["execution_blockers"]
     p_audits[0] = {"execution_health": {"valid": True}}
     e_audits[0] = {"execution_health": {"valid": False}}
     blocked_e = build_pilot_freeze_proposal(
-        _p(), _e(), metrics, p_audits, metrics * 2, e_audits
+        _p(), _e(), metrics, p_audits, metrics * 2, e_audits, _review()
     )
     assert "campaign_e run 0 execution health is not valid" in blocked_e[
         "execution_blockers"
@@ -159,7 +167,7 @@ def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
         "memory"
     ]["revision_fallback_count"] = 1
     revision_blocked = build_pilot_freeze_proposal(
-        _p(), _e(), metrics, p_audits, fallback_metrics, e_audits
+        _p(), _e(), metrics, p_audits, fallback_metrics, e_audits, _review()
     )
     assert (
         "campaign_e run 0 used deterministic experience revision fallback"
@@ -176,6 +184,8 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
     e_dir.mkdir()
     p_path.write_text(json.dumps(_p()), encoding="utf-8")
     e_path.write_text(json.dumps(_e()), encoding="utf-8")
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(_review()), encoding="utf-8")
     state_lines = [
         "event_utc\tcondition_id\ttarget_mechanism\tseed\tattempt\tstatus\t"
         "run_id\trun_dir\tfailure_class\tmessage"
@@ -217,7 +227,7 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
         "\n".join(e_state_lines) + "\n", encoding="utf-8"
     )
     proposal = build_pilot_freeze_proposal_from_paths(
-        p_path, e_path, p_dir, e_dir
+        p_path, e_path, p_dir, e_dir, review_path
     )
     assert proposal["status"] == "ready_to_generate_immutable_formal_configs"
     assert proposal["campaign_p_evidence"]["completed_state_rows"] == 3

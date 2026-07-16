@@ -123,6 +123,7 @@ def build_pilot_freeze_proposal(
     campaign_p_protocol_audits: list[dict[str, Any]],
     campaign_e_metrics: list[dict[str, Any]],
     campaign_e_protocol_audits: list[dict[str, Any]],
+    retrieval_review_audit: dict[str, Any],
 ) -> dict[str, Any]:
     """Combine power, behavior, execution, and retrieval freeze gates."""
 
@@ -138,6 +139,16 @@ def build_pilot_freeze_proposal(
         for index, audit in enumerate(campaign_e_protocol_audits)
         if dict(audit.get("execution_health", {})).get("valid") is not True
     )
+    retrieval_blockers = [
+        str(item) for item in retrieval_review_audit.get("blockers", [])
+    ]
+    if retrieval_review_audit.get("review_status") != "human_labels_verified":
+        retrieval_blockers.append("retrieval relevance review lacks verified human labels")
+    if retrieval_review_audit.get("retrieval_threshold_status") != "frozen":
+        retrieval_blockers.append("retrieval relevance threshold is not frozen")
+    retrieval_score = retrieval_review_audit.get("minimum_retrieval_score")
+    if retrieval_score is None:
+        retrieval_blockers.append("retrieval relevance audit has no selected threshold")
     execution_blockers.extend(
         f"campaign_p run {index} used deterministic experience revision fallback"
         for index, metrics in enumerate(campaign_p_metrics)
@@ -172,20 +183,24 @@ def build_pilot_freeze_proposal(
         *list(power_plan["blockers"]),
         *list(behavior["blockers"]),
         *execution_blockers,
+        *retrieval_blockers,
     ]
     return {
         "schema_version": "agentmemeval_pilot_freeze_proposal_v1",
         "power_plan": power_plan,
         "behavior_freeze": behavior,
         "retrieval_freeze": {
-            "retrieval_threshold_status": "frozen",
-            "minimum_retrieval_score": 0.0,
-            "reason": (
-                "pilot has no independent human relevance labels; freeze zero rather "
-                "than tune retrieval on reward or test outcomes"
+            "retrieval_threshold_status": (
+                "frozen" if not retrieval_blockers else "blocked"
+            ),
+            "minimum_retrieval_score": retrieval_score,
+            "reason": "independent outcome-blind human relevance review",
+            "review_audit_schema_version": retrieval_review_audit.get(
+                "schema_version"
             ),
         },
         "execution_blockers": execution_blockers,
+        "retrieval_blockers": retrieval_blockers,
         "required_seed_pairs": power_plan[
             "required_seed_pairs_primary_max_across_p_and_e"
         ],
@@ -203,6 +218,7 @@ def build_pilot_freeze_proposal_from_paths(
     campaign_e_aggregate_path: str | Path,
     campaign_p_dir: str | Path,
     campaign_e_dir: str | Path,
+    retrieval_review_audit_path: str | Path,
 ) -> dict[str, Any]:
     """Load only completed P/E leaf evidence and build the immutable proposal."""
 
@@ -220,11 +236,22 @@ def build_pilot_freeze_proposal_from_paths(
         for row in e_completed
     ]
     e_metrics = [_read_json(Path(row["run_dir"]) / "metrics.json") for row in e_completed]
+    retrieval_review = _read_json(Path(retrieval_review_audit_path))
     proposal = build_pilot_freeze_proposal(
-        p_aggregate, e_aggregate, metrics, p_audits, e_metrics, e_audits
+        p_aggregate,
+        e_aggregate,
+        metrics,
+        p_audits,
+        e_metrics,
+        e_audits,
+        retrieval_review,
     )
     proposal["campaign_p_evidence"] = p_evidence
     proposal["campaign_e_evidence"] = e_evidence
+    proposal["retrieval_review_evidence"] = {
+        "path": str(Path(retrieval_review_audit_path).resolve()),
+        "schema_version": retrieval_review.get("schema_version"),
+    }
     return proposal
 
 
