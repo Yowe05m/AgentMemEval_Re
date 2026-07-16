@@ -169,6 +169,16 @@ python tools/task4/build_run_map.py `
   --exclusion-json outputs/R_<date>/formal_main_exclusions.json
 ```
 
+资源审计从完整 leaf 的事件、state 和 manifest 重建实测动作延迟、墙钟吞吐、GPU
+身份、fallback 与经验修订次数。当前事件中的 token 是 whitespace proxy，工具会强制
+标为估算而非 provider usage；本地服务没有账单时货币成本也明确标为 unavailable：
+
+```powershell
+python tools/task4/build_resource_audit.py `
+  --campaign-dir outputs/campaigns/<campaign> `
+  --output outputs/campaigns/<campaign>/resource_audit_<utc>.json
+```
+
 先从完整 P/E Pilot 的真实语义检索事件生成 240 条分层、结果盲化的人工审查表。
 `blind_review.jsonl` 不含检索分数或牌局收益；人工填写 `human_labels.tsv` 后，
 审计命令才会按预注册精度下界和空检索率约束冻结阈值。模型标签不能冒充人工标签：
