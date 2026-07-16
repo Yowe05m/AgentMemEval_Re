@@ -14,7 +14,10 @@ from pathlib import Path
 
 from agentmemeval.config.loader import load_raw_config
 from agentmemeval.core.errors import AgentMemEvalError
-from agentmemeval.evaluation.pilot import build_pilot_power_plan
+from agentmemeval.evaluation.pilot import (
+    build_pilot_freeze_proposal_from_paths,
+    build_pilot_power_plan,
+)
 from agentmemeval.evaluation.reporting import rebuild_report
 from agentmemeval.experiments.campaign import aggregate_campaign, run_campaign
 from agentmemeval.experiments.runner import run_config
@@ -45,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
             return _campaign_aggregate(args)
         if args.command == "pilot-plan":
             return _pilot_plan(args)
+        if args.command == "pilot-freeze":
+            return _pilot_freeze(args)
         if args.command == "report":
             return _report(args)
         parser.print_help()
@@ -88,6 +93,13 @@ def build_parser() -> argparse.ArgumentParser:
     pilot_plan.add_argument("--campaign-p", required=True, help="Campaign P aggregate JSON")
     pilot_plan.add_argument("--campaign-e", required=True, help="Campaign E aggregate JSON")
     pilot_plan.add_argument("--output", required=True, help="新功效计划 JSON；拒绝覆盖")
+    pilot_freeze = sub.add_parser(
+        "pilot-freeze", help="从完整 Pilot 工件生成行为、功效、执行和检索冻结提案"
+    )
+    pilot_freeze.add_argument("--campaign-p", required=True, help="Campaign P aggregate JSON")
+    pilot_freeze.add_argument("--campaign-e", required=True, help="Campaign E aggregate JSON")
+    pilot_freeze.add_argument("--campaign-p-dir", required=True, help="Campaign P 目录")
+    pilot_freeze.add_argument("--output", required=True, help="新冻结提案 JSON；拒绝覆盖")
     report = sub.add_parser("report", help="从 run 目录重建报告")
     report.add_argument("--input", required=True, help="outputs/<run_id> 目录")
     report.add_argument("--big-blind", type=int, default=2, help="重算 BB/100 使用的大盲")
@@ -163,6 +175,20 @@ def _pilot_plan(args: argparse.Namespace) -> int:
     with output.open("x", encoding="utf-8") as handle:
         json.dump(plan, handle, ensure_ascii=False, indent=2)
     print(json.dumps({"output": str(output), **plan}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _pilot_freeze(args: argparse.Namespace) -> int:
+    """Generate an immutable fail-closed freeze proposal from completed Pilot evidence."""
+
+    proposal = build_pilot_freeze_proposal_from_paths(
+        args.campaign_p, args.campaign_e, args.campaign_p_dir
+    )
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("x", encoding="utf-8") as handle:
+        json.dump(proposal, handle, ensure_ascii=False, indent=2)
+    print(json.dumps({"output": str(output), **proposal}, ensure_ascii=False, indent=2))
     return 0
 
 

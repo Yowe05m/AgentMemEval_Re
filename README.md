@@ -7,14 +7,14 @@
 | 能力 | 当前状态 |
 | --- | --- |
 | Python 包安装 | `pyproject.toml` + `src/` 布局，支持 editable install |
-| CLI | `doctor`、`run`、`campaign`、`campaign-aggregate`、`report` |
+| CLI | `doctor`、`run`、`campaign`、`campaign-aggregate`、`pilot-plan`、`pilot-freeze`、`report` |
 | 离线 Provider | 默认 `mock`，无需密钥即可跑实验和测试 |
 | 真实 Provider | 提供 `openai_compatible` 骨架，通过环境变量接入 |
 | 本地扑克环境 | 覆盖 no-limit Hold'em 合法动作、加注重开、all-in、边池、摊牌和筹码守恒 |
 | 记忆机制 | NoMemory、Fact、Expr、FactExprSync、FactExprAsync |
 | 人格机制 | 内置 INTJ、ENFP、ISTP、ESFJ 示例，可配置扩展 |
 | 换桌实验 | 支持 20 Agent 轮换桌、暴露统计和 pairwise histogram |
-| Campaign | append-only `state.tsv`、唯一 attempt、断点续跑、同质性与配对聚合 |
+| Campaign | append-only `state.tsv`、唯一 attempt、断点续跑、隔离并行 leaf、同质性与配对聚合 |
 | 报告闭环 | 每次运行写入 JSONL、快照、指标、图表和 `report.md` |
 
 论文实验运行分为三个显式级别：`smoke` 仅验证工程链路并永久标记
@@ -121,6 +121,33 @@ python -m agentmemeval campaign --config configs/campaigns/task4_campaign_e_pilo
 ```powershell
 python -m agentmemeval campaign-aggregate --input outputs/campaigns/<campaign_id>
 ```
+
+完整独立 Pilot 后，先从版本化 P/E aggregate 生成固定 MDE 5 BB/100、敏感性
+3/5/10、alpha 0.05、power 0.80 的功效计划；计划会对所有 P/E 对比取最大所需
+seed，且不会按资源静默截断：
+
+```powershell
+python -m agentmemeval pilot-plan `
+  --campaign-p outputs/campaigns/<p>/campaign_aggregate_<utc>.json `
+  --campaign-e outputs/campaigns/<e>/campaign_aggregate_<utc>.json `
+  --output outputs/campaigns/pilot_power_plan_<utc>.json
+```
+
+行为、执行、检索和功效的联合冻结提案只读取 P campaign 中 state 为
+`complete` 的 leaf；partial、failed 或 interrupted run 会被排除。行为门槛采用
+预注册分位数裕量和不可放宽的领域退化上限，任何越界都会 NO-GO：
+
+```powershell
+python -m agentmemeval pilot-freeze `
+  --campaign-p outputs/campaigns/<p>/campaign_aggregate_<utc>.json `
+  --campaign-e outputs/campaigns/<e>/campaign_aggregate_<utc>.json `
+  --campaign-p-dir outputs/campaigns/<p> `
+  --output outputs/campaigns/pilot_freeze_proposal_<utc>.json
+```
+
+Formal manifest 通过 `runtime_probe_python` 从实际 vLLM 服务环境采集 torch CUDA
+和 vLLM 版本；项目运行环境无需重复安装 torch。探针缺失或与 frozen runtime
+lock 不一致时，Formal 会在创建 run 目录前 fail-closed。
 
 `task4_campaign_p_strict_model_substituted.yaml` 尽量复现论文的 150/25、每 10
 手 checkpoint、elimination 和“全部事实写入”，但当前 decision model 是
