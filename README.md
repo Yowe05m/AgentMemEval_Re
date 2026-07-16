@@ -133,6 +133,16 @@ python -m agentmemeval pilot-plan `
   --output outputs/campaigns/pilot_power_plan_<utc>.json
 ```
 
+任一 versioned campaign aggregate 都可一键重建不覆盖旧产物的统计包，包含
+`main_table.csv`、seed 级 `paired_effects.csv`、带 n 和 bootstrap 95% CI 的主终点图、
+中文分析报告及逐文件 SHA-256 manifest：
+
+```powershell
+python tools/task4/build_campaign_analysis.py `
+  --aggregate outputs/campaigns/<campaign>/campaign_aggregate_<utc>.json `
+  --output-dir outputs/campaigns/<campaign>/analysis_<utc>
+```
+
 先从完整 P/E Pilot 的真实语义检索事件生成 240 条分层、结果盲化的人工审查表。
 `blind_review.jsonl` 不含检索分数或牌局收益；人工填写 `human_labels.tsv` 后，
 审计命令才会按预注册精度下界和空检索率约束冻结阈值。模型标签不能冒充人工标签：
