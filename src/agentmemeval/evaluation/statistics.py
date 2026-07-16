@@ -9,9 +9,13 @@
 from __future__ import annotations
 
 import math
+import random
+import statistics
 
 
-def summarize_values(values: list[float]) -> dict[str, float]:
+def summarize_values(
+    values: list[float], *, bootstrap_samples: int = 2000, bootstrap_seed: int = 20260715
+) -> dict[str, float]:
     """
     功能：汇总一组数值。
     参数：
@@ -24,17 +28,49 @@ def summarize_values(values: list[float]) -> dict[str, float]:
 
     n = len(values)
     if n == 0:
-        return {"n": 0, "mean": 0.0, "std": 0.0, "ci95_low": 0.0, "ci95_high": 0.0}
+        return {
+            "n": 0.0, "mean": 0.0, "median": 0.0, "std": 0.0,
+            "ci95_low": 0.0, "ci95_high": 0.0,
+            "bootstrap_ci95_low": 0.0, "bootstrap_ci95_high": 0.0,
+        }
     mean = sum(values) / n
     if n == 1:
-        return {"n": 1, "mean": mean, "std": 0.0, "ci95_low": mean, "ci95_high": mean}
+        return {
+            "n": 1.0, "mean": mean, "median": mean, "std": 0.0,
+            "ci95_low": mean, "ci95_high": mean,
+            "bootstrap_ci95_low": mean, "bootstrap_ci95_high": mean,
+        }
     variance = sum((value - mean) ** 2 for value in values) / (n - 1)
     std = math.sqrt(variance)
     half_width = 1.96 * std / math.sqrt(n)
+    rng = random.Random(bootstrap_seed)
+    bootstrap_means = sorted(
+        statistics.mean(rng.choices(values, k=n)) for _ in range(max(1, bootstrap_samples))
+    )
+    low_index = int((len(bootstrap_means) - 1) * 0.025)
+    high_index = int((len(bootstrap_means) - 1) * 0.975)
     return {
         "n": float(n),
         "mean": mean,
+        "median": statistics.median(values),
         "std": std,
         "ci95_low": mean - half_width,
         "ci95_high": mean + half_width,
+        "bootstrap_ci95_low": bootstrap_means[low_index],
+        "bootstrap_ci95_high": bootstrap_means[high_index],
+    }
+
+
+def summarize_paired_effects(
+    left_by_seed: dict[int, float], right_by_seed: dict[int, float]
+) -> dict[str, object]:
+    """Summarize left-minus-right effects over exactly matched seeds."""
+
+    seeds = sorted(set(left_by_seed) & set(right_by_seed))
+    differences = [float(left_by_seed[seed]) - float(right_by_seed[seed]) for seed in seeds]
+    return {
+        "definition": "left minus right on matched seed",
+        "matched_seeds": seeds,
+        "effects": differences,
+        "summary": summarize_values(differences),
     }

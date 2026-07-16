@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+from agentmemeval.config.loader import load_config
 from agentmemeval.evaluation.reporting import rebuild_report
 from agentmemeval.experiments.runner import run_resolved_config
 
@@ -78,6 +79,10 @@ def test_fixed_table_run_and_report() -> None:
     assert (run_dir / "manifest.json").exists()
     assert (run_dir / "protocol_audit.json").exists()
     assert (run_dir / "memory_snapshots" / "agent_00_after_train.json").exists()
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert "gpu" in manifest["metadata"]
+    assert "dirty" in manifest["metadata"]["code"]
+    assert "decision_system_sha256" in manifest["metadata"]["prompts"]
     rebuilt = rebuild_report(run_dir, big_blind=2)
     assert Path(rebuilt["report_path"]).exists()
     hands = [
@@ -94,7 +99,9 @@ def test_fixed_table_run_and_report() -> None:
         for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     action_event = next(event for event in events if event.get("event") == "action")
-    assert action_event["prompt"]["template_version"] == "2026-07-11-v3"
+    assert action_event["prompt"]["template_version"] == (
+        "2026-07-15-v4-authoritative-facts"
+    )
     assert len(action_event["prompt"]["user_sha256"]) == 64
     assert "call_cost" in action_event["call_risk"]
     assert "made_hand_class" in action_event["call_risk"]
@@ -102,6 +109,41 @@ def test_fixed_table_run_and_report() -> None:
     protocol = json.loads((run_dir / "protocol_audit.json").read_text(encoding="utf-8"))
     assert protocol["paper_evolving_roster_match"] is False
     assert protocol["dealer_rotation"] == "hand_index modulo table_size"
+
+
+def test_mixed_exp1_checkpoints_every_agent_independently() -> None:
+    output_root = Path("tmp") / "test_outputs" / f"mixed_{uuid4().hex}"
+    config = load_config("configs/experiments/paper_exp1_mixed_mock.yaml")
+    config["experiment"].update(
+        {
+            "output_root": str(output_root),
+            "run_id": "mixed_test",
+            "train_hands": 2,
+            "checkpoint_interval": 1,
+            "checkpoint_test_hands": 1,
+        }
+    )
+    result = run_resolved_config(config)
+    run_dir = Path(result.artifacts["run_dir"])
+    audit = json.loads((run_dir / "protocol_audit.json").read_text(encoding="utf-8"))
+    checkpoints = json.loads(
+        (run_dir / "checkpoint_generalization.json").read_text(encoding="utf-8")
+    )
+
+    assert audit["paper_evolving_roster_match"] is True
+    assert audit["generalization_schedule"] == "every_1_train_hands_and_final"
+    assert set(audit["evaluation_target_ids"]) == set(audit["train_agent_mechanisms"])
+    assert len(checkpoints["results"]) == 16
+    assert all("generalization_gap_chip_delta" in item for item in checkpoints["results"])
+    assert set(checkpoints["summary"]["1"]["by_mechanism"]) == {
+        "fact",
+        "expr",
+        "fact_expr_sync",
+        "fact_expr_async",
+    }
+    assert checkpoints["summary"]["1"]["paired_mechanism_effects"]
+    assert len(result.artifacts["checkpoint_snapshots"]) == 2
+    assert all(len(paths) == 8 for paths in result.artifacts["checkpoint_snapshots"].values())
 
 
 def test_rotating_20_agents_run() -> None:

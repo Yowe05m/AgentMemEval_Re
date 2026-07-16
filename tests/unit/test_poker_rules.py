@@ -1,12 +1,16 @@
+import random
+
 import pytest
 
 from agentmemeval.core.domain import ActionDecision, TableSpec
+from agentmemeval.environment.decision_facts import build_decision_facts
 from agentmemeval.environment.hand_evaluator import (
     evaluate_best,
     score_five,
     split_side_pots,
 )
 from agentmemeval.environment.holdem_adapter import HoldemEnvironment
+from tests.unit.test_memory import make_observation
 
 HAND_CLASS_CASES = [
     (["As", "Ks", "Qs", "Js", "Ts"], "Straight Flush", (8, (14,))),
@@ -74,6 +78,14 @@ def test_side_pot_split_handles_folded_players_and_remainder() -> None:
     )
     assert _sum_payouts(tied_payouts) == {"a": 8, "b": 7}
 
+    ordered_payouts = split_side_pots(
+        contributions={"a": 5, "b": 5, "c": 5},
+        folded=set(),
+        ranks=tied,
+        odd_chip_order=["b", "c", "a"],
+    )
+    assert _sum_payouts(ordered_payouts) == {"a": 7, "b": 8}
+
 
 def test_side_pot_refunds_when_no_layer_has_eligible_contender() -> None:
     payouts = split_side_pots(
@@ -138,7 +150,66 @@ def test_optional_treys_crosscheck_matches_original_engine_class_names() -> None
         board = [treys.Card.new(card) for card in cards[2:]]
         treys_score = evaluator.evaluate(board, hand)
         treys_class = evaluator.class_to_string(evaluator.get_rank_class(treys_score))
+        if treys_class == "Royal Flush":
+            treys_class = "Straight Flush"
         assert evaluate_best(cards).class_name == treys_class
+
+
+def test_fixed_draw_cases_report_outs_and_multiway_risk() -> None:
+    observation = make_observation()
+    observation.phase = "flop"
+    observation.hole_cards = ["As", "Ks"]
+    observation.community_cards = ["Qs", "Js", "2d"]
+    facts = build_decision_facts(observation)
+
+    assert facts["draw"]["flush_draw"] is True
+    assert facts["draw"]["straight_draw"] is True
+    assert facts["draw"]["outs"] >= 9
+    assert facts["multiway_players"] == 2
+    assert facts["spr"] > 0
+
+
+def test_random_hand_ranking_and_side_pot_properties() -> None:
+    rng = random.Random(20260715)
+    deck = [rank + suit for rank in "23456789TJQKA" for suit in "cdhs"]
+    for _ in range(300):
+        cards = rng.sample(deck, 7)
+        rank = evaluate_best(cards)
+        assert 0 <= rank.score[0] <= 8
+        assert len(rank.best_cards) == 5
+        assert len(set(rank.best_cards)) == 5
+
+        players = ["a", "b", "c", "d"]
+        contributions = {player: rng.randint(0, 100) for player in players}
+        folded = {player for player in players if rng.random() < 0.3}
+        hole_cards = rng.sample(deck, 8)
+        board = rng.sample([card for card in deck if card not in hole_cards], 5)
+        ranks = {
+            player: evaluate_best([*hole_cards[index * 2 : index * 2 + 2], *board])
+            for index, player in enumerate(players)
+            if player not in folded
+        }
+        payouts = split_side_pots(contributions, folded, ranks)
+        assert sum(int(item["amount"]) for item in payouts) == sum(contributions.values())
+        assert all(int(item["amount"]) >= 0 for item in payouts)
+
+
+def test_heads_up_button_moves_to_an_active_player_when_configured_seat_is_busted() -> None:
+    env = HoldemEnvironment()
+    env.reset(
+        TableSpec(
+            table_id="heads_up_after_elimination",
+            agent_ids=["a", "b", "c"],
+            starting_stacks={"a": 0, "b": 100, "c": 100},
+            dealer_index=0,
+        ),
+        seed=11,
+    )
+
+    assert env.dealer_index == 1
+    assert env.small_blind_agent_id == "b"
+    assert env.big_blind_agent_id == "c"
+    assert env.current_agent_id() == "b"
 
 
 def _make_env(stacks: dict[str, int]) -> HoldemEnvironment:

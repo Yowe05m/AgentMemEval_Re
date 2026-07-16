@@ -1,0 +1,37 @@
+extends: local_base_small.yaml
+
+# 该配置已对齐 8 人混合桌、checkpoint、LLM revision 和 5-seed 最低门槛。
+# embedding 正式模型尚未审核，因此暂保留 hash 消融后端；不得用于论文主表。
+agent:
+  embedding_backend: hash
+  experience_revision_strategy: llm
+  raise_sizing_policy: local_discrete
+
+table:
+  lifecycle: continuous_rebuy
+
+experiment:
+  scenario: fixed_evolving_table
+  seed: 20260715
+  seeds: [20260715, 20260716, 20260717, 20260718, 20260719]
+  train_hands: 150
+  test_hands: 25
+  checkpoint_interval: 10
+  checkpoint_test_hands: 25
+  evaluate_all_train_agents: true
+  protocol_readiness: blocked_pending_embedding_model_and_checkpoint_test_hands_review
+  preregistered_primary_metrics:
+    - train_chip_delta
+    - test_chip_delta
+    - paired_mechanism_difference
+    - generalization_gap
+  auxiliary_metrics: [bb_per_100]
+  agent_roster:
+    - {agent_id: fact_00, mechanism: fact}
+    - {agent_id: fact_01, mechanism: fact}
+    - {agent_id: expr_00, mechanism: expr, experience_revision_strategy: llm}
+    - {agent_id: expr_01, mechanism: expr, experience_revision_strategy: llm}
+    - {agent_id: sync_00, mechanism: fact_expr_sync, experience_revision_strategy: llm}
+    - {agent_id: sync_01, mechanism: fact_expr_sync, experience_revision_strategy: llm}
+    - {agent_id: async_00, mechanism: fact_expr_async, experience_revision_strategy: llm}
+    - {agent_id: async_01, mechanism: fact_expr_async, experience_revision_strategy: llm}

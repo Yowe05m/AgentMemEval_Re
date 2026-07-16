@@ -6,13 +6,20 @@
 不负责：不运行完整实验。
 """
 
+from pathlib import Path
+from uuid import uuid4
+
 from agentmemeval.core.domain import (
     FactualMemoryRecord,
     LegalAction,
     LegalActionSet,
 )
 from agentmemeval.environment.hand_evaluator import evaluate_best, split_side_pots
-from agentmemeval.memory.rag import hybrid_top_k_records
+from agentmemeval.memory.rag import (
+    HashEmbeddingBackend,
+    OpenAICompatibleEmbeddingBackend,
+    hybrid_top_k_records,
+)
 from tests.unit.test_memory import make_observation
 
 
@@ -55,6 +62,29 @@ def test_hybrid_rag_prefers_matching_poker_state() -> None:
     scored = hybrid_top_k_records(observation, [distant, matching], k=2)
     assert scored[0].record.record_id == "fact_matching"
     assert scored[0].feature > scored[1].feature
+    assert HashEmbeddingBackend().audit_metadata()["semantic_model"] is False
+
+
+def test_versioned_semantic_embedding_cache_batches_missing_texts() -> None:
+    class FakeEmbeddingBackend(OpenAICompatibleEmbeddingBackend):
+        def _request(self, texts: list[str]) -> list[list[float]]:
+            self.request_count += 1
+            return [[float(len(text)), 1.0] for text in texts]
+
+    cache_path = Path("tmp") / f"embedding-cache-{uuid4().hex}.json"
+    backend = FakeEmbeddingBackend(
+        model="semantic-test-model",
+        revision="revision-abc",
+        cache_path=cache_path,
+    )
+    first = backend.embed_texts(["same", "other"])
+    second = backend.embed_texts(["same"])
+
+    assert first[0] == second[0]
+    assert backend.request_count == 1
+    assert backend.cache_hit_count == 1
+    assert backend.audit_metadata()["revision"] == "revision-abc"
+    assert cache_path.exists()
 
 
 def test_poker_evaluator_names_straight_flush() -> None:

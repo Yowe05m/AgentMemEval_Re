@@ -19,7 +19,12 @@ from agentmemeval.core.domain import (
 )
 from agentmemeval.environment.observation import observation_to_compact_text
 from agentmemeval.memory.base import filter_records_by_scope, trajectory_quality
-from agentmemeval.memory.rag import build_retrieval_query, hybrid_top_k_records
+from agentmemeval.memory.rag import (
+    EmbeddingBackend,
+    HashEmbeddingBackend,
+    build_retrieval_query,
+    hybrid_top_k_records,
+)
 from agentmemeval.memory.retrievers import observation_features, top_k_records
 
 
@@ -48,6 +53,7 @@ class FactualMemory:
         retrieval_backend: str = "hybrid_rag",
         semantic_weight: float = 0.65,
         feature_weight: float = 0.35,
+        embedding_backend: EmbeddingBackend | None = None,
     ) -> None:
         """
         功能：初始化事实记忆。
@@ -69,7 +75,9 @@ class FactualMemory:
         self.retrieval_backend = retrieval_backend
         self.semantic_weight = semantic_weight
         self.feature_weight = feature_weight
+        self.embedding_backend = embedding_backend or HashEmbeddingBackend()
         self.records: list[FactualMemoryRecord] = []
+        self.next_record_index = 1
         self.last_retrieval: list[str] = []
         self.last_scores: list[dict[str, object]] = []
 
@@ -108,6 +116,7 @@ class FactualMemory:
                 self.top_k,
                 semantic_weight=self.semantic_weight,
                 feature_weight=self.feature_weight,
+                embedding_backend=self.embedding_backend,
             )
             retrieved = [item.record for item in scored_rag]
             self.last_scores = [
@@ -132,6 +141,7 @@ class FactualMemory:
                 "retrieval_scores": list(self.last_scores),
                 "candidate_count": len(candidates),
                 "excluded_fallback_fact_count": len(self.records) - len(eligible_records),
+                "embedding": self.embedding_backend.audit_metadata(),
             },
         )
 
@@ -169,7 +179,7 @@ class FactualMemory:
         )
         fact_text = _render_fact_text(trajectory, last_event, decisions)
         record = FactualMemoryRecord(
-            record_id=f"{self.agent_id}-fact-{len(self.records) + 1}",
+            record_id=f"{self.agent_id}-fact-{self.next_record_index}",
             agent_id=self.agent_id,
             table_id=trajectory.table_id,
             hand_id=trajectory.hand_id,
@@ -190,6 +200,7 @@ class FactualMemory:
                 **quality,
             },
         )
+        self.next_record_index += 1
         self.records.append(record)
         if len(self.records) > self.max_records:
             self.records = self.records[-self.max_records :]
@@ -209,12 +220,14 @@ class FactualMemory:
             agent_id=self.agent_id,
             scope=self.scope,
             payload={
-                "schema_version": 2,
+                "schema_version": 3,
                 "top_k": self.top_k,
                 "max_records": self.max_records,
                 "retrieval_backend": self.retrieval_backend,
                 "semantic_weight": self.semantic_weight,
                 "feature_weight": self.feature_weight,
+                "next_record_index": self.next_record_index,
+                "embedding": self.embedding_backend.audit_metadata(),
                 "records": [record.to_dict() for record in self.records],
             },
         )
@@ -249,6 +262,12 @@ class FactualMemory:
             record["source"] = source
             restored_records.append(FactualMemoryRecord(**record))
         self.records = restored_records
+        self.next_record_index = int(
+            snapshot.payload.get(
+                "next_record_index",
+                _next_record_index(self.records, self.agent_id),
+            )
+        )
 
     def metrics(self) -> dict[str, object]:
         """
@@ -273,7 +292,20 @@ class FactualMemory:
             "last_retrieved_fact_ids": list(self.last_retrieval),
             "retrieval_backend": self.retrieval_backend,
             "last_retrieval_scores": list(self.last_scores),
+            "embedding": self.embedding_backend.audit_metadata(),
         }
+
+
+def _next_record_index(records: list[FactualMemoryRecord], agent_id: str) -> int:
+    """Infer a collision-free counter when restoring snapshots written before schema v3."""
+
+    prefix = f"{agent_id}-fact-"
+    indexes = []
+    for record in records:
+        suffix = record.record_id.removeprefix(prefix)
+        if record.record_id.startswith(prefix) and suffix.isdigit():
+            indexes.append(int(suffix))
+    return max(indexes, default=0) + 1
 
 
 def _decision_view(event: DecisionEvent) -> dict[str, object]:

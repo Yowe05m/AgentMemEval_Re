@@ -72,10 +72,39 @@ def validate_config(config: dict[str, Any]) -> None:
     if "provider" not in config:
         raise ConfigError("配置缺少 provider 段")
     experiment = config["experiment"]
+    provider = config["provider"]
+    if not isinstance(experiment, dict):
+        raise ConfigError("experiment 必须是映射")
+    if not isinstance(provider, dict):
+        raise ConfigError("provider 必须是映射")
     if "scenario" not in experiment:
         raise ConfigError("experiment.scenario 不能为空")
     if "seed" not in experiment:
         raise ConfigError("experiment.seed 不能为空")
+    if not str(experiment["scenario"]).strip():
+        raise ConfigError("experiment.scenario 不能为空字符串")
+    try:
+        int(experiment["seed"])
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("experiment.seed 必须是整数") from exc
+    for field in ("train_hands", "test_hands", "checkpoint_test_hands"):
+        if field in experiment and int(experiment[field]) < 0:
+            raise ConfigError(f"experiment.{field} 不能为负数")
+    if "table_size" in experiment and int(experiment["table_size"]) < 2:
+        raise ConfigError("experiment.table_size 必须至少为 2")
+    table = config.get("table", {})
+    if not isinstance(table, dict):
+        raise ConfigError("table 必须是映射")
+    small_blind = int(table.get("small_blind", 1))
+    big_blind = int(table.get("big_blind", 2))
+    starting_stack = int(table.get("starting_stack", 1000))
+    if small_blind <= 0 or big_blind <= small_blind:
+        raise ConfigError("盲注必须满足 0 < small_blind < big_blind")
+    if starting_stack < big_blind:
+        raise ConfigError("table.starting_stack 不能小于 big_blind")
+    lifecycle = str(table.get("lifecycle", "tournament_elimination"))
+    if lifecycle not in {"tournament_elimination", "continuous_rebuy"}:
+        raise ConfigError(f"未知 table.lifecycle：{lifecycle}")
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

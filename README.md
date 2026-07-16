@@ -39,6 +39,16 @@ ruff check src tests
 
 ## 运行离线实验
 
+论文 Exp1 混合桌协议 smoke（Fact/Expr/Sync/Async 各 2 个 Agent、checkpoint 泛化）：
+
+```powershell
+python -m agentmemeval run --config configs/experiments/paper_exp1_mixed_mock.yaml
+```
+
+本地 Qwen 决策与 LLM experience revision 配置见
+`configs/experiments/paper_exp1_mixed_local.yaml`。该配置的真实语义 embedding 模型与
+checkpoint 泛化手数仍标记为待审核，不能直接作为论文主表配置。
+
 固定桌 FactAgent smoke：
 
 ```powershell
@@ -91,6 +101,9 @@ outputs/<run_id>/
 |- plots/
 `- report.md
 ```
+
+混合桌 checkpoint 协议还会生成 `checkpoint_generalization.json`，并在
+`memory_snapshots/` 中按 `checkpoint_XXXX` 保存每个目标 Agent 的独立快照。
 
 换桌场景会额外写入 `exposure_stats.json`，用于记录对手暴露次数、暴露熵、pairwise histogram 和不均衡度。`report` 命令会从这些原始工件重建报告，不需要重新跑实验。
 

@@ -170,6 +170,9 @@ class HoldemEnvironment:
             self.current_seat = None
             self._settle_without_showdown()
             return
+        configured_dealer = self.players[self.dealer_index]
+        if configured_dealer.stack <= 0 or configured_dealer.folded:
+            self.dealer_index = self._next_active_player(configured_dealer.seat).seat
         self._post_blinds()
         self.current_seat = self._first_preflop_seat()
         self._skip_unable_actors()
@@ -568,7 +571,16 @@ class HoldemEnvironment:
         }
         contributions = {player.agent_id: player.total_committed for player in self.players}
         folded = {player.agent_id for player in self.players if player.folded}
-        winners = split_side_pots(contributions, folded, ranks)
+        odd_chip_order = [
+            self.players[(self.dealer_index + offset) % len(self.players)].agent_id
+            for offset in range(1, len(self.players) + 1)
+        ]
+        winners = split_side_pots(
+            contributions,
+            folded,
+            ranks,
+            odd_chip_order=odd_chip_order,
+        )
         for payout in winners:
             player = self.players_by_id[str(payout["agent_id"])]
             player.stack += int(payout["amount"])

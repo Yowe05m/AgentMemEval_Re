@@ -16,8 +16,10 @@ from agentmemeval.core.domain import (
     MemoryScope,
     MemorySnapshot,
 )
+from agentmemeval.core.protocols import LLMClient
 from agentmemeval.memory.experiential import ExperientialMemory
 from agentmemeval.memory.factual import FactualMemory
+from agentmemeval.memory.rag import EmbeddingBackend
 
 
 class FactExprSyncMemory:
@@ -44,6 +46,10 @@ class FactExprSyncMemory:
         window_size: int = 8,
         max_records: int = 500,
         retrieval_backend: str = "hybrid_rag",
+        embedding_backend: EmbeddingBackend | None = None,
+        revision_strategy: str = "deterministic",
+        llm_client: LLMClient | None = None,
+        model: str = "",
     ) -> None:
         """
         功能：初始化组合记忆。
@@ -67,8 +73,16 @@ class FactExprSyncMemory:
             top_k=top_k,
             max_records=max_records,
             retrieval_backend=retrieval_backend,
+            embedding_backend=embedding_backend,
         )
-        self.expr = ExperientialMemory(agent_id, scope=scope, window_size=window_size)
+        self.expr = ExperientialMemory(
+            agent_id,
+            scope=scope,
+            window_size=window_size,
+            revision_strategy=revision_strategy,
+            llm_client=llm_client,
+            model=model,
+        )
 
     def build_context(self, observation: AgentObservation) -> MemoryContext:
         """

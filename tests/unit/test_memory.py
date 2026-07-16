@@ -17,6 +17,7 @@ from agentmemeval.core.domain import (
     MemorySnapshot,
     PlayerPublicState,
 )
+from agentmemeval.llm.mock import MockLLMClient
 from agentmemeval.memory.experiential import ExperientialMemory
 from agentmemeval.memory.fact_expr_async import FactExprAsyncMemory
 from agentmemeval.memory.factual import FactualMemory
@@ -121,6 +122,24 @@ def test_factual_memory_snapshot_restore_and_retrieve() -> None:
     assert restored.metrics()["fact_count"] == 1
 
 
+def test_factual_record_ids_remain_unique_after_capacity_trimming_and_restore() -> None:
+    memory = FactualMemory("agent_00", max_records=2)
+    for index in range(4):
+        memory.on_hand_finished(make_trajectory(hand_id=f"hand_{index}"))
+
+    assert [record.record_id for record in memory.records] == [
+        "agent_00-fact-3",
+        "agent_00-fact-4",
+    ]
+    restored = FactualMemory("agent_00", max_records=2)
+    restored.restore(memory.snapshot())
+    restored.on_hand_finished(make_trajectory(hand_id="hand_4"))
+    assert [record.record_id for record in restored.records] == [
+        "agent_00-fact-4",
+        "agent_00-fact-5",
+    ]
+
+
 def test_experiential_memory_versions() -> None:
     """
     功能：验证经验记忆会产生新版本。
@@ -138,6 +157,24 @@ def test_experiential_memory_versions() -> None:
     assert "## 起手牌" in memory.current.body
     assert "## 对手类型应对" in memory.current.body
     assert memory.metrics()["revision_count"] == 1
+
+
+def test_llm_experience_revision_is_schema_and_prompt_audited() -> None:
+    memory = ExperientialMemory(
+        "agent_00",
+        revision_strategy="llm",
+        llm_client=MockLLMClient(),
+        model="mock-deterministic-v1",
+    )
+    memory.on_hand_finished(make_trajectory())
+
+    revision = memory.snapshot().payload["revision_log"][0]
+    assert revision["revision_strategy"] == "llm_structured_revision"
+    assert revision["schema_version"] == "experience_revision_v1"
+    assert len(revision["prompt_sha256"]) == 64
+    assert revision["old_md"]
+    assert revision["new_md"]
+    assert revision["fallback_used"] is False
 
 
 def test_fallback_trajectory_is_audited_but_not_learned() -> None:

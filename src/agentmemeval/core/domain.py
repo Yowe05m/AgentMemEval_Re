@@ -502,6 +502,7 @@ class RunManifest(Serializable):
     code_version: str
     provider: str
     model: str
+    metadata: JsonDict = field(default_factory=dict)
     created_at: str = field(default_factory=utc_now_iso)
 
 

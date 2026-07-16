@@ -143,6 +143,7 @@ def split_side_pots(
     contributions: dict[str, int],
     folded: set[str],
     ranks: dict[str, PokerHandRank],
+    odd_chip_order: list[str] | None = None,
 ) -> list[dict[str, object]]:
     """
     功能：按 side-pot 分层计算派奖。
@@ -187,6 +188,9 @@ def split_side_pots(
             continue
         best = max(ranks[agent_id].score for agent_id in eligible)
         winners = [agent_id for agent_id in eligible if ranks[agent_id].score == best]
+        if odd_chip_order:
+            order_index = {agent_id: index for index, agent_id in enumerate(odd_chip_order)}
+            winners.sort(key=lambda agent_id: order_index.get(agent_id, len(order_index)))
         share, remainder = divmod(layer_pot, len(winners))
         for index, agent_id in enumerate(winners):
             payouts.append(

@@ -10,10 +10,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import os
 import re
+import urllib.request
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
 
 from agentmemeval.core.domain import AgentObservation, FactualMemoryRecord
 from agentmemeval.memory.retrievers import jaccard_similarity, observation_features
@@ -42,6 +47,150 @@ class RetrievalScore:
     semantic: float
     feature: float
     salience: float
+
+
+class EmbeddingBackend(Protocol):
+    """Versioned batch embedding boundary used by factual memory."""
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
+
+    def audit_metadata(self) -> dict[str, object]: ...
+
+
+class HashEmbeddingBackend:
+    """Deterministic offline ablation backend; it is not a semantic model."""
+
+    def __init__(self, dimensions: int = 256) -> None:
+        self.dimensions = max(16, int(dimensions))
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return embed_texts(texts, dimensions=self.dimensions)
+
+    def audit_metadata(self) -> dict[str, object]:
+        return {
+            "backend": "hash",
+            "dimensions": self.dimensions,
+            "semantic_model": False,
+        }
+
+
+class OpenAICompatibleEmbeddingBackend:
+    """OpenAI-compatible /embeddings backend with a version-keyed persistent cache."""
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        revision: str,
+        base_url_env: str = "EMBEDDING_BASE_URL",
+        api_key_env: str = "EMBEDDING_API_KEY",
+        api_key_required: bool = False,
+        timeout_seconds: float = 60.0,
+        cache_path: str | Path | None = None,
+    ) -> None:
+        if not model or not revision:
+            raise ValueError("真实 embedding backend 必须固定 model 和 revision")
+        self.model = model
+        self.revision = revision
+        self.base_url_env = base_url_env
+        self.api_key_env = api_key_env
+        self.api_key_required = api_key_required
+        self.timeout_seconds = timeout_seconds
+        self.cache_path = Path(cache_path) if cache_path else None
+        self.cache: dict[str, list[float]] = {}
+        self.request_count = 0
+        self.cache_hit_count = 0
+        if self.cache_path and self.cache_path.exists():
+            raw = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                self.cache = {
+                    str(key): [float(value) for value in values]
+                    for key, values in raw.items()
+                    if isinstance(values, list)
+                }
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        keys = [self._key(text) for text in texts]
+        missing = [text for text, key in zip(texts, keys, strict=True) if key not in self.cache]
+        self.cache_hit_count += len(texts) - len(missing)
+        if missing:
+            vectors = self._request(missing)
+            for text, vector in zip(missing, vectors, strict=True):
+                self.cache[self._key(text)] = _normalize(vector)
+            self._persist_cache()
+        return [list(self.cache[key]) for key in keys]
+
+    def audit_metadata(self) -> dict[str, object]:
+        return {
+            "backend": "openai_compatible",
+            "model": self.model,
+            "revision": self.revision,
+            "semantic_model": True,
+            "cache_path": str(self.cache_path) if self.cache_path else None,
+            "cache_entries": len(self.cache),
+            "cache_hit_count": self.cache_hit_count,
+            "request_count": self.request_count,
+        }
+
+    def _request(self, texts: list[str]) -> list[list[float]]:
+        base_url = os.environ.get(self.base_url_env)
+        api_key = os.environ.get(self.api_key_env, "")
+        if not base_url:
+            raise RuntimeError(f"embedding backend 缺少环境变量 {self.base_url_env}")
+        if self.api_key_required and not api_key:
+            raise RuntimeError(f"embedding backend 缺少环境变量 {self.api_key_env}")
+        payload = json.dumps({"model": self.model, "input": texts}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        request = urllib.request.Request(
+            base_url.rstrip("/") + "/embeddings",
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        ordered = sorted(body["data"], key=lambda item: int(item["index"]))
+        vectors = [[float(value) for value in item["embedding"]] for item in ordered]
+        if len(vectors) != len(texts):
+            raise RuntimeError("embedding 响应数量与输入数量不一致")
+        self.request_count += 1
+        return vectors
+
+    def _key(self, text: str) -> str:
+        payload = f"{self.model}\0{self.revision}\0{text}".encode()
+        return hashlib.sha256(payload).hexdigest()
+
+    def _persist_cache(self) -> None:
+        if not self.cache_path:
+            return
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
+        temporary.write_text(json.dumps(self.cache, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(self.cache_path)
+
+
+def build_embedding_backend(config: dict[str, object], agent_id: str) -> EmbeddingBackend:
+    """Build a configured embedding backend without silently selecting a real model."""
+
+    backend = str(config.get("embedding_backend", "hash"))
+    if backend == "hash":
+        return HashEmbeddingBackend(int(config.get("embedding_dimensions", 256)))
+    if backend != "openai_compatible":
+        raise ValueError(f"未知 embedding backend：{backend}")
+    cache_template = str(
+        config.get("embedding_cache_path", "outputs/embedding_cache/{agent_id}.json")
+    )
+    return OpenAICompatibleEmbeddingBackend(
+        model=str(config.get("embedding_model", "")),
+        revision=str(config.get("embedding_revision", "")),
+        base_url_env=str(config.get("embedding_base_url_env", "EMBEDDING_BASE_URL")),
+        api_key_env=str(config.get("embedding_api_key_env", "EMBEDDING_API_KEY")),
+        api_key_required=bool(config.get("embedding_api_key_required", False)),
+        timeout_seconds=float(config.get("embedding_timeout_seconds", 60)),
+        cache_path=cache_template.format(agent_id=agent_id),
+    )
 
 
 def build_retrieval_query(observation: AgentObservation) -> str:
@@ -134,6 +283,7 @@ def topk_by_similarity(
     vec_lookup: dict[str, list[float]] | None = None,
     salience_fn: Callable[[str], float] | None = None,
     dimensions: int = 256,
+    embedding_backend: EmbeddingBackend | None = None,
 ) -> list[RetrievalScore]:
     """
     功能：按 embedding 相似度和可选显著性返回 top-k 事实。
@@ -152,12 +302,15 @@ def topk_by_similarity(
 
     if not candidates or k <= 0:
         return []
-    query_vec = embed_text(query_text, dimensions=dimensions)
+    backend = embedding_backend or HashEmbeddingBackend(dimensions)
+    texts = [query_text, *[fact_retrieval_text(record) for record in candidates]]
+    vectors = backend.embed_texts(texts)
+    query_vec = vectors[0]
     scored: list[RetrievalScore] = []
-    for record in candidates:
+    for index, record in enumerate(candidates, start=1):
         record_vec = (vec_lookup or {}).get(record.record_id)
         if record_vec is None:
-            record_vec = embed_text(fact_retrieval_text(record), dimensions=dimensions)
+            record_vec = vectors[index]
         semantic = _dot(query_vec, record_vec)
         salience = float(salience_fn(record.record_id) if salience_fn else 1.0)
         score = semantic + math.log(max(salience, 1e-6)) if salience_fn else semantic
@@ -177,6 +330,7 @@ def hybrid_top_k_records(
     feature_weight: float = 0.35,
     salience_fn: Callable[[str], float] | None = None,
     dimensions: int = 256,
+    embedding_backend: EmbeddingBackend | None = None,
 ) -> list[RetrievalScore]:
     """
     功能：使用语义 hash embedding + 结构特征 Jaccard 的混合 RAG 排序。
@@ -197,11 +351,14 @@ def hybrid_top_k_records(
     if not records or k <= 0:
         return []
     query_text = build_retrieval_query(observation)
-    query_vec = embed_text(query_text, dimensions=dimensions)
+    backend = embedding_backend or HashEmbeddingBackend(dimensions)
+    texts = [query_text, *[fact_retrieval_text(record) for record in records]]
+    vectors = backend.embed_texts(texts)
+    query_vec = vectors[0]
     query_features = observation_features(observation)
     scored: list[RetrievalScore] = []
-    for record in records:
-        semantic = _dot(query_vec, embed_text(fact_retrieval_text(record), dimensions=dimensions))
+    for index, record in enumerate(records, start=1):
+        semantic = _dot(query_vec, vectors[index])
         feature = jaccard_similarity(query_features, record.features)
         salience = float(salience_fn(record.record_id) if salience_fn else 1.0)
         base = semantic_weight * semantic + feature_weight * feature
@@ -241,3 +398,8 @@ def _dot(left: list[float], right: list[float]) -> float:
     """
 
     return sum(a * b for a, b in zip(left, right, strict=False))
+
+
+def _normalize(vector: list[float]) -> list[float]:
+    norm = math.sqrt(sum(value * value for value in vector))
+    return [value / norm for value in vector] if norm > 0 else vector

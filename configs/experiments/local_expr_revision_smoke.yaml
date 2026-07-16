@@ -1,0 +1,14 @@
+extends: local_base_small.yaml
+
+agent:
+  mechanism: expr
+  experience_revision_strategy: llm
+  window_size: 1
+
+experiment:
+  seed: 20260715
+  run_id: local_expr_revision_smoke_20260715
+  output_root: tmp/local_model_smoke
+  train_hands: 1
+  test_hands: 0
+  table_size: 4

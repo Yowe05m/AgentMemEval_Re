@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agentmemeval.core.domain import AgentObservation
-from agentmemeval.environment.hand_evaluator import evaluate_best
+from agentmemeval.environment.decision_facts import build_decision_facts
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,26 +31,17 @@ class CallRisk:
 def build_call_risk(observation: AgentObservation) -> CallRisk:
     """Compute the real capped call cost instead of trusting the displayed to_call."""
 
-    self_state = next(
-        player for player in observation.players if player.agent_id == observation.agent_id
-    )
-    stack_before = max(0, self_state.stack)
-    call_cost = min(max(0, observation.to_call), stack_before)
-    stack_fraction = call_cost / max(1, stack_before)
-    required_equity = call_cost / max(1, observation.pot + call_cost)
+    facts = build_decision_facts(observation)
+    call = facts["call"]
     return CallRisk(
-        stack_before=stack_before,
-        call_cost=call_cost,
-        stack_fraction=stack_fraction,
-        required_equity=required_equity,
-        is_all_in=call_cost > 0 and call_cost >= stack_before,
-        made_hand_class=observation_made_hand_class(observation),
+        stack_before=int(call["stack_before"]),
+        call_cost=int(call["call_cost"]),
+        stack_fraction=float(call["stack_fraction"]),
+        required_equity=float(call["required_equity"]),
+        is_all_in=bool(call["is_all_in"]),
+        made_hand_class=str(facts["made_hand_class"]),
     )
 
 
 def observation_made_hand_class(observation: AgentObservation) -> str:
-    cards = [*observation.hole_cards, *observation.community_cards]
-    if len(cards) >= 5:
-        return evaluate_best(cards).class_name
-    paired = observation.hole_cards[0][0] == observation.hole_cards[1][0]
-    return "Pocket Pair" if paired else "Unpaired"
+    return str(build_decision_facts(observation)["made_hand_class"])

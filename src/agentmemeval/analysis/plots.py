@@ -81,6 +81,86 @@ def plot_stack_curves(hand_summaries: list[dict[str, Any]], output_dir: str | Pa
         return str(path)
 
 
+def generate_audit_plots(
+    hand_summaries: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    output_dir: str | Path,
+) -> list[str]:
+    """Generate action, table-composition, and risk-outcome audit charts."""
+
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    try:
+        import matplotlib.pyplot as plt
+
+        paths: list[str] = []
+        actions: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for event in events:
+            if event.get("event") == "action":
+                actions[str(event.get("agent_id"))][str(event.get("action_type"))] += 1
+        action_types = ["fold", "check", "call", "raise"]
+        agent_ids = sorted(actions)
+        fig, ax = plt.subplots(figsize=(max(8, len(agent_ids) * 0.8), 5.5))
+        bottoms = [0] * len(agent_ids)
+        for action_type in action_types:
+            values = [actions[agent_id].get(action_type, 0) for agent_id in agent_ids]
+            ax.bar(agent_ids, values, bottom=bottoms, label=action_type)
+            bottoms = [left + right for left, right in zip(bottoms, values, strict=True)]
+        ax.set_title("Action counts by agent")
+        ax.set_ylabel("Decision count")
+        ax.tick_params(axis="x", rotation=45)
+        ax.legend()
+        fig.tight_layout()
+        action_path = output / "action_counts_by_agent.png"
+        fig.savefig(action_path, dpi=140)
+        plt.close(fig)
+        paths.append(str(action_path))
+
+        train_hands = [hand for hand in hand_summaries if hand.get("stage") == "train"]
+        effective_counts = [
+            sum(int(stack) > 0 for stack in (hand.get("starting_stacks", {}) or {}).values())
+            for hand in train_hands
+        ]
+        fig, ax = plt.subplots(figsize=(9, 4.8))
+        ax.step(range(1, len(effective_counts) + 1), effective_counts, where="post")
+        ax.set_title("Effective players at each training hand start")
+        ax.set_xlabel("Train hand")
+        ax.set_ylabel("Effective players")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        players_path = output / "effective_players_curve.png"
+        fig.savefig(players_path, dpi=140)
+        plt.close(fig)
+        paths.append(str(players_path))
+
+        risk_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for event in events:
+            if event.get("event") != "action":
+                continue
+            facts = event.get("decision_facts") or {}
+            label = str((facts.get("call") or {}).get("risk_label", "unknown"))
+            risk_counts[str(event.get("agent_id"))][label] += 1
+        labels = ["low", "medium", "high", "all_in"]
+        fig, ax = plt.subplots(figsize=(max(8, len(agent_ids) * 0.8), 5.5))
+        bottoms = [0] * len(agent_ids)
+        for label in labels:
+            values = [risk_counts[agent_id].get(label, 0) for agent_id in agent_ids]
+            ax.bar(agent_ids, values, bottom=bottoms, label=label)
+            bottoms = [left + right for left, right in zip(bottoms, values, strict=True)]
+        ax.set_title("Rule-engine call-risk labels by agent")
+        ax.set_ylabel("Decision count")
+        ax.tick_params(axis="x", rotation=45)
+        ax.legend()
+        fig.tight_layout()
+        risk_path = output / "call_risk_labels_by_agent.png"
+        fig.savefig(risk_path, dpi=140)
+        plt.close(fig)
+        paths.append(str(risk_path))
+        return paths
+    except Exception as exc:  # noqa: BLE001
+        path = output / "audit_plots.txt"
+        path.write_text(f"审计图绘制失败：{exc}\n", encoding="utf-8")
+        return [str(path)]
 def _build_cumulative_by_stage(
     hand_summaries: list[dict[str, Any]],
 ) -> dict[str, dict[str, list[int]]]:

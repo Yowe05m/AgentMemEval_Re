@@ -55,7 +55,7 @@ def test_metrics_keep_train_and_test_denominators_separate() -> None:
     assert primary["per_agent"]["agent_00"]["hands"] == 3
     assert primary["stage_per_agent"]["train"]["agent_00"]["hands"] == 2
     assert primary["stage_per_agent"]["test"]["agent_00"]["hands"] == 1
-    assert primary["generalization_gap_chip_delta"] == {"agent_00": 6}
+    assert primary["generalization_gap_chip_delta"] == {"agent_00": 4}
     assert primary["generalization_gap_bb_per_100"] == {"agent_00": 200.0}
     quality = metrics["exploratory_metrics"]["decision_quality"]["combined"]
     assert quality["fallback_count"] == 1
@@ -146,3 +146,44 @@ def test_metrics_audit_high_risk_calls_by_agent_and_stage() -> None:
     assert combined["high_risk_hand_net_reward"] == -100
     assert combined["high_risk_made_hand_counts"] == {"Pair": 1}
     assert audit["by_stage"]["train"]["all_agents"]["high_risk_call_count"] == 1
+
+
+def test_vpip_is_preflop_only_and_raise_risk_uses_actual_commitment() -> None:
+    hands = [
+        {
+            "stage": "train",
+            "hand_id": "h1",
+            "rewards": {"agent_00": 10},
+            "showdown_ranks": {},
+        }
+    ]
+    events = [
+        {
+            "event": "action",
+            "stage": "train",
+            "phase": "preflop",
+            "agent_id": "agent_00",
+            "hand_id": "h1",
+            "action_type": "check",
+            "to_call": 0,
+            "raw_decision": {"action_type": "check"},
+        },
+        {
+            "event": "action",
+            "stage": "train",
+            "phase": "flop",
+            "agent_id": "agent_00",
+            "hand_id": "h1",
+            "action_type": "raise",
+            "amount": 80,
+            "committed": 20,
+            "to_call": 0,
+            "raw_decision": {"action_type": "raise"},
+            "decision_facts": {"call": {"stack_before": 100}},
+            "raise_sizing": {"native_max_amount": 100},
+        },
+    ]
+
+    metrics = compute_metrics(hands, events, big_blind=2)
+    assert metrics["primary_metrics"]["per_agent"]["agent_00"]["vpip"] == 0.0
+    assert metrics["exploratory_metrics"]["risk_actions"]["high_risk_raise_count"] == 0

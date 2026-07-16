@@ -78,7 +78,7 @@ class OpenAICompatibleClient:
         设计说明：默认要求模型输出 JSON，返回后仍交给 ActionGuard 校验。
         """
 
-        if schema is not ActionDecision:
+        if schema not in {ActionDecision, dict}:
             raise ProviderError(f"{self.provider} 暂不支持 schema：{schema!r}")
         api_key = os.environ.get(self.api_key_env)
         base_url = os.environ.get(self.base_url_env)
@@ -87,7 +87,7 @@ class OpenAICompatibleClient:
         if self.api_key_required and not api_key:
             raise ProviderError(f"{self.provider} 缺少环境变量 {self.api_key_env}")
 
-        def _call() -> ActionDecision:
+        def _call() -> ActionDecision | dict[str, object]:
             completion = self._post(base_url, api_key or "", request)
             try:
                 payload = _load_json_object(completion.content)
@@ -99,7 +99,7 @@ class OpenAICompatibleClient:
                     completion,
                     first_error,
                 )
-            return coerce_decision(payload)
+            return coerce_decision(payload) if schema is ActionDecision else payload
 
         result, _ = retry_call(_call, self.max_retries)
         return result  # type: ignore[return-value]
@@ -275,6 +275,35 @@ def _response_format(
     if mode in {"none", "prompt_only", "disabled"}:
         return None
     if mode == "json_schema":
+        if (
+            request is not None
+            and request.metadata.get("response_schema") == "experience_revision_v1"
+        ):
+            string_array = {"type": "array", "items": {"type": "string"}}
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "experience_revision",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "keep": {"type": "boolean"},
+                            "new_md": {"type": "string"},
+                            "calibration_note": {"type": "string"},
+                            "self_check": {"type": "string"},
+                            "supporting_fact_ids": string_array,
+                            "contradicting_fact_ids": string_array,
+                            "noise_fact_ids": string_array,
+                        },
+                        "required": [
+                            "keep", "new_md", "calibration_note", "self_check",
+                            "supporting_fact_ids", "contradicting_fact_ids", "noise_fact_ids",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            }
         legal_types = ["fold", "check", "call", "raise"]
         raise_rule = None
         if request is not None:

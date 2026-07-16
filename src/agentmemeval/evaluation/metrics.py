@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import statistics
 from collections import defaultdict
 from typing import Any
 
@@ -62,7 +63,7 @@ def compute_metrics(
     test = stage_per_agent.get("test", {})
     comparable_agents = sorted(set(train) & set(test))
     generalization_gap_chip_delta = {
-        agent_id: train[agent_id]["chip_delta"] - test[agent_id]["chip_delta"]
+        agent_id: train[agent_id]["chip_per_hand"] - test[agent_id]["chip_per_hand"]
         for agent_id in comparable_agents
     }
     generalization_gap_bb_per_100 = {
@@ -83,7 +84,10 @@ def compute_metrics(
             "stage_per_agent": stage_per_agent,
             "generalization_gap_chip_delta": generalization_gap_chip_delta,
             "generalization_gap_bb_per_100": generalization_gap_bb_per_100,
-            "generalization_gap_definition": "train minus test; only agents present in both stages",
+            "generalization_gap_definition": (
+                "train minus test on per-hand chip and BB/100 rates; "
+                "only agents present in both stages"
+            ),
         },
         "exploratory_metrics": {
             "action_behavior": {
@@ -121,6 +125,8 @@ def compute_metrics(
                     for stage in stages
                 },
             },
+            "table_dynamics": _table_dynamics(hand_summaries, events),
+            "risk_actions": _risk_action_quality(hand_summaries, events),
         },
         "run_counters": {
             "hands": len(hand_summaries),
@@ -141,10 +147,12 @@ def _compute_per_agent(
     rewards_by_agent: dict[str, int] = defaultdict(int)
     hands_by_agent: dict[str, int] = defaultdict(int)
     wins_by_agent: dict[str, int] = defaultdict(int)
+    hand_rewards_by_agent: dict[str, list[int]] = defaultdict(list)
     for hand in hand_summaries:
         for agent_id, reward in (hand.get("rewards", {}) or {}).items():
             value = int(reward)
             rewards_by_agent[agent_id] += value
+            hand_rewards_by_agent[agent_id].append(value)
             hands_by_agent[agent_id] += 1
             if value > 0:
                 wins_by_agent[agent_id] += 1
@@ -153,6 +161,8 @@ def _compute_per_agent(
     vpip_hands: dict[str, set[str]] = defaultdict(set)
     faced_raise: dict[str, int] = defaultdict(int)
     folded_to_raise: dict[str, int] = defaultdict(int)
+    faced_bet: dict[str, int] = defaultdict(int)
+    folded_to_bet: dict[str, int] = defaultdict(int)
     postflop_raise_hands: dict[str, set[str]] = defaultdict(set)
     intent_bluff_hands: dict[str, set[str]] = defaultdict(set)
     for event in events:
@@ -162,9 +172,13 @@ def _compute_per_agent(
         action = str(event.get("action_type"))
         hand_id = str(event.get("hand_id"))
         action_counts[agent_id][action] += 1
-        if action in {"call", "raise"}:
+        if str(event.get("phase")) == "preflop" and action in {"call", "raise"}:
             vpip_hands[agent_id].add(hand_id)
         if int(event.get("to_call") or 0) > 0:
+            faced_bet[agent_id] += 1
+            if action == "fold":
+                folded_to_bet[agent_id] += 1
+        if bool(event.get("facing_effective_raise", False)):
             faced_raise[agent_id] += 1
             if action == "fold":
                 folded_to_raise[agent_id] += 1
@@ -198,10 +212,15 @@ def _compute_per_agent(
         hands = max(1, hands_by_agent[agent_id])
         reward = rewards_by_agent[agent_id]
         counts = dict(action_counts.get(agent_id, {}))
+        hand_rewards = hand_rewards_by_agent[agent_id]
+        max_reward = max(hand_rewards, key=lambda value: (abs(value), value))
+        absolute_activity = sum(abs(value) for value in hand_rewards)
+        winsorized = _winsorized(hand_rewards)
         total_actions = max(1, sum(counts.values()))
         per_agent[agent_id] = {
             "hands": hands,
             "chip_delta": reward,
+            "chip_per_hand": reward / hands,
             "bb_per_100": (reward / max(1, big_blind)) / hands * 100,
             "win_rate": wins_by_agent[agent_id] / hands,
             "vpip": len(vpip_hands.get(agent_id, set())) / hands,
@@ -214,9 +233,24 @@ def _compute_per_agent(
                 if faced_raise[agent_id]
                 else 0.0
             ),
+            "fold_to_bet": (
+                folded_to_bet[agent_id] / faced_bet[agent_id]
+                if faced_bet[agent_id]
+                else 0.0
+            ),
             "proxy_bluff_rate": proxy_bluff.get(agent_id, 0.0),
             "intent_bluff_rate": intent_bluff.get(agent_id, 0.0),
             "action_counts": counts,
+            "hand_reward_sensitivity": {
+                "max_absolute_hand_reward": max_reward,
+                "max_absolute_hand_reward_magnitude": abs(max_reward),
+                "share_of_absolute_reward_activity": abs(max_reward)
+                / max(1, absolute_activity),
+                "share_of_absolute_final_delta": abs(max_reward) / max(1, abs(reward)),
+                "chip_delta_without_max_absolute_hand": reward - max_reward,
+                "median_hand_reward": statistics.median(hand_rewards),
+                "winsorized_chip_delta_05_95": sum(winsorized),
+            },
             "memory": (memory_metrics or {}).get(agent_id, {}),
         }
     return per_agent
@@ -345,6 +379,122 @@ def _call_risk_quality(
             for agent_id, agent_calls in sorted(by_agent_events.items())
         },
     }
+
+
+def _table_dynamics(
+    hand_summaries: list[dict[str, Any]], events: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Audit effective table size, elimination timing, survivors, and all-in frequency."""
+
+    by_stage: dict[str, dict[str, Any]] = {}
+    stages = sorted({str(hand.get("stage", "unknown")) for hand in hand_summaries})
+    for stage in stages:
+        hands = [hand for hand in hand_summaries if str(hand.get("stage")) == stage]
+        effective_players = [
+            sum(int(stack) > 0 for stack in (hand.get("starting_stacks", {}) or {}).values())
+            for hand in hands
+        ]
+        elimination_hand: dict[str, int] = {}
+        for index, hand in enumerate(hands, start=1):
+            for agent_id, stack in (hand.get("final_stacks", {}) or {}).items():
+                if int(stack) <= 0 and str(agent_id) not in elimination_hand:
+                    elimination_hand[str(agent_id)] = int(hand.get("hand_number", index))
+        final_stacks = (hands[-1].get("final_stacks", {}) or {}) if hands else {}
+        stage_actions = [
+            event
+            for event in events
+            if event.get("event") == "action" and str(event.get("stage")) == stage
+        ]
+        all_in_actions = [event for event in stage_actions if _is_all_in_action(event)]
+        by_stage[stage] = {
+            "effective_players_by_hand": effective_players,
+            "elimination_hand_by_agent": elimination_hand,
+            "final_survivor_count": sum(int(stack) > 0 for stack in final_stacks.values()),
+            "all_in_action_count": len(all_in_actions),
+            "all_in_action_rate": (
+                len(all_in_actions) / len(stage_actions) if stage_actions else 0.0
+            ),
+        }
+    return {"by_stage": by_stage}
+
+
+def _risk_action_quality(
+    hand_summaries: list[dict[str, Any]], events: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Report high-risk calls and raises together with the corresponding hand reward."""
+
+    rewards = {
+        (str(hand.get("hand_id")), str(agent_id)): int(reward)
+        for hand in hand_summaries
+        for agent_id, reward in (hand.get("rewards", {}) or {}).items()
+    }
+    selected: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("event") != "action" or event.get("action_type") not in {"call", "raise"}:
+            continue
+        action_type = str(event.get("action_type"))
+        if action_type == "call":
+            fraction = float(
+                (event.get("decision_facts") or {})
+                .get("call", {})
+                .get("stack_fraction", 0.0)
+            )
+        else:
+            sizing = event.get("raise_sizing") or {}
+            facts = event.get("decision_facts") or {}
+            stack_before = float((facts.get("call") or {}).get("stack_before", 0.0))
+            fraction = max(0.0, float(event.get("committed") or 0.0)) / max(1.0, stack_before)
+            if sizing.get("native_max_amount") == event.get("amount"):
+                fraction = 1.0
+        if fraction < 0.5:
+            continue
+        selected.append(
+            {
+                "stage": event.get("stage"),
+                "agent_id": event.get("agent_id"),
+                "hand_id": event.get("hand_id"),
+                "action_type": action_type,
+                "stack_fraction": fraction,
+                "hand_net_reward": rewards.get(
+                    (str(event.get("hand_id")), str(event.get("agent_id"))), 0
+                ),
+                "raw_decision": event.get("raw_decision", {}),
+                "committed_action": {
+                    "action_type": event.get("action_type"),
+                    "amount": event.get("amount"),
+                },
+                "guard_repaired": event.get("guard_repaired", False),
+                "guard_errors": event.get("guard_errors", []),
+            }
+        )
+    unique_hand_agents = {
+        (str(item["hand_id"]), str(item["agent_id"])) for item in selected
+    }
+    return {
+        "high_risk_action_count": len(selected),
+        "high_risk_call_count": sum(item["action_type"] == "call" for item in selected),
+        "high_risk_raise_count": sum(item["action_type"] == "raise" for item in selected),
+        "net_reward": sum(rewards.get(key, 0) for key in unique_hand_agents),
+        "records": selected,
+    }
+
+
+def _is_all_in_action(event: dict[str, Any]) -> bool:
+    if event.get("action_type") == "call":
+        return bool((event.get("decision_facts") or {}).get("call", {}).get("is_all_in"))
+    if event.get("action_type") == "raise":
+        sizing = event.get("raise_sizing") or {}
+        return sizing.get("native_max_amount") == event.get("amount")
+    return False
+
+
+def _winsorized(values: list[int], lower: float = 0.05, upper: float = 0.95) -> list[float]:
+    if not values:
+        return []
+    ordered = sorted(float(value) for value in values)
+    low = ordered[int((len(ordered) - 1) * lower)]
+    high = ordered[int((len(ordered) - 1) * upper)]
+    return [min(high, max(low, float(value))) for value in values]
 
 
 def _compute_proxy_bluff_rates(

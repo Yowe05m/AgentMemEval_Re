@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Any
 
 from agentmemeval.agents.base import LLMDecisionAgent
 from agentmemeval.core.domain import (
@@ -19,6 +20,7 @@ from agentmemeval.core.domain import (
     TableSpec,
 )
 from agentmemeval.environment.action_risk import build_call_risk
+from agentmemeval.environment.decision_facts import build_decision_facts
 from agentmemeval.environment.holdem_adapter import HoldemEnvironment
 from agentmemeval.storage.artifacts import ArtifactManager
 
@@ -38,6 +40,7 @@ def run_single_hand(
     dealer_index: int = 0,
     hand_number: int = 1,
     max_actions: int = 200,
+    hand_metadata: dict[str, Any] | None = None,
 ) -> HandResult:
     """
     功能：运行一手牌并记录标准工件。
@@ -71,6 +74,7 @@ def run_single_hand(
         hand_number=hand_number,
     )
     env = HoldemEnvironment()
+    starting_stacks = dict(table_spec.starting_stacks)
     env.reset(table_spec, seed=seed)
     decision_events: dict[str, list[DecisionEvent]] = defaultdict(list)
     action_steps = 0
@@ -80,6 +84,7 @@ def run_single_hand(
             break
         observation = env.current_observation(current)
         call_risk = build_call_risk(observation)
+        decision_facts = build_decision_facts(observation)
         action, memory_context, metadata = agents[current].decide(observation)
         raw_payload = metadata.get("raw_decision", action.to_dict())
         raw_decision = ActionDecision(**raw_payload) if isinstance(raw_payload, dict) else action
@@ -107,8 +112,18 @@ def run_single_hand(
                 "prompt": metadata.get("prompt", {}),
                 "raise_sizing": metadata.get("raise_sizing", {}),
                 "call_risk": call_risk.to_dict(),
+                "decision_facts": decision_facts,
+                "facing_effective_raise": any(
+                    prior.get("phase") == observation.phase
+                    and bool(prior.get("effective_raise", False))
+                    for prior in observation.action_history
+                ),
                 "raw_decision": metadata.get("raw_decision", {}),
+                "committed_action": action.to_dict(),
+                "rewrite_reason": metadata.get("guard_errors", []),
+                "risk_gate_applied": False,
                 "memory_context": memory_context.to_dict(),
+                **(hand_metadata or {}),
             }
         )
         action_steps += 1
@@ -122,7 +137,10 @@ def run_single_hand(
                     "max_actions": max_actions,
                 }
             )
-            break
+            raise RuntimeError(
+                f"hand {observation.hand_id} exceeded max_actions={max_actions}; "
+                "refusing to force an incomplete board to showdown"
+            )
     result = env.finalize_hand()
     stacks.update(result.final_stacks)
     for agent_id in agent_ids:
@@ -152,12 +170,14 @@ def run_single_hand(
             "small_blind_agent_id": env.small_blind_agent_id,
             "big_blind_agent_id": env.big_blind_agent_id,
             "agent_ids": list(agent_ids),
+            "starting_stacks": starting_stacks,
             "rewards": dict(result.rewards),
             "final_stacks": dict(result.final_stacks),
             "winners": list(result.winners),
             "showdown_ranks": dict(result.showdown_ranks),
             "action_count": len(result.public_actions),
             "memory_updated": update_memory,
+            **(hand_metadata or {}),
         }
     )
     return result

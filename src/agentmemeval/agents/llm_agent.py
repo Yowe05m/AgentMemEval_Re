@@ -20,9 +20,15 @@ from agentmemeval.memory import (
     PersonalityDrivenMemory,
 )
 from agentmemeval.memory.personality_driven import DEFAULT_PERSONAS
+from agentmemeval.memory.rag import build_embedding_backend
 
 
-def build_memory(agent_id: str, config: dict[str, object]) -> MemoryMechanism:
+def build_memory(
+    agent_id: str,
+    config: dict[str, object],
+    llm_client: LLMClient | None = None,
+    model: str = "",
+) -> MemoryMechanism:
     """
     功能：根据配置创建记忆机制。
     参数：
@@ -40,6 +46,7 @@ def build_memory(agent_id: str, config: dict[str, object]) -> MemoryMechanism:
     window_size = int(config.get("window_size", 8))
     max_records = int(config.get("max_records", 500))
     retrieval_backend = str(config.get("retrieval_backend", "hybrid_rag"))
+    embedding_backend = build_embedding_backend(config, agent_id)
     if mechanism in {"no_memory", "none", "naive"}:
         memory: MemoryMechanism = NullMemory(agent_id, scope=scope)  # type: ignore[arg-type]
     elif mechanism in {"fact", "FactAgent"}:
@@ -49,9 +56,17 @@ def build_memory(agent_id: str, config: dict[str, object]) -> MemoryMechanism:
             top_k=top_k,
             max_records=max_records,
             retrieval_backend=retrieval_backend,
+            embedding_backend=embedding_backend,
         )
     elif mechanism in {"expr", "ExprAgent"}:
-        memory = ExperientialMemory(agent_id, scope=scope, window_size=window_size)  # type: ignore[arg-type]
+        memory = ExperientialMemory(
+            agent_id,
+            scope=scope,  # type: ignore[arg-type]
+            window_size=window_size,
+            revision_strategy=str(config.get("experience_revision_strategy", "deterministic")),
+            llm_client=llm_client,
+            model=model,
+        )
     elif mechanism in {"fact_expr_sync", "fxsync", "FactExprSync"}:
         memory = FactExprSyncMemory(
             agent_id,
@@ -60,6 +75,10 @@ def build_memory(agent_id: str, config: dict[str, object]) -> MemoryMechanism:
             window_size=window_size,
             max_records=max_records,
             retrieval_backend=retrieval_backend,
+            embedding_backend=embedding_backend,
+            revision_strategy=str(config.get("experience_revision_strategy", "deterministic")),
+            llm_client=llm_client,
+            model=model,
         )
     elif mechanism in {"fact_expr_async", "fxasync", "FactExprAsync"}:
         memory = FactExprAsyncMemory(
@@ -76,6 +95,10 @@ def build_memory(agent_id: str, config: dict[str, object]) -> MemoryMechanism:
             stability_init=float(config.get("stability_init", 10.0)),
             stability_min=float(config.get("stability_min", 0.5)),
             stability_max=float(config.get("stability_max", 50.0)),
+            embedding_backend=embedding_backend,
+            revision_strategy=str(config.get("experience_revision_strategy", "deterministic")),
+            llm_client=llm_client,
+            model=model,
         )
     else:
         raise ConfigError(f"未知记忆机制：{mechanism}")
@@ -108,7 +131,7 @@ def build_agent(
     设计说明：除 NoMemory 的显式类外，其余机制共享同一 Agent 管线。
     """
 
-    memory = build_memory(agent_id, config)
+    memory = build_memory(agent_id, config, llm_client=llm_client, model=model)
     return LLMDecisionAgent(
         agent_id,
         memory,

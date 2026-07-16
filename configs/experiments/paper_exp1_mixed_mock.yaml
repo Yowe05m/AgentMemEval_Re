@@ -1,0 +1,46 @@
+extends: ../base.yaml
+
+provider:
+  provider: mock
+  model: mock-deterministic-v1
+  max_retries: 0
+
+table:
+  starting_stack: 1000
+  lifecycle: continuous_rebuy
+
+agent:
+  raise_sizing_policy: local_discrete
+  memory_scope: per_agent
+  top_k: 6
+  window_size: 6
+  embedding_backend: hash
+
+experiment:
+  scenario: fixed_evolving_table
+  seed: 20260715
+  seeds: [20260715, 20260716, 20260717, 20260718, 20260719]
+  output_root: outputs
+  train_hands: 20
+  test_hands: 5
+  checkpoint_interval: 10
+  checkpoint_test_hands: 5
+  evaluate_all_train_agents: true
+  update_memory_train: true
+  update_memory_test: false
+  preregistered_primary_metrics:
+    - train_chip_delta
+    - test_chip_delta
+    - paired_mechanism_difference
+    - generalization_gap
+  auxiliary_metrics: [bb_per_100]
+  agent_roster:
+    - {agent_id: fact_00, mechanism: fact}
+    - {agent_id: fact_01, mechanism: fact}
+    - {agent_id: expr_00, mechanism: expr, experience_revision_strategy: llm}
+    - {agent_id: expr_01, mechanism: expr, experience_revision_strategy: llm}
+    - {agent_id: sync_00, mechanism: fact_expr_sync, experience_revision_strategy: llm}
+    - {agent_id: sync_01, mechanism: fact_expr_sync, experience_revision_strategy: llm}
+    - {agent_id: async_00, mechanism: fact_expr_async, experience_revision_strategy: llm}
+    - {agent_id: async_01, mechanism: fact_expr_async, experience_revision_strategy: llm}
+

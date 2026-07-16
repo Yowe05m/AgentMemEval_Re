@@ -8,14 +8,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib.metadata
 import json
+import platform
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from agentmemeval.config.loader import dump_yaml
 from agentmemeval.core.domain import ExperimentResult, MemorySnapshot, RunManifest
+from agentmemeval.prompts.decision import BASE_SYSTEM_PROMPT, PROMPT_TEMPLATE_VERSION
+from agentmemeval.prompts.experience_update import EXPERIENCE_UPDATE_PROMPT
 from agentmemeval.storage.jsonl_store import JsonlStore
 from agentmemeval.storage.snapshots import save_snapshot
 
@@ -49,6 +55,10 @@ class ArtifactManager:
         self.root = Path(root)
         self.run_id = run_id
         self.run_dir = self.root / run_id
+        if self.run_dir.exists() and any(self.run_dir.iterdir()):
+            raise FileExistsError(
+                f"运行目录已存在且非空，拒绝追加或覆盖既有工件：{self.run_dir}"
+            )
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "memory_snapshots").mkdir(exist_ok=True)
         (self.run_dir / "plots").mkdir(exist_ok=True)
@@ -78,6 +88,7 @@ class ArtifactManager:
             code_version=get_code_version(Path.cwd()),
             provider=str(provider.get("provider", "mock")),
             model=str(provider.get("model", "")),
+            metadata=collect_runtime_metadata(self.config, Path.cwd()),
         )
 
     def write_manifest(self) -> None:
@@ -213,7 +224,7 @@ def get_code_version(cwd: Path) -> str:
 
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "-c", f"safe.directory={cwd.resolve().as_posix()}", "rev-parse", "HEAD"],
             cwd=str(cwd),
             check=True,
             capture_output=True,
@@ -223,3 +234,103 @@ def get_code_version(cwd: Path) -> str:
         return result.stdout.strip() or "unknown"
     except Exception:  # noqa: BLE001
         return "unknown"
+
+
+def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any]:
+    """Collect reproducibility metadata without persisting API keys or other secrets."""
+
+    provider = dict(config.get("provider", {}))
+    runtime: dict[str, Any] = {
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "code": {
+            "commit": get_code_version(cwd),
+            "dirty": _git_dirty(cwd),
+        },
+        "model": {
+            "name": provider.get("model"),
+            "revision": provider.get("model_revision"),
+            "weights_hash": provider.get("model_weights_hash"),
+        },
+        "service": {
+            key: provider.get(key)
+            for key in (
+                "provider", "temperature", "max_output_tokens", "timeout_seconds",
+                "max_retries", "structured_output_mode", "rate_limit_policy",
+                "service_startup_parameters",
+            )
+            if key in provider
+        },
+        "prompts": {
+            "decision_version": PROMPT_TEMPLATE_VERSION,
+            "decision_system_sha256": hashlib.sha256(
+                BASE_SYSTEM_PROMPT.encode("utf-8")
+            ).hexdigest(),
+            "experience_update_sha256": hashlib.sha256(
+                EXPERIENCE_UPDATE_PROMPT.encode("utf-8")
+            ).hexdigest(),
+        },
+        "packages": {
+            name: _package_version(name) for name in ("torch", "vllm", "treys")
+        },
+        "gpu": _gpu_metadata(),
+    }
+    try:
+        import torch
+
+        runtime["cuda"] = {
+            "torch_cuda_version": torch.version.cuda,
+            "available": torch.cuda.is_available(),
+            "device_count": torch.cuda.device_count(),
+        }
+    except Exception as exc:  # noqa: BLE001
+        runtime["cuda"] = {"available": False, "collection_error": type(exc).__name__}
+    return runtime
+
+
+def _package_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _git_dirty(cwd: Path) -> bool | None:
+    try:
+        result = subprocess.run(
+            [
+                "git", "-c", f"safe.directory={cwd.resolve().as_posix()}",
+                "status", "--porcelain",
+            ],
+            cwd=str(cwd),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return bool(result.stdout.strip())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _gpu_metadata() -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,driver_version,pci.bus_id",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        devices = []
+        for line in result.stdout.splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) >= 3:
+                devices.append({"name": parts[0], "driver": parts[1], "pci_bus_id": parts[2]})
+        return {"devices": devices}
+    except Exception as exc:  # noqa: BLE001
+        return {"devices": [], "collection_error": type(exc).__name__}

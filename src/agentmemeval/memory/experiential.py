@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from agentmemeval.core.domain import (
     AgentObservation,
     DecisionEvent,
@@ -18,7 +21,13 @@ from agentmemeval.core.domain import (
     MemorySnapshot,
     utc_now_iso,
 )
+from agentmemeval.core.protocols import LLMClient
+from agentmemeval.llm.schemas import LLMRequest
 from agentmemeval.memory.base import trajectory_quality
+from agentmemeval.prompts.experience_update import EXPERIENCE_UPDATE_PROMPT
+
+EXPERIENCE_REVISION_SCHEMA_VERSION = "experience_revision_v1"
+EXPERIENCE_PROMPT_VERSION = "2026-07-15-v1"
 
 INITIAL_EXPERIENCE = """# 我的经验
 
@@ -63,6 +72,9 @@ class ExperientialMemory:
         window_size: int = 8,
         max_chars: int = 1600,
         update_period: int = 1,
+        revision_strategy: str = "deterministic",
+        llm_client: LLMClient | None = None,
+        model: str = "",
     ) -> None:
         """
         功能：初始化经验记忆。
@@ -83,6 +95,13 @@ class ExperientialMemory:
         self.window_size = window_size
         self.max_chars = max_chars
         self.update_period = max(1, update_period)
+        if revision_strategy not in {"deterministic", "llm"}:
+            raise ValueError(f"未知 experience revision strategy：{revision_strategy}")
+        if revision_strategy == "llm" and llm_client is None:
+            raise ValueError("LLM experience revision 需要 llm_client")
+        self.revision_strategy = revision_strategy
+        self.llm_client = llm_client
+        self.model = model
         self.trajectories: list[HandTrajectory] = []
         self.skipped_trajectory_hand_ids: list[str] = []
         self.revision_log: list[dict[str, object]] = []
@@ -177,7 +196,12 @@ class ExperientialMemory:
                 metadata={
                     "window_size": len(recent),
                     "update_index": len(self.history),
-                    "strategy": "deterministic_five_section_revision",
+                    "strategy": revision["revision_strategy"],
+                    "schema_version": revision.get("schema_version"),
+                    "prompt_version": revision.get("prompt_version"),
+                    "prompt_sha256": revision.get("prompt_sha256"),
+                    "fallback_used": revision.get("fallback_used", False),
+                    "failure": revision.get("failure"),
                     "calibration_note": revision["calibration_note"],
                     "self_check": revision["self_check"],
                     "supporting_fact_ids": revision["supporting_fact_ids"],
@@ -205,6 +229,8 @@ class ExperientialMemory:
                 "window_size": self.window_size,
                 "max_chars": self.max_chars,
                 "update_period": self.update_period,
+                "revision_strategy": self.revision_strategy,
+                "revision_model": self.model,
                 "history": [doc.to_dict() for doc in self.history],
                 "revision_log": list(self.revision_log),
                 "skipped_trajectory_hand_ids": list(self.skipped_trajectory_hand_ids),
@@ -226,6 +252,10 @@ class ExperientialMemory:
         self.window_size = int(snapshot.payload.get("window_size", self.window_size))
         self.max_chars = int(snapshot.payload.get("max_chars", self.max_chars))
         self.update_period = int(snapshot.payload.get("update_period", self.update_period))
+        self.revision_strategy = str(
+            snapshot.payload.get("revision_strategy", self.revision_strategy)
+        )
+        self.model = str(snapshot.payload.get("revision_model", self.model))
         history = snapshot.payload.get("history", [])
         self.history = [ExperienceDocument(**doc) for doc in history] or self.history
         self.revision_log = list(snapshot.payload.get("revision_log", []))
@@ -251,11 +281,131 @@ class ExperientialMemory:
             "experience_version": self.current.version,
             "experience_chars": len(self.current.body),
             "revision_count": len(self.revision_log),
+            "revision_strategy": self.revision_strategy,
+            "revision_model": self.model,
+            "revision_fallback_count": sum(
+                bool(item.get("fallback_used")) for item in self.revision_log
+            ),
             "last_revision": self.revision_log[-1] if self.revision_log else {},
             "skipped_fallback_trajectories": len(self.skipped_trajectory_hand_ids),
         }
 
-    def _revise_from_window(self, recent: list[HandTrajectory]) -> dict[str, object]:
+    def _revise_from_window(
+        self,
+        recent: list[HandTrajectory],
+        evidence_records: list[object] | None = None,
+    ) -> dict[str, object]:
+        """Run the selected revision strategy with an audited deterministic fallback."""
+
+        deterministic = self._deterministic_revision(recent)
+        if self.revision_strategy == "deterministic":
+            return deterministic
+        assert self.llm_client is not None
+        trajectory_ids = [item.hand_id for item in recent]
+        fact_payload = [
+            {
+                "record_id": str(getattr(item, "record_id", "")),
+                "state_summary": str(getattr(item, "state_summary", "")),
+                "action_summary": str(getattr(item, "action_summary", "")),
+                "final_reward": int(getattr(item, "final_reward", 0)),
+            }
+            for item in (evidence_records or [])
+        ]
+        fact_ids = [str(item["record_id"]) for item in fact_payload if item["record_id"]]
+        evidence_ids = [*trajectory_ids, *fact_ids]
+        trajectory_payload = [
+            {
+                "hand_id": item.hand_id,
+                "summary": item.summary,
+                "final_reward": item.final_reward,
+            }
+            for item in recent
+        ]
+        system_prompt = (
+            "你负责修订可迁移的德州扑克经验文档。只使用给定轨迹与事实证据，不写具体玩家身份，"
+            "输出 JSON 对象，必须包含 keep,new_md,calibration_note,self_check,"
+            "supporting_fact_ids,contradicting_fact_ids,noise_fact_ids。"
+        )
+        user_prompt = (
+            f"{EXPERIENCE_UPDATE_PROMPT}\n\n旧文档：\n{self.current.body}\n\n"
+            f"证据轨迹：\n{json.dumps(trajectory_payload, ensure_ascii=False)}\n\n"
+            f"检索事实证据：\n{json.dumps(fact_payload, ensure_ascii=False)}"
+        )
+        prompt_hash = hashlib.sha256(
+            (system_prompt + "\n" + user_prompt).encode("utf-8")
+        ).hexdigest()
+        observation = next(
+            (
+                event.observation
+                for trajectory in reversed(recent)
+                for event in reversed(trajectory.decision_events)
+            ),
+            None,
+        )
+        if observation is None:
+            return {
+                **deterministic,
+                "fallback_used": True,
+                "failure": "no_decision_observation_for_llm_revision",
+                "prompt_version": EXPERIENCE_PROMPT_VERSION,
+                "prompt_sha256": prompt_hash,
+                "schema_version": EXPERIENCE_REVISION_SCHEMA_VERSION,
+            }
+        request = LLMRequest(
+            observation=observation,
+            memory_context=self.build_context(observation),
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            provider_config={"model": self.model},
+            metadata={
+                "response_schema": EXPERIENCE_REVISION_SCHEMA_VERSION,
+                "evidence_ids": evidence_ids,
+            },
+        )
+        try:
+            payload = self.llm_client.generate_structured(request, dict)
+            if not isinstance(payload, dict) or not str(payload.get("new_md", "")).strip():
+                raise ValueError("LLM revision 缺少非空 new_md")
+            new_md = str(payload["new_md"]).strip() + "\n"
+            if len(new_md) > self.max_chars:
+                new_md = new_md[: self.max_chars - 20].rstrip() + "\n- （因长度上限截断）\n"
+            allowed_ids = set(evidence_ids)
+            result = {
+                "rev": len(self.revision_log) + 1,
+                "hand_index": recent[-1].hand_id if recent else "",
+                "keep": bool(payload.get("keep", new_md == self.current.body)),
+                "old_md": self.current.body,
+                "new_md": new_md,
+                "calibration_note": str(payload.get("calibration_note", "")),
+                "self_check": str(payload.get("self_check", "")),
+                "supporting_fact_ids": _filter_evidence_ids(
+                    payload, "supporting_fact_ids", allowed_ids
+                ),
+                "contradicting_fact_ids": _filter_evidence_ids(
+                    payload, "contradicting_fact_ids", allowed_ids
+                ),
+                "noise_fact_ids": _filter_evidence_ids(payload, "noise_fact_ids", allowed_ids),
+                "revision_strategy": "llm_structured_revision",
+                "schema_version": EXPERIENCE_REVISION_SCHEMA_VERSION,
+                "prompt_version": EXPERIENCE_PROMPT_VERSION,
+                "prompt_sha256": prompt_hash,
+                "model": self.model,
+                "fallback_used": False,
+                "failure": None,
+            }
+            return result
+        except Exception as exc:  # noqa: BLE001
+            return {
+                **deterministic,
+                "fallback_used": True,
+                "failure": f"{type(exc).__name__}: {exc}",
+                "prompt_version": EXPERIENCE_PROMPT_VERSION,
+                "prompt_sha256": prompt_hash,
+                "schema_version": EXPERIENCE_REVISION_SCHEMA_VERSION,
+                "requested_strategy": "llm",
+            }
+
+    def _deterministic_revision(self, recent: list[HandTrajectory]) -> dict[str, object]:
         """
         功能：基于最近轨迹生成确定性五章节经验修订。
         参数：
@@ -361,4 +511,18 @@ class ExperientialMemory:
             "contradicting_fact_ids": [],
             "noise_fact_ids": [],
             "revision_strategy": "deterministic_five_section_revision",
+            "schema_version": EXPERIENCE_REVISION_SCHEMA_VERSION,
+            "prompt_version": None,
+            "prompt_sha256": None,
+            "fallback_used": False,
+            "failure": None,
         }
+
+
+def _filter_evidence_ids(
+    payload: dict[str, object], key: str, allowed_ids: set[str]
+) -> list[str]:
+    values = payload.get(key, [])
+    if not isinstance(values, list):
+        return []
+    return [str(value) for value in values if str(value) in allowed_ids]

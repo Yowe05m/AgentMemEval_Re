@@ -20,11 +20,12 @@ from agentmemeval.core.domain import (
     MemorySnapshot,
     utc_now_iso,
 )
+from agentmemeval.core.protocols import LLMClient
 from agentmemeval.core.seeds import make_rng
 from agentmemeval.memory.base import trajectory_quality
 from agentmemeval.memory.experiential import ExperientialMemory
 from agentmemeval.memory.factual import FactualMemory
-from agentmemeval.memory.rag import hybrid_top_k_records
+from agentmemeval.memory.rag import EmbeddingBackend, hybrid_top_k_records
 
 
 class FactExprAsyncMemory:
@@ -60,6 +61,10 @@ class FactExprAsyncMemory:
         stability_init: float = 10.0,
         stability_min: float = 0.5,
         stability_max: float = 50.0,
+        embedding_backend: EmbeddingBackend | None = None,
+        revision_strategy: str = "deterministic",
+        llm_client: LLMClient | None = None,
+        model: str = "",
     ) -> None:
         """
         功能：初始化异步组合记忆。
@@ -79,12 +84,21 @@ class FactExprAsyncMemory:
 
         self.agent_id = agent_id
         self.scope: MemoryScope = scope
-        self.fact = FactualMemory(agent_id, scope=scope, top_k=top_k, max_records=max_records)
+        self.fact = FactualMemory(
+            agent_id,
+            scope=scope,
+            top_k=top_k,
+            max_records=max_records,
+            embedding_backend=embedding_backend,
+        )
         self.expr = ExperientialMemory(
             agent_id,
             scope=scope,
             window_size=window_size,
             update_period=10**9,
+            revision_strategy=revision_strategy,
+            llm_client=llm_client,
+            model=model,
         )
         self.window_size = window_size
         self.sweep_every = max(1, sweep_every)
@@ -119,6 +133,7 @@ class FactExprAsyncMemory:
             candidates,
             self.fact.top_k,
             salience_fn=lambda record_id: self._salience(record_id, self.hand_counter + 1),
+            embedding_backend=self.fact.embedding_backend,
         )
         retrieved = [item.record for item in scored]
         retrieved_ids = {item.record.record_id for item in scored}
@@ -384,19 +399,37 @@ class FactExprAsyncMemory:
         )
         if len(body) > self.expr.max_chars:
             body = body[: self.expr.max_chars - 20].rstrip() + "\n- （因长度上限截断）"
-        revision = {
-            "rev": len(self.expr.revision_log) + 1,
-            "hand_index": self.recent[-1].hand_id if self.recent else "",
-            "keep": body == self.expr.current.body,
-            "old_md": self.expr.current.body,
-            "new_md": body + "\n",
-            "calibration_note": f"异步 sweep 平均收益 {avg_reward:.2f}，按支持/冲突/噪声事实调权。",
-            "self_check": "经验保持五章节结构，并避免具体玩家身份泄露。",
-            "supporting_fact_ids": supporting,
-            "contradicting_fact_ids": contradicting,
-            "noise_fact_ids": noise,
-            "revision_strategy": "salience_multi_path_sweep",
-        }
+        if self.expr.revision_strategy == "llm":
+            revision = self.expr._revise_from_window(
+                self.recent,
+                evidence_records=evidence,
+            )
+            revision.update(
+                {
+                    "sweep_evidence_fact_ids": evidence_ids,
+                    "sweep_supporting_fact_ids": supporting,
+                    "sweep_contradicting_fact_ids": contradicting,
+                    "sweep_noise_fact_ids": noise,
+                }
+            )
+        else:
+            revision = {
+                "rev": len(self.expr.revision_log) + 1,
+                "hand_index": self.recent[-1].hand_id if self.recent else "",
+                "keep": body == self.expr.current.body,
+                "old_md": self.expr.current.body,
+                "new_md": body + "\n",
+                "calibration_note": (
+                    f"异步 sweep 平均收益 {avg_reward:.2f}，按支持/冲突/噪声事实调权。"
+                ),
+                "self_check": "经验保持五章节结构，并避免具体玩家身份泄露。",
+                "supporting_fact_ids": supporting,
+                "contradicting_fact_ids": contradicting,
+                "noise_fact_ids": noise,
+                "revision_strategy": "salience_multi_path_sweep",
+                "fallback_used": False,
+                "failure": None,
+            }
         self.expr.revision_log.append(revision)
         self.expr.history.append(
             ExperienceDocument(
@@ -406,7 +439,12 @@ class FactExprAsyncMemory:
                 updated_at=utc_now_iso(),
                 scope=self.scope,
                 metadata={
-                    "strategy": "salience_multi_path_sweep",
+                    "strategy": revision["revision_strategy"],
+                    "schema_version": revision.get("schema_version"),
+                    "prompt_version": revision.get("prompt_version"),
+                    "prompt_sha256": revision.get("prompt_sha256"),
+                    "fallback_used": revision.get("fallback_used", False),
+                    "failure": revision.get("failure"),
                     "evidence_fact_ids": evidence_ids,
                     "supporting_fact_ids": supporting,
                     "contradicting_fact_ids": contradicting,
@@ -516,6 +554,7 @@ class FactExprAsyncMemory:
                 active,
                 self.evidence_k,
                 salience_fn=lambda record_id: self._salience(record_id, self.hand_counter),
+                embedding_backend=self.fact.embedding_backend,
             )
         ]
         buckets: dict[tuple[str, str], list[object]] = {}

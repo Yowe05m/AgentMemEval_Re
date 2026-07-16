@@ -9,13 +9,12 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
 
 from agentmemeval.core.domain import AgentObservation, FactualMemoryRecord, MemoryContext
-from agentmemeval.environment.hand_evaluator import RANKS, SUITS, evaluate_best
+from agentmemeval.environment.decision_facts import build_decision_facts
 from agentmemeval.environment.raise_sizing import RaiseSizingPlan
 
-PROMPT_TEMPLATE_VERSION = "2026-07-11-v3"
+PROMPT_TEMPLATE_VERSION = "2026-07-15-v4-authoritative-facts"
 
 BASE_SYSTEM_PROMPT = (
     "你是一个德州扑克决策 Agent。目标是在遵守规则的前提下最大化长期期望筹码收益，"
@@ -130,71 +129,39 @@ def render_user_prompt(
 def _render_deterministic_analysis(observation: AgentObservation) -> list[str]:
     """Render authoritative made-hand, draw, and stack-risk facts for small models."""
 
-    cards = [*observation.hole_cards, *observation.community_cards]
-    if len(cards) >= 5:
-        rank = evaluate_best(cards)
-        hand_line = (
-            f"- 当前已成牌：{rank.class_name}；最佳五张：{' '.join(rank.best_cards)}。"
-        )
-        current_class = rank.score[0]
-    else:
-        paired = observation.hole_cards[0][0] == observation.hole_cards[1][0]
-        suited = observation.hole_cards[0][1] == observation.hole_cards[1][1]
-        hand_line = (
-            f"- 翻前牌型：{'Pocket Pair' if paired else 'Unpaired'}；"
-            f"两张手牌{'同花色' if suited else '不同花色'}。"
-        )
-        current_class = -1
-
-    lines = [hand_line]
+    facts = build_decision_facts(observation)
+    draw = facts["draw"]
+    call = facts["call"]
+    best_cards = " ".join(facts["best_cards"])
+    lines = [f"- 当前已成牌：{facts['made_hand_class']}；规则引擎最佳牌：{best_cards}。"]
     if observation.phase == "river":
-        lines.append("- 听牌状态：河牌已结束，没有未来补牌；未完成的听牌没有摊牌价值。")
-    elif observation.phase in {"flop", "turn"}:
-        known = set(cards)
-        suit_counts = Counter(card[1] for card in cards)
-        flush_suit, flush_known = max(suit_counts.items(), key=lambda item: item[1])
-        flush_outs = 13 - flush_known if flush_known == 4 and current_class < 5 else 0
-        straight_outs = []
-        if current_class < 4:
-            for rank_code in RANKS:
-                for suit_code in SUITS:
-                    candidate = rank_code + suit_code
-                    if candidate in known:
-                        continue
-                    if evaluate_best([*cards, candidate]).score[0] in {4, 8}:
-                        straight_outs.append(candidate)
-        draw_parts = []
-        if flush_outs:
-            draw_parts.append(f"{flush_suit} 花色一张成同花，共 {flush_outs} 张未见同花 outs")
-        if straight_outs:
-            draw_parts.append(
-                f"一张成顺子，共 {len(straight_outs)} 张未见 outs（"
-                f"{' '.join(straight_outs)}）"
-            )
-        draw_summary = (
-            "；".join(draw_parts) if draw_parts else "没有规则引擎确认的同花或顺子听牌。"
-        )
-        lines.append("- 一张牌听牌：" + draw_summary)
+        lines.append("- 听牌状态：河牌已结束，没有未来补牌；outs=0。")
     else:
-        lines.append("- 听牌状态：翻前尚无公共牌，不把同花手牌或连张直接视为已成牌/已成听牌。")
-
-    self_state = next(
-        player for player in observation.players if player.agent_id == observation.agent_id
-    )
-    call_cost = min(max(0, observation.to_call), max(0, self_state.stack))
+        lines.append(
+            "- 听牌状态：flush_draw={flush_draw}，straight_draw={straight_draw}，"
+            "去重 outs={outs}，待发公共牌={cards_to_come}。".format(**draw)
+        )
+    call_cost = int(call["call_cost"])
     if call_cost:
-        required_equity = call_cost / max(1, observation.pot + call_cost)
-        stack_ratio = call_cost / max(1, self_state.stack)
         lines.append(
             f"- 跟注成本：实际最多投入 {call_cost}（显示需补齐 {observation.to_call}）；"
-            f"需要约 {required_equity:.1%} 胜率；占剩余筹码 {stack_ratio:.1%}；"
-            f"{'这是全下跟注。' if call_cost >= self_state.stack else '跟注后仍有剩余筹码。'}"
+            f"需要约 {float(call['required_equity']):.1%} 胜率；"
+            f"占剩余筹码 {float(call['stack_fraction']):.1%}；"
+            f"风险标签={call['risk_label']}，all_in={call['is_all_in']}；"
+            f"{'这是全下跟注。' if call['is_all_in'] else '跟注后仍有剩余筹码。'}"
         )
     else:
         lines.append("- 跟注成本：0，可以过牌时不要虚构跟注成本。")
+    lines.append(
+        f"- 桌面风险：SPR={float(facts['spr']):.2f}，有效筹码={facts['effective_stack']}，"
+        f"底池仍有效玩家={facts['multiway_players']}（对手 {facts['active_opponents']}）。"
+    )
 
     raise_rule = observation.legal_actions.rule_for("raise")
     if raise_rule and raise_rule.min_amount is not None and raise_rule.max_amount is not None:
+        self_state = next(
+            player for player in observation.players if player.agent_id == observation.agent_id
+        )
         min_cost = min(
             self_state.stack,
             max(0, raise_rule.min_amount - self_state.current_bet),
