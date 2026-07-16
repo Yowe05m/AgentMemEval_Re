@@ -1,0 +1,19 @@
+campaign:
+  campaign_id: task4_campaign_p_pilot_parallel_v2
+  design: mixed_table
+  protocol_label: calibration_pilot_parallel4_not_for_main_table
+  base_experiment_config: ../experiments/task4_campaign_p_pilot.yaml
+  output_root: outputs/campaigns
+  max_parallel_runs: 4
+  seeds:
+    - 2026071701
+    - 2026071702
+    - 2026071703
+    - 2026071704
+    - 2026071705
+    - 2026071706
+    - 2026071707
+    - 2026071708
+  conditions:
+    - condition_id: mixed_table
+      target_mechanism: mixed

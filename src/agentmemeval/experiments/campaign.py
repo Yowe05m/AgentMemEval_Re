@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import traceback
+from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,7 @@ def run_campaign(path: str | Path, *, resume: bool = False) -> dict[str, Any]:
     completed = 0
     failed = 0
     skipped = 0
+    pending: list[dict[str, Any]] = []
     for condition in conditions:
         condition_id = str(condition["condition_id"])
         mechanism = str(condition.get("target_mechanism", "mixed"))
@@ -134,52 +136,99 @@ def run_campaign(path: str | Path, *, resume: bool = False) -> dict[str, Any]:
                 run_id,
                 run_dir,
             )
-            _append_state(state_path, running)
-            _append_jsonl(events_path, {"event": "run_started", **running})
-            state_rows.append(running)
-            try:
-                result = run_resolved_config(run_config)
-                if not _run_artifacts_valid(run_dir):
-                    raise RuntimeError("run returned without the required final artifacts")
-                paper_eligible = bool(
-                    result.metrics.get("run_validity", {}).get("paper_eligible")
+            pending.append(
+                {
+                    "condition_id": condition_id,
+                    "mechanism": mechanism,
+                    "seed": seed,
+                    "attempt": attempt,
+                    "run_id": run_id,
+                    "run_dir": run_dir,
+                    "run_config": run_config,
+                    "running": running,
+                }
+            )
+
+    def start_unit(unit: dict[str, Any]) -> None:
+        running = unit["running"]
+        _append_state(state_path, running)
+        _append_jsonl(events_path, {"event": "run_started", **running})
+        state_rows.append(running)
+
+    def finish_unit(unit: dict[str, Any], future: Future[bool] | None = None) -> None:
+        nonlocal completed, failed
+        try:
+            paper_eligible = (
+                future.result()
+                if future is not None
+                else _execute_campaign_run(unit["run_config"], unit["run_dir"])
+            )
+            finished = _state_record(
+                unit["condition_id"],
+                unit["mechanism"],
+                unit["seed"],
+                unit["attempt"],
+                "complete",
+                unit["run_id"],
+                unit["run_dir"],
+                message=f"paper_eligible={str(paper_eligible).lower()}",
+            )
+            completed += 1
+        except Exception as exc:  # campaign must preserve the rest of the matrix
+            failure_class = _classify_failure(exc)
+            failure_dir = campaign_dir / "failures"
+            failure_dir.mkdir(exist_ok=True)
+            failure_path = failure_dir / f"{unit['run_id']}.txt"
+            if failure_path.exists():
+                raise FileExistsError(
+                    f"failure evidence path unexpectedly exists: {failure_path}"
+                ) from exc
+            failure_path.write_text(traceback.format_exc(), encoding="utf-8")
+            finished = _state_record(
+                unit["condition_id"],
+                unit["mechanism"],
+                unit["seed"],
+                unit["attempt"],
+                "failed",
+                unit["run_id"],
+                unit["run_dir"],
+                failure_class=failure_class,
+                message=f"{type(exc).__name__}: {exc}",
+            )
+            failed += 1
+        _append_state(state_path, finished)
+        _append_jsonl(events_path, {"event": "run_finished", **finished})
+        state_rows.append(finished)
+
+    max_parallel = int(spec.get("max_parallel_runs", 1))
+    if max_parallel == 1:
+        for unit in pending:
+            start_unit(unit)
+            finish_unit(unit)
+    else:
+        queue = iter(pending)
+        active: dict[Future[bool], dict[str, Any]] = {}
+        with ProcessPoolExecutor(max_workers=max_parallel) as executor:
+            for _ in range(min(max_parallel, len(pending))):
+                unit = next(queue)
+                start_unit(unit)
+                future = executor.submit(
+                    _execute_campaign_run, unit["run_config"], unit["run_dir"]
                 )
-                finished = _state_record(
-                    condition_id,
-                    mechanism,
-                    seed,
-                    attempt,
-                    "complete",
-                    run_id,
-                    run_dir,
-                    message=f"paper_eligible={str(paper_eligible).lower()}",
-                )
-                completed += 1
-            except Exception as exc:  # campaign must preserve the rest of the matrix
-                failure_class = _classify_failure(exc)
-                failure_dir = campaign_dir / "failures"
-                failure_dir.mkdir(exist_ok=True)
-                failure_path = failure_dir / f"{run_id}.txt"
-                if failure_path.exists():
-                    raise FileExistsError(
-                        f"failure evidence path unexpectedly exists: {failure_path}"
-                    ) from exc
-                failure_path.write_text(traceback.format_exc(), encoding="utf-8")
-                finished = _state_record(
-                    condition_id,
-                    mechanism,
-                    seed,
-                    attempt,
-                    "failed",
-                    run_id,
-                    run_dir,
-                    failure_class=failure_class,
-                    message=f"{type(exc).__name__}: {exc}",
-                )
-                failed += 1
-            _append_state(state_path, finished)
-            _append_jsonl(events_path, {"event": "run_finished", **finished})
-            state_rows.append(finished)
+                active[future] = unit
+            while active:
+                future = next(as_completed(active))
+                unit = active.pop(future)
+                finish_unit(unit, future)
+                next_unit = next(queue, None)
+                if next_unit is not None:
+                    start_unit(next_unit)
+                    next_future = executor.submit(
+                        _execute_campaign_run,
+                        next_unit["run_config"],
+                        next_unit["run_dir"],
+                    )
+                    active[next_future] = next_unit
 
     aggregate_result = aggregate_campaign(campaign_dir)
     completed_runs = _completed_runs(_read_state(state_path))
@@ -194,6 +243,7 @@ def run_campaign(path: str | Path, *, resume: bool = False) -> dict[str, Any]:
         "completed_matrix_units": len(completed_runs),
         "expected_matrix_units": len(conditions) * len(seeds),
         "aggregate_status": aggregate_result["status"],
+        "max_parallel_runs": max_parallel,
     }
     _append_jsonl(events_path, {"event": "campaign_invocation_finished", **summary})
     return summary
@@ -245,6 +295,12 @@ def _validate_campaign_spec(spec: dict[str, Any], base: dict[str, Any]) -> None:
     seeds = [int(seed) for seed in spec["seeds"]]
     if len(set(seeds)) != len(seeds):
         raise ConfigError("campaign.seeds 不能重复")
+    try:
+        max_parallel = int(spec.get("max_parallel_runs", 1))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("campaign.max_parallel_runs 必须是正整数") from exc
+    if max_parallel < 1 or max_parallel > 32:
+        raise ConfigError("campaign.max_parallel_runs 必须在 1 到 32 之间")
     conditions = _conditions(spec)
     condition_ids = [str(item["condition_id"]) for item in conditions]
     if len(set(condition_ids)) != len(condition_ids):
@@ -299,6 +355,7 @@ def _resolve_run_config(
             "campaign_design": str(spec["design"]),
             "campaign_condition_id": str(condition["condition_id"]),
             "protocol_label": str(spec.get("protocol_label", "unspecified")),
+            "campaign_max_parallel_runs": int(spec.get("max_parallel_runs", 1)),
         }
     )
     # Embedding caches are mutable acceleration artifacts.  A campaign must not
@@ -346,6 +403,15 @@ def _resolve_run_config(
             **target_config,
         }
     return config
+
+
+def _execute_campaign_run(run_config: dict[str, Any], run_dir: Path) -> bool:
+    """Execute one isolated leaf run; safe to call in a worker process."""
+
+    result = run_resolved_config(run_config)
+    if not _run_artifacts_valid(Path(run_dir)):
+        raise RuntimeError("run returned without the required final artifacts")
+    return bool(result.metrics.get("run_validity", {}).get("paper_eligible"))
 
 
 def _aggregate_campaign(

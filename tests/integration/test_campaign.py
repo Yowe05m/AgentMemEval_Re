@@ -65,6 +65,7 @@ def test_campaign_e_runs_append_only_matrix_and_resumes(tmp_path: Path) -> None:
                     "protocol_label": "not_for_paper_smoke",
                     "base_experiment_config": "base.yaml",
                     "output_root": str(tmp_path / "campaigns"),
+                    "max_parallel_runs": 2,
                     "seeds": [101],
                     "baseline_condition_id": "no_memory_target",
                     "conditions": [
@@ -95,6 +96,7 @@ def test_campaign_e_runs_append_only_matrix_and_resumes(tmp_path: Path) -> None:
     assert first["failed_this_invocation"] == 0
     assert first["completed_matrix_units"] == 5
     assert first["aggregate_status"] == "descriptive_only"
+    assert first["max_parallel_runs"] == 2
 
     campaign_dir = Path(first["campaign_dir"])
     run_dirs = sorted((campaign_dir / "runs").iterdir())
