@@ -84,6 +84,16 @@ def test_execution_health_rejects_fallback_and_conservation_violation() -> None:
     assert audit["stack_conservation_violation_hand_ids"] == ["h1"]
 
 
+def test_execution_health_rejects_experience_revision_fallback_once_per_agent() -> None:
+    metrics = _metrics()
+    per_agent = metrics["primary_metrics"]["per_agent"]  # type: ignore[index]
+    per_agent["fact_00"]["memory"]["revision_fallback_count"] = 2  # type: ignore[index]
+    audit = evaluate_execution_health([], metrics)
+    assert audit["valid"] is False
+    assert audit["fallback_count"] == 0
+    assert audit["memory_revision_fallback_count"] == 2
+
+
 def test_student_t_interval_is_used_for_small_samples() -> None:
     summary = summarize_values([1.0, 2.0, 3.0])
     assert summary["ci95_method"] == "student_t"

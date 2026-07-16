@@ -144,6 +144,7 @@ def evaluate_execution_health(
         .get("combined", {})
     )
     fallback_count = int(quality.get("fallback_count", 0))
+    memory_revision_fallback_count = revision_fallback_count(metrics)
     reward_violations: list[str] = []
     stack_violations: list[str] = []
     for hand in hand_summaries:
@@ -157,16 +158,50 @@ def evaluate_execution_health(
             int(value) for value in final.values()
         ):
             stack_violations.append(hand_id)
-    valid = not fallback_count and not reward_violations and not stack_violations
+    valid = (
+        not fallback_count
+        and not memory_revision_fallback_count
+        and not reward_violations
+        and not stack_violations
+    )
     return {
         "valid": valid,
         "fallback_count": fallback_count,
+        "memory_revision_fallback_count": memory_revision_fallback_count,
         "reward_conservation_violation_count": len(reward_violations),
         "reward_conservation_violation_hand_ids": reward_violations,
         "stack_conservation_violation_count": len(stack_violations),
         "stack_conservation_violation_hand_ids": stack_violations,
         "status": "passed" if valid else "invalid_execution",
     }
+
+
+def revision_fallback_count(metrics: dict[str, Any]) -> int:
+    """Count deterministic substitutes once per agent across train/test stages."""
+
+    primary = metrics.get("primary_metrics", {})
+    stage_per_agent = primary.get("stage_per_agent", {})
+    tables = (
+        list(stage_per_agent.values())
+        if isinstance(stage_per_agent, dict) and stage_per_agent
+        else [primary.get("per_agent", {})]
+    )
+    maximum_by_agent: dict[str, int] = {}
+    for per_agent in tables:
+        if not isinstance(per_agent, dict):
+            continue
+        for agent_id, values in per_agent.items():
+            if not isinstance(values, dict):
+                continue
+            memory = values.get("memory", {})
+            count = (
+                int(memory.get("revision_fallback_count", 0))
+                if isinstance(memory, dict)
+                else 0
+            )
+            key = str(agent_id)
+            maximum_by_agent[key] = max(maximum_by_agent.get(key, 0), count)
+    return sum(maximum_by_agent.values())
 
 
 def build_run_validity(

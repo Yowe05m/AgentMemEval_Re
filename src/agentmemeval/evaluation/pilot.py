@@ -8,7 +8,10 @@ import math
 from pathlib import Path
 from typing import Any
 
-from agentmemeval.evaluation.degeneracy import evaluate_behavior_health
+from agentmemeval.evaluation.degeneracy import (
+    evaluate_behavior_health,
+    revision_fallback_count,
+)
 from agentmemeval.evaluation.statistics import estimate_paired_seed_requirement
 
 PRIMARY_MDE_BB_PER_100 = 5.0
@@ -118,6 +121,7 @@ def build_pilot_freeze_proposal(
     campaign_e: dict[str, Any],
     campaign_p_metrics: list[dict[str, Any]],
     campaign_p_protocol_audits: list[dict[str, Any]],
+    campaign_e_metrics: list[dict[str, Any]],
     campaign_e_protocol_audits: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Combine power, behavior, execution, and retrieval freeze gates."""
@@ -134,6 +138,16 @@ def build_pilot_freeze_proposal(
         for index, audit in enumerate(campaign_e_protocol_audits)
         if dict(audit.get("execution_health", {})).get("valid") is not True
     )
+    execution_blockers.extend(
+        f"campaign_p run {index} used deterministic experience revision fallback"
+        for index, metrics in enumerate(campaign_p_metrics)
+        if revision_fallback_count(metrics) > 0
+    )
+    execution_blockers.extend(
+        f"campaign_e run {index} used deterministic experience revision fallback"
+        for index, metrics in enumerate(campaign_e_metrics)
+        if revision_fallback_count(metrics) > 0
+    )
     expected_p = int(campaign_p.get("expected_run_count", 0))
     expected_e = int(campaign_e.get("expected_run_count", 0))
     if len(campaign_p_metrics) != expected_p:
@@ -149,6 +163,10 @@ def build_pilot_freeze_proposal(
         execution_blockers.append(
             "campaign_e protocol audit count mismatch: "
             f"{len(campaign_e_protocol_audits)}/{expected_e}"
+        )
+    if len(campaign_e_metrics) != expected_e:
+        execution_blockers.append(
+            f"campaign_e metrics count mismatch: {len(campaign_e_metrics)}/{expected_e}"
         )
     blockers = [
         *list(power_plan["blockers"]),
@@ -201,8 +219,9 @@ def build_pilot_freeze_proposal_from_paths(
         _read_json(Path(row["run_dir"]) / "protocol_audit.json")
         for row in e_completed
     ]
+    e_metrics = [_read_json(Path(row["run_dir"]) / "metrics.json") for row in e_completed]
     proposal = build_pilot_freeze_proposal(
-        p_aggregate, e_aggregate, metrics, p_audits, e_audits
+        p_aggregate, e_aggregate, metrics, p_audits, e_metrics, e_audits
     )
     proposal["campaign_p_evidence"] = p_evidence
     proposal["campaign_e_evidence"] = e_evidence

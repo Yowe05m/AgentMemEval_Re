@@ -129,7 +129,7 @@ def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
     p_audits = [{"execution_health": {"valid": True}} for _ in metrics]
     e_audits = [{"execution_health": {"valid": True}} for _ in range(6)]
     proposal = build_pilot_freeze_proposal(
-        _p(), _e(), metrics, p_audits, e_audits
+        _p(), _e(), metrics, p_audits, metrics * 2, e_audits
     )
     assert proposal["status"] == "ready_to_generate_immutable_formal_configs"
     assert proposal["retrieval_freeze"] == {
@@ -142,18 +142,29 @@ def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
     }
     p_audits[0] = {"execution_health": {"valid": False}}
     blocked = build_pilot_freeze_proposal(
-        _p(), _e(), metrics, p_audits, e_audits
+        _p(), _e(), metrics, p_audits, metrics * 2, e_audits
     )
     assert blocked["status"] == "no_go_pilot_freeze_blocked"
     assert blocked["execution_blockers"]
     p_audits[0] = {"execution_health": {"valid": True}}
     e_audits[0] = {"execution_health": {"valid": False}}
     blocked_e = build_pilot_freeze_proposal(
-        _p(), _e(), metrics, p_audits, e_audits
+        _p(), _e(), metrics, p_audits, metrics * 2, e_audits
     )
     assert "campaign_e run 0 execution health is not valid" in blocked_e[
         "execution_blockers"
     ]
+    fallback_metrics = [_metrics() for _ in range(6)]
+    fallback_metrics[0]["primary_metrics"]["stage_per_agent"]["train"]["fact_00"][  # type: ignore[index]
+        "memory"
+    ]["revision_fallback_count"] = 1
+    revision_blocked = build_pilot_freeze_proposal(
+        _p(), _e(), metrics, p_audits, fallback_metrics, e_audits
+    )
+    assert (
+        "campaign_e run 0 used deterministic experience revision fallback"
+        in revision_blocked["execution_blockers"]
+    )
 
 
 def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> None:
@@ -194,6 +205,9 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
         run_dir.mkdir()
         (run_dir / "protocol_audit.json").write_text(
             json.dumps({"execution_health": {"valid": True}}), encoding="utf-8"
+        )
+        (run_dir / "metrics.json").write_text(
+            json.dumps(_metrics()), encoding="utf-8"
         )
         e_state_lines.append(
             f"t\tcondition-{index}\ttarget\t{index}\t1\tcomplete\te{index}"
