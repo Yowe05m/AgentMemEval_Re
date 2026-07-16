@@ -46,6 +46,22 @@ def build_memory(
     window_size = int(config.get("window_size", 8))
     max_records = int(config.get("max_records", 500))
     retrieval_backend = str(config.get("retrieval_backend", "hybrid_rag"))
+    raw_minimum_score = config.get("minimum_retrieval_score")
+    fact_options = {
+        "minimum_retrieval_score": (
+            None if raw_minimum_score is None else float(raw_minimum_score)
+        ),
+        "retrieval_threshold_status": str(
+            config.get("retrieval_threshold_status", "pending_pilot")
+        ),
+        "duplicate_window": int(config.get("fact_duplicate_window", 50)),
+        "reject_zero_reward_preflop_fold": bool(
+            config.get("reject_zero_reward_preflop_fold", True)
+        ),
+        "retrieval_signature_dedup": bool(
+            config.get("retrieval_signature_dedup", True)
+        ),
+    }
     embedding_backend = build_embedding_backend(config, agent_id)
     if mechanism in {"no_memory", "none", "naive"}:
         memory: MemoryMechanism = NullMemory(agent_id, scope=scope)  # type: ignore[arg-type]
@@ -57,6 +73,7 @@ def build_memory(
             max_records=max_records,
             retrieval_backend=retrieval_backend,
             embedding_backend=embedding_backend,
+            **fact_options,
         )
     elif mechanism in {"expr", "ExprAgent"}:
         memory = ExperientialMemory(
@@ -76,6 +93,7 @@ def build_memory(
             max_records=max_records,
             retrieval_backend=retrieval_backend,
             embedding_backend=embedding_backend,
+            fact_options=fact_options,
             revision_strategy=str(config.get("experience_revision_strategy", "deterministic")),
             llm_client=llm_client,
             model=model,
@@ -96,6 +114,7 @@ def build_memory(
             stability_min=float(config.get("stability_min", 0.5)),
             stability_max=float(config.get("stability_max", 50.0)),
             embedding_backend=embedding_backend,
+            fact_options=fact_options,
             revision_strategy=str(config.get("experience_revision_strategy", "deterministic")),
             llm_client=llm_client,
             model=model,

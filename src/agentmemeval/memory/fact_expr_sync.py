@@ -50,6 +50,7 @@ class FactExprSyncMemory:
         revision_strategy: str = "deterministic",
         llm_client: LLMClient | None = None,
         model: str = "",
+        fact_options: dict[str, object] | None = None,
     ) -> None:
         """
         功能：初始化组合记忆。
@@ -74,6 +75,7 @@ class FactExprSyncMemory:
             max_records=max_records,
             retrieval_backend=retrieval_backend,
             embedding_backend=embedding_backend,
+            **(fact_options or {}),
         )
         self.expr = ExperientialMemory(
             agent_id,
@@ -134,7 +136,8 @@ class FactExprSyncMemory:
         """
 
         self.fact.on_hand_finished(trajectory)
-        self.expr.on_hand_finished(trajectory)
+        if self.fact.last_admission_status == "admitted":
+            self.expr.on_hand_finished(trajectory)
 
     def snapshot(self) -> MemorySnapshot:
         """

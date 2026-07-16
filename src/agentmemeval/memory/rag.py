@@ -52,6 +52,10 @@ class RetrievalScore:
 class EmbeddingBackend(Protocol):
     """Versioned batch embedding boundary used by factual memory."""
 
+    def embed_query(self, text: str) -> list[float]: ...
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
+
     def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
 
     def audit_metadata(self) -> dict[str, object]: ...
@@ -65,6 +69,12 @@ class HashEmbeddingBackend:
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         return embed_texts(texts, dimensions=self.dimensions)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed_texts([text])[0]
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self.embed_texts(texts)
 
     def audit_metadata(self) -> dict[str, object]:
         return {
@@ -87,6 +97,7 @@ class OpenAICompatibleEmbeddingBackend:
         api_key_required: bool = False,
         timeout_seconds: float = 60.0,
         cache_path: str | Path | None = None,
+        query_instruction: str = "",
     ) -> None:
         if not model or not revision:
             raise ValueError("真实 embedding backend 必须固定 model 和 revision")
@@ -97,6 +108,7 @@ class OpenAICompatibleEmbeddingBackend:
         self.api_key_required = api_key_required
         self.timeout_seconds = timeout_seconds
         self.cache_path = Path(cache_path) if cache_path else None
+        self.query_instruction = query_instruction.strip()
         self.cache: dict[str, list[float]] = {}
         self.request_count = 0
         self.cache_hit_count = 0
@@ -109,7 +121,23 @@ class OpenAICompatibleEmbeddingBackend:
                     if isinstance(values, list)
                 }
 
+    def embed_query(self, text: str) -> list[float]:
+        query = (
+            f"Instruct: {self.query_instruction}\nQuery:{text}"
+            if self.query_instruction
+            else text
+        )
+        return self._embed_cached([query])[0]
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embed_cached(texts)
+
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Compatibility alias: untyped texts are encoded as documents."""
+
+        return self.embed_documents(texts)
+
+    def _embed_cached(self, texts: list[str]) -> list[list[float]]:
         keys = [self._key(text) for text in texts]
         missing = [text for text, key in zip(texts, keys, strict=True) if key not in self.cache]
         self.cache_hit_count += len(texts) - len(missing)
@@ -126,6 +154,14 @@ class OpenAICompatibleEmbeddingBackend:
             "model": self.model,
             "revision": self.revision,
             "semantic_model": True,
+            "query_instruction": self.query_instruction,
+            "query_instruction_sha256": hashlib.sha256(
+                self.query_instruction.encode("utf-8")
+            ).hexdigest(),
+            "query_template": "Instruct: {instruction}\\nQuery:{query}",
+            "document_instruction": None,
+            "normalization": "l2_client",
+            "output_dimensions": len(next(iter(self.cache.values()))) if self.cache else None,
             "cache_path": str(self.cache_path) if self.cache_path else None,
             "cache_entries": len(self.cache),
             "cache_hit_count": self.cache_hit_count,
@@ -190,6 +226,7 @@ def build_embedding_backend(config: dict[str, object], agent_id: str) -> Embeddi
         api_key_required=bool(config.get("embedding_api_key_required", False)),
         timeout_seconds=float(config.get("embedding_timeout_seconds", 60)),
         cache_path=cache_template.format(agent_id=agent_id),
+        query_instruction=str(config.get("embedding_query_instruction", "")),
     )
 
 
@@ -303,11 +340,10 @@ def topk_by_similarity(
     if not candidates or k <= 0:
         return []
     backend = embedding_backend or HashEmbeddingBackend(dimensions)
-    texts = [query_text, *[fact_retrieval_text(record) for record in candidates]]
-    vectors = backend.embed_texts(texts)
-    query_vec = vectors[0]
+    query_vec = backend.embed_query(query_text)
+    vectors = backend.embed_documents([fact_retrieval_text(record) for record in candidates])
     scored: list[RetrievalScore] = []
-    for index, record in enumerate(candidates, start=1):
+    for index, record in enumerate(candidates):
         record_vec = (vec_lookup or {}).get(record.record_id)
         if record_vec is None:
             record_vec = vectors[index]
@@ -352,12 +388,11 @@ def hybrid_top_k_records(
         return []
     query_text = build_retrieval_query(observation)
     backend = embedding_backend or HashEmbeddingBackend(dimensions)
-    texts = [query_text, *[fact_retrieval_text(record) for record in records]]
-    vectors = backend.embed_texts(texts)
-    query_vec = vectors[0]
+    query_vec = backend.embed_query(query_text)
+    vectors = backend.embed_documents([fact_retrieval_text(record) for record in records])
     query_features = observation_features(observation)
     scored: list[RetrievalScore] = []
-    for index, record in enumerate(records, start=1):
+    for index, record in enumerate(records):
         semantic = _dot(query_vec, vectors[index])
         feature = jaccard_similarity(query_features, record.features)
         salience = float(salience_fn(record.record_id) if salience_fn else 1.0)

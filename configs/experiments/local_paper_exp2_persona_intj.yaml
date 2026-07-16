@@ -9,6 +9,8 @@ agent:
   persona: INTJ
 
 experiment:
+  run_mode: smoke
+  protocol_readiness: blocked_exp2_personality_mechanism_deferred
   scenario: fixed_evolving_table
   seed: 42
   output_root: outputs

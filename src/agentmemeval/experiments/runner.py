@@ -8,12 +8,14 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
-from agentmemeval.config.loader import load_config
+from agentmemeval.config.loader import load_config, validate_config
 from agentmemeval.core.domain import ExperimentResult
 from agentmemeval.core.seeds import seed_global
+from agentmemeval.experiments.admission import assess_run_admission
 from agentmemeval.experiments.context import ExperimentContext
 from agentmemeval.experiments.registry import get_scenario
 from agentmemeval.llm.router import build_llm_client
@@ -46,6 +48,10 @@ def run_resolved_config(config: dict[str, Any]) -> ExperimentResult:
     设计说明：测试可直接传入字典，避免临时文件。
     """
 
+    config = copy.deepcopy(config)
+    validate_config(config)
+    admission = assess_run_admission(config, Path.cwd())
+    config["experiment"]["admission_audit"] = admission
     experiment = config["experiment"]
     scenario_name = str(experiment["scenario"])
     seed = int(experiment["seed"])

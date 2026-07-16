@@ -105,6 +105,103 @@ def validate_config(config: dict[str, Any]) -> None:
     lifecycle = str(table.get("lifecycle", "tournament_elimination"))
     if lifecycle not in {"tournament_elimination", "continuous_rebuy"}:
         raise ConfigError(f"未知 table.lifecycle：{lifecycle}")
+    agent_sections = ("agent", "opponent_agent", "heldout_agent")
+    run_mode = str(experiment.get("run_mode", "smoke"))
+    if run_mode not in {"smoke", "pilot", "formal"}:
+        raise ConfigError(f"未知 experiment.run_mode：{run_mode}")
+    for section in agent_sections:
+        section_config = config.get(section, {})
+        if not isinstance(section_config, dict):
+            raise ConfigError(f"{section} 必须是映射")
+        strategy_risk_gate = str(section_config.get("strategy_risk_gate", "disabled"))
+        if strategy_risk_gate != "disabled":
+            raise ConfigError(
+                f"主实现不支持策略风险门控；{section}.strategy_risk_gate 必须为 disabled"
+            )
+        memory_scope = str(section_config.get("memory_scope", "per_agent"))
+        if memory_scope != "per_agent":
+            raise ConfigError(
+                f"共享记忆尚未实现；{section}.memory_scope 必须为 per_agent"
+            )
+        if section_config.get("persona") and run_mode != "smoke":
+            raise ConfigError("Exp2 人格机制已延期；persona 配置只能用于 not_for_paper smoke")
+    agent = config.get("agent", {})
+    embedding_backend = str(agent.get("embedding_backend", "hash"))
+    if embedding_backend not in {"hash", "openai_compatible"}:
+        raise ConfigError(f"未知 agent.embedding_backend：{embedding_backend}")
+    if embedding_backend == "openai_compatible":
+        for field in ("embedding_model", "embedding_revision", "embedding_query_instruction"):
+            if not str(agent.get(field, "")).strip():
+                raise ConfigError(f"真实 embedding backend 缺少 agent.{field}")
+    threshold_status = str(agent.get("retrieval_threshold_status", "pending_pilot"))
+    if threshold_status not in {"pending_pilot", "frozen"}:
+        raise ConfigError("agent.retrieval_threshold_status 必须为 pending_pilot 或 frozen")
+    if threshold_status == "frozen" and agent.get("minimum_retrieval_score") is None:
+        raise ConfigError("冻结检索阈值时必须提供 agent.minimum_retrieval_score")
+    primary_estimand = str(experiment.get("primary_estimand", "") or "")
+    if primary_estimand:
+        supported_estimands = {
+            "same_seed_table_run_mechanism_effect_vs_baseline",
+            "same_seed_cross_condition_target_effect_vs_no_memory",
+        }
+        if primary_estimand not in supported_estimands:
+            raise ConfigError(f"未知 experiment.primary_estimand：{primary_estimand}")
+        if str(experiment.get("primary_endpoint", "")) not in {
+            "final_test_bb_per_100",
+            "final_test_chip_per_hand",
+        }:
+            raise ConfigError("A7-R 需要受支持的 experiment.primary_endpoint")
+        if not str(experiment.get("primary_baseline_mechanism", "")).strip():
+            raise ConfigError("A7-R 需要 experiment.primary_baseline_mechanism")
+        if primary_estimand == "same_seed_table_run_mechanism_effect_vs_baseline":
+            if str(experiment.get("within_table_mechanism_aggregation", "")) != (
+                "arithmetic_mean"
+            ):
+                raise ConfigError("A7-R 桌内同机制 Agent 必须预注册 arithmetic_mean 聚合")
+        else:
+            if str(experiment.get("within_table_mechanism_aggregation", "")) != (
+                "single_target_condition"
+            ):
+                raise ConfigError("Campaign E 每个条件必须只贡献一个 target 统计单位")
+            if str(experiment.get("cross_condition_aggregation", "")) != (
+                "paired_by_seed"
+            ):
+                raise ConfigError("Campaign E 必须按 seed 跨条件配对")
+            if str(experiment.get("primary_baseline_mechanism", "")) != "no_memory":
+                raise ConfigError("Campaign E 的预注册基线必须为 no_memory")
+            target_id = str(experiment.get("target_agent_id", ""))
+            targets = [str(item) for item in experiment.get("evaluation_target_ids", [])]
+            if not target_id or targets != [target_id]:
+                raise ConfigError("Campaign E 必须仅评估明确的单一 target_agent_id")
+        if str(experiment.get("multiple_comparison_method", "")) != "holm":
+            raise ConfigError("当前 B1-R 实现要求 experiment.multiple_comparison_method=holm")
+        statistical_status = str(experiment.get("statistical_plan_status", ""))
+        required_seed_pairs = experiment.get("required_seed_pairs")
+        if statistical_status == "frozen" and (
+            required_seed_pairs is None or int(required_seed_pairs) < 2
+        ):
+            raise ConfigError("冻结统计计划需要至少 2 个 required_seed_pairs")
+    roster = experiment.get("agent_roster", [])
+    if isinstance(roster, list):
+        roster_mechanisms = {
+            str(item.get("mechanism", "")) for item in roster if isinstance(item, dict)
+        }
+        baseline = str(experiment.get("primary_baseline_mechanism", ""))
+        if (
+            primary_estimand == "same_seed_table_run_mechanism_effect_vs_baseline"
+            and baseline not in roster_mechanisms
+        ):
+            raise ConfigError("experiment.primary_baseline_mechanism 必须存在于 agent_roster")
+        for item in roster:
+            gate = item.get("strategy_risk_gate", "disabled") if isinstance(item, dict) else None
+            if gate is not None and str(gate) != "disabled":
+                raise ConfigError("experiment.agent_roster 不得启用策略风险门控")
+            if isinstance(item, dict):
+                scope = str(item.get("memory_scope", agent.get("memory_scope", "per_agent")))
+                if scope != "per_agent":
+                    raise ConfigError("experiment.agent_roster 仅支持 per_agent memory_scope")
+                if item.get("persona") and run_mode != "smoke":
+                    raise ConfigError("Exp2 人格机制已延期；roster persona 只能用于 smoke")
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

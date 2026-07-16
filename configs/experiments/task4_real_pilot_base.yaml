@@ -1,0 +1,92 @@
+extends: local_base_small.yaml
+
+# TASK4 真实双服务 pilot 公共基线。null 字段必须在服务器 preflight 后
+# 用不可变 revision、weights fingerprint 和实际启动参数填充；在此之前 pilot fail-closed。
+provider:
+  provider: openai_compatible
+  model: qwen/qwen3.5-9b
+  model_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  model_weights_hash: 250e641cf3762c622c5e74761cd6ad8b407bc4f1da86b7587bcfb44422b9baeb
+  served_model_name: qwen/qwen3.5-9b
+  service_startup_parameters: null
+  base_url_env: LOCAL_LLM_BASE_URL
+  api_key_env: LOCAL_LLM_API_KEY
+  api_key_required: false
+  temperature: 0.0
+  max_output_tokens: 2048
+  repair_max_output_tokens: 256
+  timeout_seconds: 120
+  max_retries: 1
+  rate_limit_policy: local_manual
+  structured_output_mode: json_schema
+
+agent:
+  embedding_backend: openai_compatible
+  embedding_model: Qwen/Qwen3-Embedding-4B
+  embedding_revision: 5cf2132abc99cad020ac570b19d031efec650f2b
+  embedding_weights_hash: 0dac947dc26cecd6a7608ea64505f64b410117234d43d4d3d02676e4de6bbc7b
+  embedding_service_startup_parameters: null
+  embedding_base_url_env: EMBEDDING_BASE_URL
+  embedding_api_key_env: EMBEDDING_API_KEY
+  embedding_api_key_required: false
+  embedding_timeout_seconds: 120
+  embedding_cache_path: outputs/embedding_cache/task4_qwen3_embedding_4b/{agent_id}.json
+  embedding_query_instruction: >-
+    Given a Texas Hold'em decision state, retrieve past hands with strategically
+    similar public state, action cost, made hand or draw, and outcome.
+  experience_revision_strategy: llm
+  raise_sizing_policy: local_discrete
+  strategy_risk_gate: disabled
+  memory_scope: per_agent
+  top_k: 30
+  window_size: 30
+  sweep_every: 5
+  evidence_k: 30
+  reject_zero_reward_preflop_fold: true
+  fact_duplicate_window: 50
+  retrieval_signature_dedup: true
+  minimum_retrieval_score: null
+  retrieval_threshold_status: pending_pilot
+
+opponent_agent:
+  mechanism: no_memory
+  raise_sizing_policy: local_discrete
+  strategy_risk_gate: disabled
+  memory_scope: per_agent
+
+heldout_agent:
+  mechanism: no_memory
+  raise_sizing_policy: local_discrete
+  strategy_risk_gate: disabled
+  memory_scope: per_agent
+
+table:
+  lifecycle: continuous_rebuy
+
+experiment:
+  run_mode: pilot
+  scenario: fixed_evolving_table
+  seed: 2026071701
+  train_hands: 150
+  test_hands: 25
+  checkpoint_interval: 150
+  checkpoint_test_hands: 50
+  update_memory_train: true
+  update_memory_test: false
+  protocol_readiness: pending_pilot_calibration
+  behavior_threshold_status: pending_pilot
+  statistical_plan_status: pending_pilot_power_calibration
+  primary_endpoint: final_test_bb_per_100
+  multiple_comparison_method: holm
+  required_seed_pairs: null
+  runtime_verification:
+    decision_service_smoke_passed: false
+    embedding_service_smoke_passed: false
+    uniform_hardware_verified: false
+  preregistered_primary_metrics:
+    - final_test_bb_per_100
+  auxiliary_metrics:
+    - final_test_chip_per_hand
+    - train_bb_per_100
+    - train_chip_per_hand
+    - train_to_test_generalization_gap

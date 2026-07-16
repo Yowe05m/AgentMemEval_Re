@@ -1,0 +1,23 @@
+extends: task4_campaign_p_pilot.yaml
+
+# 尽可能复现论文/作者实现，但当前 decision model 已替换为 Qwen3.5-9B。
+# 因模型替代且 paper-exact retrieval 不采用 A1/A3 robust gate，本配置永久不进入
+# TASK4 robust formal 主表；运行结果必须标记 paper_protocol_model_substituted。
+agent:
+  reject_zero_reward_preflop_fold: false
+  fact_duplicate_window: 0
+  retrieval_signature_dedup: false
+  minimum_retrieval_score: null
+  retrieval_threshold_status: pending_pilot
+
+table:
+  lifecycle: tournament_elimination
+
+experiment:
+  run_mode: pilot
+  protocol_variant: strict_paper_replication_model_substituted
+  protocol_readiness: model_substitution_and_paper_exact_retrieval_not_main_table
+  train_hands: 150
+  test_hands: 25
+  checkpoint_interval: 10
+  checkpoint_test_hands: 25

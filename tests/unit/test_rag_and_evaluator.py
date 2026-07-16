@@ -87,6 +87,34 @@ def test_versioned_semantic_embedding_cache_batches_missing_texts() -> None:
     assert cache_path.exists()
 
 
+def test_qwen_query_instruction_is_separate_from_document_encoding() -> None:
+    class RecordingEmbeddingBackend(OpenAICompatibleEmbeddingBackend):
+        requested: list[list[str]]
+
+        def __init__(self) -> None:
+            super().__init__(
+                model="Qwen/Qwen3-Embedding-4B",
+                revision="revision-qwen",
+                query_instruction="retrieve strategically similar poker hands",
+            )
+            self.requested = []
+
+        def _request(self, texts: list[str]) -> list[list[float]]:
+            self.requested.append(list(texts))
+            self.request_count += 1
+            return [[1.0, float(index)] for index, _ in enumerate(texts)]
+
+    backend = RecordingEmbeddingBackend()
+    backend.embed_query("phase=flop")
+    backend.embed_documents(["historical fact"])
+
+    assert backend.requested[0] == [
+        "Instruct: retrieve strategically similar poker hands\nQuery:phase=flop"
+    ]
+    assert backend.requested[1] == ["historical fact"]
+    assert backend.audit_metadata()["document_instruction"] is None
+
+
 def test_poker_evaluator_names_straight_flush() -> None:
     """
     功能：验证本地 evaluator 输出标准牌型名称。

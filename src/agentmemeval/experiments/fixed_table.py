@@ -18,7 +18,15 @@ from agentmemeval.agents.llm_agent import build_agent
 from agentmemeval.analysis.plots import generate_audit_plots, plot_stack_curves
 from agentmemeval.core.domain import ExperimentResult
 from agentmemeval.core.seeds import derive_seed
-from agentmemeval.evaluation.aggregation import aggregate_metrics
+from agentmemeval.evaluation.aggregation import (
+    aggregate_metrics,
+    build_table_run_estimand,
+)
+from agentmemeval.evaluation.degeneracy import (
+    build_run_validity,
+    evaluate_behavior_health,
+    evaluate_execution_health,
+)
 from agentmemeval.evaluation.metrics import compute_metrics
 from agentmemeval.evaluation.reporting import build_report_text
 from agentmemeval.experiments.context import ExperimentContext
@@ -212,12 +220,47 @@ class FixedTableScenario:
                 else "final_snapshot_only"
             ),
             "checkpoint_test_hands": checkpoint_test_hands,
+            "checkpoint_cost_budget": _checkpoint_cost_budget(
+                train_hands=train_hands,
+                checkpoint_interval=checkpoint_interval,
+                evaluation_target_count=len(evaluation_targets),
+                checkpoint_test_hands=checkpoint_test_hands,
+                seed_count=(
+                    len(exp["seeds"])
+                    if isinstance(exp.get("seeds"), list)
+                    else 1
+                ),
+            ),
             "heldout_seed_policy": "derive_seed(root, checkpoint, target, hand)",
             "table_lifecycle": table_lifecycle,
+            "strategy_risk_gate": str(
+                config.get("agent", {}).get("strategy_risk_gate", "disabled")
+            ),
+            "strategy_risk_gate_applied": False,
+            "action_guard_scope": "legality_and_format_only",
+            "embedding_protocol": {
+                key: config.get("agent", {}).get(key)
+                for key in (
+                    "embedding_backend",
+                    "embedding_model",
+                    "embedding_revision",
+                    "embedding_base_url_env",
+                    "embedding_query_instruction",
+                )
+            },
             "rebuy_counts": rebuy_counts,
             "preregistered_primary_metrics": list(
                 exp.get("preregistered_primary_metrics", [])
             ),
+            "primary_endpoint": exp.get("primary_endpoint"),
+            "primary_estimand": exp.get("primary_estimand"),
+            "primary_baseline_mechanism": exp.get("primary_baseline_mechanism"),
+            "within_table_mechanism_aggregation": exp.get(
+                "within_table_mechanism_aggregation"
+            ),
+            "multiple_comparison_method": exp.get("multiple_comparison_method"),
+            "required_seed_pairs": exp.get("required_seed_pairs"),
+            "statistical_plan_status": exp.get("statistical_plan_status"),
             "auxiliary_metrics": list(exp.get("auxiliary_metrics", ["bb_per_100"])),
             "paper_evolving_roster_match": mechanism_counts
             == {
@@ -252,6 +295,54 @@ class FixedTableScenario:
             exp.get("auxiliary_metrics", ["bb_per_100"])
         )
         metrics["primary_metrics"]["checkpoint_generalization"] = checkpoint_summary
+        primary_estimand = str(exp.get("primary_estimand", ""))
+        if primary_estimand == "same_seed_table_run_mechanism_effect_vs_baseline":
+            metrics["primary_metrics"]["table_run_estimand"] = build_table_run_estimand(
+                checkpoint_results,
+                seed=seed,
+                run_id=artifacts.run_id,
+                endpoint=str(exp.get("primary_endpoint", "")),
+                baseline_mechanism=str(exp.get("primary_baseline_mechanism", "")),
+                statistical_plan_status=str(exp.get("statistical_plan_status", "")),
+                multiple_comparison_method=str(
+                    exp.get("multiple_comparison_method", "holm")
+                ),
+                required_seed_pairs=(
+                    int(exp["required_seed_pairs"])
+                    if exp.get("required_seed_pairs") is not None
+                    else None
+                ),
+            )
+        behavior_health = evaluate_behavior_health(metrics, exp, evaluation_targets)
+        execution_health = evaluate_execution_health(hands, metrics)
+        admission = dict(exp.get("admission_audit", {}))
+        run_validity = build_run_validity(
+            admission,
+            behavior_health,
+            execution_health,
+            str(exp.get("run_mode", "smoke")),
+        )
+        metrics["behavior_health"] = behavior_health
+        metrics["execution_health"] = execution_health
+        metrics["run_validity"] = run_validity
+        protocol_audit["behavior_health"] = behavior_health
+        protocol_audit["execution_health"] = execution_health
+        protocol_audit["run_validity"] = run_validity
+        artifacts.write_json("protocol_audit.json", protocol_audit)
+        review_rows = [
+            {"agent_id": agent_id, **row}
+            for agent_id, memory in memory_metrics.items()
+            for row in memory.get("evidence_review_queue", [])
+            if isinstance(row, dict)
+        ]
+        async_review_path = artifacts.write_json(
+            "async_evidence_review_queue.json",
+            {
+                "classification_status": "pending_human_review",
+                "record_count": len(review_rows),
+                "records": review_rows,
+            },
+        )
         aggregate = aggregate_metrics([metrics])
         plot_path = plot_stack_curves(hands, artifacts.run_dir / "plots")
         audit_plot_paths = generate_audit_plots(hands, events, artifacts.run_dir / "plots")
@@ -266,6 +357,7 @@ class FixedTableScenario:
             notes=[
                 "已离线验证 mock Provider 路径；真实 Provider 需用户提供密钥后单独 smoke test。",
                 "本地环境实现覆盖核心 betting flow，复杂边池规则在文档中标为待增强。",
+                f"主表准入状态：{run_validity['status']}。",
             ],
         )
         report_path = artifacts.write_text("report.md", report)
@@ -284,10 +376,12 @@ class FixedTableScenario:
                 "audit_plots": audit_plot_paths,
                 "protocol_audit": protocol_audit_path,
                 "checkpoint_generalization": checkpoint_path,
+                "async_evidence_review_queue": async_review_path,
             },
             notes=[
                 "固定桌训练和泛化测试均可离线运行。",
                 "泛化阶段是否继续更新记忆由 update_memory_test 控制。",
+                f"主表准入状态：{run_validity['status']}。",
             ],
         )
         artifacts.finish(result)
@@ -535,6 +629,12 @@ def _summarize_checkpoint_results(results: list[dict[str, Any]]) -> dict[str, An
                 "test_chip_delta_mean": statistics.mean(
                     float(item["chip_delta"]) for item in items
                 ),
+                "test_chip_per_hand_mean": statistics.mean(
+                    float(item["test_chip_per_hand"]) for item in items
+                ),
+                "test_bb_per_100_mean": statistics.mean(
+                    float(item["bb_per_100"]) for item in items
+                ),
                 "generalization_gap_mean": statistics.mean(
                     float(item["generalization_gap_chip_delta"]) for item in items
                 ),
@@ -610,6 +710,34 @@ def _known_protocol_gaps(
     if "deterministic" in strategies:
         gaps.append("At least one experience mechanism uses deterministic revision.")
     return gaps
+
+
+def _checkpoint_cost_budget(
+    *,
+    train_hands: int,
+    checkpoint_interval: int,
+    evaluation_target_count: int,
+    checkpoint_test_hands: int,
+    seed_count: int,
+) -> dict[str, int]:
+    """Precompute the heldout-hand budget implied by the checkpoint protocol."""
+
+    if train_hands <= 0:
+        checkpoint_count = 1
+    elif checkpoint_interval <= 0:
+        checkpoint_count = 1
+    else:
+        checkpoint_count = (train_hands + checkpoint_interval - 1) // checkpoint_interval
+    evaluations_per_seed = checkpoint_count * evaluation_target_count
+    hands_per_seed = evaluations_per_seed * checkpoint_test_hands
+    return {
+        "checkpoint_count_per_seed": checkpoint_count,
+        "evaluation_target_count": evaluation_target_count,
+        "checkpoint_evaluations_per_seed": evaluations_per_seed,
+        "checkpoint_generalization_hands_per_seed": hands_per_seed,
+        "seed_count": seed_count,
+        "checkpoint_generalization_hands_all_seeds": hands_per_seed * seed_count,
+    }
 
 
 def _build_heldout_agents(

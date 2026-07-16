@@ -1,0 +1,32 @@
+campaign:
+  campaign_id: task4_campaign_e_pilot_v1
+  design: target_vs_seven_no_memory
+  protocol_label: calibration_pilot_not_for_main_table
+  base_experiment_config: ../experiments/task4_campaign_e_pilot.yaml
+  output_root: outputs/campaigns
+  seeds:
+    - 2026071701
+    - 2026071702
+    - 2026071703
+    - 2026071704
+    - 2026071705
+    - 2026071706
+    - 2026071707
+    - 2026071708
+  baseline_condition_id: no_memory_target
+  target_agent_id: target_00
+  conditions:
+    - condition_id: no_memory_target
+      target_mechanism: no_memory
+    - condition_id: fact_target
+      target_mechanism: fact
+      target_config: {top_k: 30}
+    - condition_id: expr_target
+      target_mechanism: expr
+      target_config: {window_size: 30, experience_revision_strategy: llm}
+    - condition_id: sync_target
+      target_mechanism: fact_expr_sync
+      target_config: {top_k: 15, window_size: 30, experience_revision_strategy: llm}
+    - condition_id: async_target
+      target_mechanism: fact_expr_async
+      target_config: {top_k: 15, window_size: 5, sweep_every: 5, evidence_k: 30, experience_revision_strategy: llm}

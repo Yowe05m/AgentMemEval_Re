@@ -15,6 +15,7 @@ from pathlib import Path
 from agentmemeval.config.loader import load_raw_config
 from agentmemeval.core.errors import AgentMemEvalError
 from agentmemeval.evaluation.reporting import rebuild_report
+from agentmemeval.experiments.campaign import aggregate_campaign, run_campaign
 from agentmemeval.experiments.runner import run_config
 from agentmemeval.llm.router import provider_health
 
@@ -37,6 +38,10 @@ def main(argv: list[str] | None = None) -> int:
             return _doctor(args)
         if args.command == "run":
             return _run(args)
+        if args.command == "campaign":
+            return _campaign(args)
+        if args.command == "campaign-aggregate":
+            return _campaign_aggregate(args)
         if args.command == "report":
             return _report(args)
         parser.print_help()
@@ -63,6 +68,17 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--config", help="可选配置文件；提供后优先读取 provider 段")
     run = sub.add_parser("run", help="运行实验配置")
     run.add_argument("--config", required=True, help="YAML 配置路径")
+    campaign = sub.add_parser("campaign", help="运行或续跑多 seed campaign")
+    campaign.add_argument("--config", required=True, help="campaign YAML 配置路径")
+    campaign.add_argument(
+        "--resume",
+        action="store_true",
+        help="仅续跑缺失/失败矩阵；已验证完成的 run 不会重跑",
+    )
+    campaign_aggregate = sub.add_parser(
+        "campaign-aggregate", help="不重跑实验，从 campaign 原始工件重建聚合"
+    )
+    campaign_aggregate.add_argument("--input", required=True, help="campaign 目录")
     report = sub.add_parser("report", help="从 run 目录重建报告")
     report.add_argument("--input", required=True, help="outputs/<run_id> 目录")
     report.add_argument("--big-blind", type=int, default=2, help="重算 BB/100 使用的大盲")
@@ -108,6 +124,22 @@ def _run(args: argparse.Namespace) -> int:
 
     result = run_config(args.config)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _campaign(args: argparse.Namespace) -> int:
+    """运行 append-only campaign，并打印本次矩阵摘要。"""
+
+    result = run_campaign(args.config, resume=bool(args.resume))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _campaign_aggregate(args: argparse.Namespace) -> int:
+    """从 append-only campaign 工件生成新的版本化聚合。"""
+
+    result = aggregate_campaign(args.input)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 

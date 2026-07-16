@@ -1,0 +1,12 @@
+extends: task4_real_pilot_base.yaml
+
+experiment:
+  protocol_variant: calibration_pilot_for_campaign_e
+  table_size: 8
+  target_agent_id: target_00
+  evaluate_all_train_agents: false
+  evaluation_target_ids: [target_00]
+  primary_estimand: same_seed_cross_condition_target_effect_vs_no_memory
+  primary_baseline_mechanism: no_memory
+  within_table_mechanism_aggregation: single_target_condition
+  cross_condition_aggregation: paired_by_seed

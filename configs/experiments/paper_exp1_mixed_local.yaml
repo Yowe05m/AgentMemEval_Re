@@ -1,31 +1,55 @@
 extends: local_base_small.yaml
 
-# 该配置已对齐 8 人混合桌、checkpoint、LLM revision 和 5-seed 最低门槛。
-# embedding 正式模型尚未审核，因此暂保留 hash 消融后端；不得用于论文主表。
+# 正式主实验约束：Qwen3-Embedding-4B、每 checkpoint 50 hands、无策略风险门控。
 agent:
-  embedding_backend: hash
+  embedding_backend: openai_compatible
+  embedding_model: Qwen/Qwen3-Embedding-4B
+  embedding_revision: 5cf2132abc99cad020ac570b19d031efec650f2b
+  embedding_base_url_env: EMBEDDING_BASE_URL
+  embedding_api_key_env: EMBEDDING_API_KEY
+  embedding_api_key_required: false
+  embedding_timeout_seconds: 120
+  embedding_cache_path: outputs/embedding_cache/qwen3_embedding_4b_5cf2132/{agent_id}.json
+  embedding_query_instruction: >-
+    Given a Texas Hold'em decision state, retrieve past hands with strategically
+    similar public state, action cost, made hand or draw, and outcome.
   experience_revision_strategy: llm
   raise_sizing_policy: local_discrete
+  strategy_risk_gate: disabled
+  reject_zero_reward_preflop_fold: true
+  fact_duplicate_window: 50
+  retrieval_signature_dedup: true
+  minimum_retrieval_score: null
+  retrieval_threshold_status: pending_pilot
 
 table:
   lifecycle: continuous_rebuy
 
 experiment:
+  run_mode: pilot
   scenario: fixed_evolving_table
   seed: 20260715
   seeds: [20260715, 20260716, 20260717, 20260718, 20260719]
   train_hands: 150
   test_hands: 25
   checkpoint_interval: 10
-  checkpoint_test_hands: 25
+  checkpoint_test_hands: 50
   evaluate_all_train_agents: true
-  protocol_readiness: blocked_pending_embedding_model_and_checkpoint_test_hands_review
+  protocol_readiness: pending_pilot_calibration
+  behavior_threshold_status: pending_pilot
+  statistical_plan_status: pending_pilot_power_calibration
+  primary_endpoint: final_test_bb_per_100
+  primary_estimand: same_seed_table_run_mechanism_effect_vs_baseline
+  primary_baseline_mechanism: fact
+  within_table_mechanism_aggregation: arithmetic_mean
+  multiple_comparison_method: holm
+  required_seed_pairs: null  # 由独立 pilot 功效分析后冻结，不沿用旧 5-seed 假设。
   preregistered_primary_metrics:
-    - train_chip_delta
-    - test_chip_delta
-    - paired_mechanism_difference
-    - generalization_gap
-  auxiliary_metrics: [bb_per_100]
+    - final_test_bb_per_100
+  auxiliary_metrics:
+    - final_test_chip_per_hand
+    - train_bb_per_100
+    - train_to_test_generalization_gap
   agent_roster:
     - {agent_id: fact_00, mechanism: fact}
     - {agent_id: fact_01, mechanism: fact}

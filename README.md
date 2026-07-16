@@ -7,14 +7,20 @@
 | 能力 | 当前状态 |
 | --- | --- |
 | Python 包安装 | `pyproject.toml` + `src/` 布局，支持 editable install |
-| CLI | `doctor`、`run`、`report` 三个命令 |
+| CLI | `doctor`、`run`、`campaign`、`campaign-aggregate`、`report` |
 | 离线 Provider | 默认 `mock`，无需密钥即可跑实验和测试 |
 | 真实 Provider | 提供 `openai_compatible` 骨架，通过环境变量接入 |
-| 本地扑克环境 | 覆盖核心 Hold'em 流程、合法动作、摊牌和结算 |
+| 本地扑克环境 | 覆盖 no-limit Hold'em 合法动作、加注重开、all-in、边池、摊牌和筹码守恒 |
 | 记忆机制 | NoMemory、Fact、Expr、FactExprSync、FactExprAsync |
 | 人格机制 | 内置 INTJ、ENFP、ISTP、ESFJ 示例，可配置扩展 |
 | 换桌实验 | 支持 20 Agent 轮换桌、暴露统计和 pairwise histogram |
+| Campaign | append-only `state.tsv`、唯一 attempt、断点续跑、同质性与配对聚合 |
 | 报告闭环 | 每次运行写入 JSONL、快照、指标、图表和 `report.md` |
+
+论文实验运行分为三个显式级别：`smoke` 仅验证工程链路并永久标记
+`not_for_paper`；`pilot` 用于独立阈值校准，但要求真实模型身份和语义
+embedding；`formal` 在创建 run 目录前对代码、模型、硬件、服务、检索阈值、
+行为阈值和统计方案执行 fail-closed 准入。
 
 ## 快速开始
 
@@ -46,8 +52,19 @@ python -m agentmemeval run --config configs/experiments/paper_exp1_mixed_mock.ya
 ```
 
 本地 Qwen 决策与 LLM experience revision 配置见
-`configs/experiments/paper_exp1_mixed_local.yaml`。该配置的真实语义 embedding 模型与
-checkpoint 泛化手数仍标记为待审核，不能直接作为论文主表配置。
+`configs/experiments/paper_exp1_mixed_local.yaml`。正式约束已经固定为
+Qwen3-Embedding-4B、每个 checkpoint 50 个 heldout hands、禁用策略风险门控；
+在 embedding 服务 smoke 和统一硬件验证完成前仍不能直接进入论文主表。
+当前该配置是 `pilot`，检索阈值和行为阈值仍等待独立 pilot 校准。审核表
+A7-R 已预注册为同 seed 的 table/run 级机制配对效应：同桌同机制 Agent
+先取算术平均，再与 `fact` 基线比较；主要终点为 final-test BB/100，
+机制族比较使用 Holm 校正。`statistical_plan_status` 仍保持
+`pending_pilot_power_calibration`，需由独立 pilot 冻结 seed 数后才可进入正式运行。
+
+Fact 系记忆采用分级写入准入：fallback、动作类型改写和无信息的零收益单次
+翻前弃牌不会进入事实库，但拒绝原因会保存在记忆审计中；近期相同结构签名只
+累计重复计数。检索 top-k 是上限，支持最低分数、空检索和结构签名多样性。
+阈值未通过独立 pilot 冻结前不得运行 formal。
 
 固定桌 FactAgent smoke：
 
@@ -85,6 +102,32 @@ python -m agentmemeval run --config configs/experiments/rotating_20_agents_fixed
 python -m agentmemeval report --input outputs/<run_id>
 ```
 
+运行 TASK4 多 seed campaign（身份、真实服务 smoke、阈值或统计计划未满足时会在
+创建 run 目录前 fail-closed）：
+
+```powershell
+python -m agentmemeval campaign --config configs/campaigns/task4_campaign_p_pilot.yaml
+python -m agentmemeval campaign --config configs/campaigns/task4_campaign_e_pilot.yaml
+```
+
+断点续跑只处理未完成/失败条件；标准工件完整的 completed run 不会重跑：
+
+```powershell
+python -m agentmemeval campaign --config configs/campaigns/task4_campaign_e_pilot.yaml --resume
+```
+
+只从 immutable manifest、append-only state 和 run 工件重建新的版本化聚合：
+
+```powershell
+python -m agentmemeval campaign-aggregate --input outputs/campaigns/<campaign_id>
+```
+
+`task4_campaign_p_strict_model_substituted.yaml` 尽量复现论文的 150/25、每 10
+手 checkpoint、elimination 和“全部事实写入”，但当前 decision model 是
+Qwen3.5-9B，不能冒充原论文两模型的完全复现，也不会进入 robust formal 主表。
+`task4_campaign_*_robust_formal_template.yaml` 是故意保持 NO-GO 的模板；pilot 后会
+生成新的 immutable frozen config，而不是原地把模板改成“已冻结”。
+
 ## 输出工件
 
 每次 `run` 会创建一个独立的 `outputs/<run_id>/` 目录：
@@ -98,6 +141,8 @@ outputs/<run_id>/
 |- memory_snapshots/
 |- metrics.json
 |- aggregate_metrics.json
+|- protocol_audit.json
+|- async_evidence_review_queue.json
 |- plots/
 `- report.md
 ```
@@ -113,7 +158,7 @@ outputs/<run_id>/
 src/agentmemeval/
 |- agents/        # Agent 构建、LLM 决策管线和 persona 配置
 |- analysis/      # 图表生成
-|- cli/           # doctor/run/report 命令
+|- cli/           # doctor/run/campaign/campaign-aggregate/report 命令
 |- config/        # YAML 加载、继承和解析
 |- core/          # 领域对象、协议、异常和 seed
 |- environment/   # 本地 Hold'em 环境、动作保护、可见性边界
@@ -127,7 +172,8 @@ src/agentmemeval/
 
 ## 使用真实 Provider
 
-目前项目处于 `mock` 阶段。如需接入 OpenAI-compatible 服务，需先提供环境变量，再运行 doctor 或实验配置。
+项目同时支持 mock 与 OpenAI-compatible decision/embedding 服务。真实运行需先提供
+环境变量，并完成模型身份、权重指纹、启动参数和服务 smoke 记录。
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
@@ -140,8 +186,10 @@ python -m agentmemeval doctor --provider openai_compatible --config configs/prov
 ## 复现边界
 
 - `configs/base.yaml` 保留论文默认语义；smoke 配置故意使用较小手数，便于快速离线验证。
-- 本地 Hold'em 环境覆盖核心评估流程，但还不是完整赌场级扑克引擎；复杂边池、淘汰赛结构等属于后续增强。
-- 经验记忆更新当前采用确定性摘要，便于测试稳定；后续可以替换为真实 LLM 修订器。
+- 本地 Hold'em 环境已覆盖本项目需要的边池、all-in、加注重开、摊牌和筹码守恒；这不等于对所有赌场规则变体作出通用完备性声明。
+- 经验记忆支持结构化 LLM revision 与带审计的 deterministic fallback；paper pilot/formal 要求真实 LLM 路径且未知 fallback 会使结果失效。
+- 原论文使用 DeepSeek-V4-Flash 与 Qwen3.6-Flash；当前 Qwen3.5-9B 结果必须标记模型替代，不能称完全模型复现。
+- hash embedding、mock、deterministic substitute 和 persona smoke 永久不进入 TASK4 论文主表。
 - 换桌 scheduler 只声明尽量均衡，不声明严格 pairwise balanced；实际均衡程度以 `exposure_stats.json` 和报告为准。
 
 ## 开发检查清单

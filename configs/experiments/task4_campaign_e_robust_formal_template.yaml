@@ -1,0 +1,23 @@
+extends: task4_campaign_e_pilot.yaml
+
+# 与 Campaign P 一样，本文件仅用于机器可执行的 formal NO-GO 检查；pilot 冻结后
+# 生成新的 immutable config，不原地覆盖模板。
+table:
+  lifecycle: continuous_rebuy
+
+experiment:
+  run_mode: formal
+  protocol_variant: paper_robust_extension_target_vs_no_memory
+  protocol_readiness: blocked_pending_pilot_freeze
+  train_hands: 150
+  test_hands: 25
+  checkpoint_interval: 10
+  checkpoint_test_hands: 50
+  behavior_threshold_status: pending_pilot
+  statistical_plan_status: pending_pilot_power_calibration
+  required_seed_pairs: null
+  runtime_verification:
+    decision_service_smoke_passed: false
+    embedding_service_smoke_passed: false
+    uniform_hardware_verified: false
+  formal_runtime_lock: null

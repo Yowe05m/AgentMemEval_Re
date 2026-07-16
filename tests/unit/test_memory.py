@@ -20,6 +20,7 @@ from agentmemeval.core.domain import (
 from agentmemeval.llm.mock import MockLLMClient
 from agentmemeval.memory.experiential import ExperientialMemory
 from agentmemeval.memory.fact_expr_async import FactExprAsyncMemory
+from agentmemeval.memory.fact_expr_sync import FactExprSyncMemory
 from agentmemeval.memory.factual import FactualMemory
 from agentmemeval.memory.personality_driven import DEFAULT_PERSONAS, PersonalityDrivenMemory
 
@@ -61,6 +62,9 @@ def make_trajectory(
     reward: int = 5,
     hand_id: str = "hand_1",
     fallback_used: bool = False,
+    action_type: str = "call",
+    hole_cards: list[str] | None = None,
+    phase: str = "preflop",
 ) -> HandTrajectory:
     """
     功能：构造测试轨迹。
@@ -76,13 +80,16 @@ def make_trajectory(
 
     observation = make_observation(agent_id)
     observation.hand_id = hand_id
+    observation.phase = phase
+    if hole_cards is not None:
+        observation.hole_cards = list(hole_cards)
     event = DecisionEvent(
         agent_id=agent_id,
         table_id="table_a",
         hand_id=hand_id,
         observation=observation,
-        decision=ActionDecision("call"),
-        committed_action=ActionDecision("fold" if fallback_used else "call"),
+        decision=ActionDecision(action_type),
+        committed_action=ActionDecision("fold" if fallback_used else action_type),
         memory_context=MemoryContext(),
         llm_metadata={
             "guard_repaired": fallback_used,
@@ -124,8 +131,11 @@ def test_factual_memory_snapshot_restore_and_retrieve() -> None:
 
 def test_factual_record_ids_remain_unique_after_capacity_trimming_and_restore() -> None:
     memory = FactualMemory("agent_00", max_records=2)
-    for index in range(4):
-        memory.on_hand_finished(make_trajectory(hand_id=f"hand_{index}"))
+    cards = [["As", "Ah"], ["8s", "8h"], ["2s", "2h"], ["As", "Ks"]]
+    for index, hole_cards in enumerate(cards):
+        memory.on_hand_finished(
+            make_trajectory(hand_id=f"hand_{index}", hole_cards=hole_cards)
+        )
 
     assert [record.record_id for record in memory.records] == [
         "agent_00-fact-3",
@@ -133,7 +143,9 @@ def test_factual_record_ids_remain_unique_after_capacity_trimming_and_restore() 
     ]
     restored = FactualMemory("agent_00", max_records=2)
     restored.restore(memory.snapshot())
-    restored.on_hand_finished(make_trajectory(hand_id="hand_4"))
+    restored.on_hand_finished(
+        make_trajectory(hand_id="hand_4", hole_cards=["7s", "6h"])
+    )
     assert [record.record_id for record in restored.records] == [
         "agent_00-fact-4",
         "agent_00-fact-5",
@@ -183,14 +195,87 @@ def test_fallback_trajectory_is_audited_but_not_learned() -> None:
     trajectory = make_trajectory(fallback_used=True)
     factual = FactualMemory("agent_00")
     factual.on_hand_finished(trajectory)
-    assert factual.metrics()["fact_count"] == 1
+    assert factual.metrics()["fact_count"] == 0
     assert factual.metrics()["eligible_fact_count"] == 0
+    assert factual.metrics()["admission_counts"]["reason:provider_fallback"] == 1
     assert factual.build_context(make_observation()).facts == []
 
     experiential = ExperientialMemory("agent_00")
     experiential.on_hand_finished(trajectory)
     assert experiential.current.version == 1
     assert experiential.metrics()["skipped_fallback_trajectories"] == 1
+
+
+def test_zero_reward_single_preflop_fold_is_audited_but_not_stored() -> None:
+    factual = FactualMemory("agent_00")
+    factual.on_hand_finished(make_trajectory(reward=0, action_type="fold"))
+
+    metrics = factual.metrics()
+    assert metrics["fact_count"] == 0
+    assert metrics["admission_counts"][
+        "reason:zero_reward_single_preflop_fold_without_showdown"
+    ] == 1
+    assert metrics["recent_admission_log"][0]["status"] == "rejected"
+
+
+def test_structural_duplicate_updates_audit_without_adding_record() -> None:
+    factual = FactualMemory("agent_00", duplicate_window=10)
+    factual.on_hand_finished(make_trajectory(hand_id="hand_1"))
+    factual.on_hand_finished(make_trajectory(hand_id="hand_2"))
+
+    assert factual.metrics()["fact_count"] == 1
+    assert factual.records[0].source["duplicate_count"] == 1
+    assert factual.metrics()["admission_counts"]["deduplicated"] == 1
+
+
+def test_zero_duplicate_window_preserves_paper_exact_all_fact_writes() -> None:
+    factual = FactualMemory(
+        "agent_00",
+        duplicate_window=0,
+        reject_zero_reward_preflop_fold=False,
+    )
+    factual.on_hand_finished(make_trajectory(hand_id="hand_1"))
+    factual.on_hand_finished(make_trajectory(hand_id="hand_2"))
+
+    assert factual.metrics()["fact_count"] == 2
+    assert factual.duplicate_window == 0
+    assert factual.metrics()["admission_counts"].get("deduplicated", 0) == 0
+
+
+def test_sync_does_not_revise_experience_from_rejected_fact_trajectory() -> None:
+    memory = FactExprSyncMemory("agent_00")
+    memory.on_hand_finished(make_trajectory(reward=0, action_type="fold"))
+
+    assert memory.fact.metrics()["fact_count"] == 0
+    assert memory.expr.current.version == 1
+
+
+def test_retrieval_threshold_allows_empty_and_signature_deduplicates() -> None:
+    factual = FactualMemory(
+        "agent_00",
+        retrieval_backend="feature_jaccard",
+        top_k=3,
+        minimum_retrieval_score=0.1,
+        retrieval_threshold_status="frozen",
+    )
+    factual.on_hand_finished(make_trajectory(hand_id="hand_1"))
+    factual.records.append(
+        type(factual.records[0])(
+            **{
+                **factual.records[0].to_dict(),
+                "record_id": "agent_00-fact-manual",
+                "hand_id": "hand_manual",
+            }
+        )
+    )
+    context = factual.build_context(make_observation())
+    assert len(context.facts) == 1
+    assert context.metadata["duplicate_signature_excluded_count"] == 1
+
+    factual.minimum_retrieval_score = 1.1
+    empty = factual.build_context(make_observation())
+    assert empty.facts == []
+    assert empty.metadata["below_threshold_count"] == 2
 
 
 def test_legacy_fact_snapshot_is_not_silently_reused_for_learning() -> None:
@@ -219,7 +304,9 @@ def test_async_memory_sweep_records_evidence() -> None:
 
     memory = FactExprAsyncMemory("agent_00", sweep_every=2, evidence_k=2)
     memory.on_hand_finished(make_trajectory(hand_id="hand_1"))
-    memory.on_hand_finished(make_trajectory(hand_id="hand_2"))
+    memory.on_hand_finished(
+        make_trajectory(hand_id="hand_2", hole_cards=["8s", "8h"])
+    )
     assert memory.metrics()["async_sweeps"] == 1
     assert memory.snapshot().payload["sweep_log"][0]["recent_window_hand_ids"] == [
         "hand_1",
@@ -227,6 +314,8 @@ def test_async_memory_sweep_records_evidence() -> None:
     ]
     assert memory.snapshot().payload["fact_state"]
     assert memory.snapshot().payload["sweep_log"][0]["evidence_groups"]
+    assert memory.metrics()["evidence_classification_status"] == "pending_human_review"
+    assert memory.metrics()["evidence_review_queue_count"] >= 1
 
 
 def test_personality_context_injection() -> None:

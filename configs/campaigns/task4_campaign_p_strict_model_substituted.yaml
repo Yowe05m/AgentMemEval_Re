@@ -1,0 +1,18 @@
+campaign:
+  campaign_id: task4_campaign_p_strict_model_substituted_v1
+  design: mixed_table
+  protocol_label: strict_paper_replication_model_substituted_not_main_table
+  base_experiment_config: ../experiments/task4_campaign_p_strict_model_substituted.yaml
+  output_root: outputs/campaigns
+  seeds:
+    - 2026071701
+    - 2026071702
+    - 2026071703
+    - 2026071704
+    - 2026071705
+    - 2026071706
+    - 2026071707
+    - 2026071708
+  conditions:
+    - condition_id: mixed_table
+      target_mechanism: mixed

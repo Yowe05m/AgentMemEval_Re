@@ -1,0 +1,24 @@
+extends: task4_campaign_p_pilot.yaml
+
+# 这是 fail-closed formal 模板，不是已冻结配置。pilot 后必须填入检索/行为阈值、
+# required_seed_pairs、双服务实测启动参数、runtime lock 和 readiness=ready，随后另存
+# immutable frozen config；禁止原地把本模板冒充正式配置。
+table:
+  lifecycle: continuous_rebuy
+
+experiment:
+  run_mode: formal
+  protocol_variant: paper_robust_extension
+  protocol_readiness: blocked_pending_pilot_freeze
+  train_hands: 150
+  test_hands: 25
+  checkpoint_interval: 10
+  checkpoint_test_hands: 50
+  behavior_threshold_status: pending_pilot
+  statistical_plan_status: pending_pilot_power_calibration
+  required_seed_pairs: null
+  runtime_verification:
+    decision_service_smoke_passed: false
+    embedding_service_smoke_passed: false
+    uniform_hardware_verified: false
+  formal_runtime_lock: null

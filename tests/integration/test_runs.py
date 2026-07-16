@@ -78,11 +78,13 @@ def test_fixed_table_run_and_report() -> None:
     run_dir = Path(result.artifacts["run_dir"])
     assert (run_dir / "manifest.json").exists()
     assert (run_dir / "protocol_audit.json").exists()
+    assert (run_dir / "async_evidence_review_queue.json").exists()
     assert (run_dir / "memory_snapshots" / "agent_00_after_train.json").exists()
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert "gpu" in manifest["metadata"]
     assert "dirty" in manifest["metadata"]["code"]
     assert "decision_system_sha256" in manifest["metadata"]["prompts"]
+    assert manifest["metadata"]["protocol"]["run_mode"] == "smoke"
     rebuilt = rebuild_report(run_dir, big_blind=2)
     assert Path(rebuilt["report_path"]).exists()
     hands = [
@@ -106,6 +108,9 @@ def test_fixed_table_run_and_report() -> None:
     assert "call_cost" in action_event["call_risk"]
     assert "made_hand_class" in action_event["call_risk"]
     assert "stage_per_agent" in rebuilt["metrics"]["primary_metrics"]
+    assert rebuilt["metrics"]["execution_health"]["valid"] is True
+    assert rebuilt["metrics"]["run_validity"]["paper_eligible"] is False
+    assert rebuilt["metrics"]["run_validity"]["status"] == "not_for_main_table"
     protocol = json.loads((run_dir / "protocol_audit.json").read_text(encoding="utf-8"))
     assert protocol["paper_evolving_roster_match"] is False
     assert protocol["dealer_rotation"] == "hand_index modulo table_size"
@@ -121,6 +126,12 @@ def test_mixed_exp1_checkpoints_every_agent_independently() -> None:
             "train_hands": 2,
             "checkpoint_interval": 1,
             "checkpoint_test_hands": 1,
+            "statistical_plan_status": "pending_pilot_power_calibration",
+            "primary_endpoint": "final_test_bb_per_100",
+            "primary_estimand": "same_seed_table_run_mechanism_effect_vs_baseline",
+            "primary_baseline_mechanism": "fact",
+            "within_table_mechanism_aggregation": "arithmetic_mean",
+            "multiple_comparison_method": "holm",
         }
     )
     result = run_resolved_config(config)
@@ -132,6 +143,17 @@ def test_mixed_exp1_checkpoints_every_agent_independently() -> None:
 
     assert audit["paper_evolving_roster_match"] is True
     assert audit["generalization_schedule"] == "every_1_train_hands_and_final"
+    assert audit["strategy_risk_gate"] == "disabled"
+    assert audit["strategy_risk_gate_applied"] is False
+    assert audit["action_guard_scope"] == "legality_and_format_only"
+    assert audit["checkpoint_cost_budget"] == {
+        "checkpoint_count_per_seed": 2,
+        "evaluation_target_count": 8,
+        "checkpoint_evaluations_per_seed": 16,
+        "checkpoint_generalization_hands_per_seed": 16,
+        "seed_count": 5,
+        "checkpoint_generalization_hands_all_seeds": 80,
+    }
     assert set(audit["evaluation_target_ids"]) == set(audit["train_agent_mechanisms"])
     assert len(checkpoints["results"]) == 16
     assert all("generalization_gap_chip_delta" in item for item in checkpoints["results"])
@@ -142,6 +164,16 @@ def test_mixed_exp1_checkpoints_every_agent_independently() -> None:
         "fact_expr_async",
     }
     assert checkpoints["summary"]["1"]["paired_mechanism_effects"]
+    assert "test_bb_per_100_mean" in checkpoints["summary"]["1"]["by_mechanism"]["fact"]
+    estimand = result.metrics["primary_metrics"].get("table_run_estimand")
+    assert estimand["independent_unit"] == "one complete table/run within seed"
+    assert estimand["baseline_mechanism"] == "fact"
+    assert result.aggregate_metrics["paired_estimand_descriptive"]["status"] == (
+        "descriptive_only"
+    )
+    assert result.aggregate_metrics["main_table"]["status"] == (
+        "no_paper_eligible_runs"
+    )
     assert len(result.artifacts["checkpoint_snapshots"]) == 2
     assert all(len(paths) == 8 for paths in result.artifacts["checkpoint_snapshots"].values())
 

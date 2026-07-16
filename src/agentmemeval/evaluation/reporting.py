@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from agentmemeval.analysis.plots import plot_stack_curves
+from agentmemeval.config.loader import load_raw_config
 from agentmemeval.evaluation.aggregation import aggregate_metrics
+from agentmemeval.evaluation.degeneracy import (
+    build_run_validity,
+    evaluate_behavior_health,
+    evaluate_execution_health,
+)
 from agentmemeval.evaluation.metrics import compute_metrics
 from agentmemeval.storage.jsonl_store import JsonlStore
 
@@ -63,6 +69,11 @@ def build_report_text(
             "- 对手多样性字段："
             f"{bool(metrics.get('exploratory_metrics', {}).get('opponent_diversity'))}",
             f"- 聚合 BB/100 均值：{aggregate.get('bb_per_100', {}).get('mean', 0.0):.2f}",
+            f"- 主表准入：{metrics.get('run_validity', {}).get('status', 'unknown')}",
+            "- A7 统计设计："
+            f"{metrics.get('primary_metrics', {}).get('table_run_estimand', {}).get('design', 'not_configured')}",  # noqa: E501
+            "- A7 独立单位：每个 seed 的完整 table/run；桌内同机制 Agent 不作为独立 n。",
+            f"- 跨 seed 主表状态：{aggregate.get('main_table', {}).get('status', 'unknown')}",
             "",
             "## 图表",
         ]
@@ -96,7 +107,56 @@ def rebuild_report(run_dir: str | Path, big_blind: int = 2) -> dict[str, Any]:
         if exposure_path.exists()
         else None
     )
-    metrics = compute_metrics(hands, events, big_blind=big_blind, exposure_stats=exposure_stats)
+    existing_metrics_path = root / "metrics.json"
+    existing_metrics = (
+        json.loads(existing_metrics_path.read_text(encoding="utf-8"))
+        if existing_metrics_path.exists()
+        else {}
+    )
+    existing_per_agent = (
+        existing_metrics.get("primary_metrics", {}).get("per_agent", {})
+    )
+    memory_metrics = {
+        str(agent_id): dict(values.get("memory", {}))
+        for agent_id, values in existing_per_agent.items()
+        if isinstance(values, dict)
+    }
+    metrics = compute_metrics(
+        hands,
+        events,
+        big_blind=big_blind,
+        memory_metrics=memory_metrics,
+        exposure_stats=exposure_stats,
+    )
+    existing_estimand = existing_metrics.get("primary_metrics", {}).get(
+        "table_run_estimand"
+    )
+    if isinstance(existing_estimand, dict):
+        metrics["primary_metrics"]["table_run_estimand"] = existing_estimand
+    resolved_path = root / "resolved_config.yaml"
+    config = load_raw_config(resolved_path) if resolved_path.exists() else {}
+    experiment = dict(config.get("experiment", {}))
+    protocol_path = root / "protocol_audit.json"
+    protocol = (
+        json.loads(protocol_path.read_text(encoding="utf-8"))
+        if protocol_path.exists()
+        else {}
+    )
+    behavior_health = evaluate_behavior_health(
+        metrics,
+        experiment,
+        [str(item) for item in protocol.get("evaluation_target_ids", [])],
+    )
+    execution_health = evaluate_execution_health(hands, metrics)
+    admission = dict(experiment.get("admission_audit", {}))
+    metrics["behavior_health"] = behavior_health
+    metrics["execution_health"] = execution_health
+    metrics["run_validity"] = build_run_validity(
+        admission,
+        behavior_health,
+        execution_health,
+        str(experiment.get("run_mode", "smoke")),
+    )
     aggregate = aggregate_metrics([metrics])
     plot = plot_stack_curves(hands, root / "plots")
     manifest_path = root / "manifest.json"

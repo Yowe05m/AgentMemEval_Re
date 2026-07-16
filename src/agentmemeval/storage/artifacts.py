@@ -240,9 +240,16 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
     """Collect reproducibility metadata without persisting API keys or other secrets."""
 
     provider = dict(config.get("provider", {}))
+    agent = dict(config.get("agent", {}))
+    experiment = dict(config.get("experiment", {}))
     runtime: dict[str, Any] = {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
+        "protocol": {
+            "run_mode": experiment.get("run_mode", "smoke"),
+            "protocol_readiness": experiment.get("protocol_readiness"),
+            "admission_audit": experiment.get("admission_audit", {}),
+        },
         "code": {
             "commit": get_code_version(cwd),
             "dirty": _git_dirty(cwd),
@@ -251,13 +258,23 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
             "name": provider.get("model"),
             "revision": provider.get("model_revision"),
             "weights_hash": provider.get("model_weights_hash"),
+            "served_model_name": provider.get("served_model_name"),
+        },
+        "embedding": {
+            "backend": agent.get("embedding_backend"),
+            "name": agent.get("embedding_model"),
+            "revision": agent.get("embedding_revision"),
+            "weights_hash": agent.get("embedding_weights_hash"),
+            "service_startup_parameters": agent.get(
+                "embedding_service_startup_parameters"
+            ),
         },
         "service": {
             key: provider.get(key)
             for key in (
                 "provider", "temperature", "max_output_tokens", "timeout_seconds",
                 "max_retries", "structured_output_mode", "rate_limit_policy",
-                "service_startup_parameters",
+                "service_startup_parameters", "served_model_name",
             )
             if key in provider
         },

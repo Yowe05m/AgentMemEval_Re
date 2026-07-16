@@ -165,6 +165,10 @@ def _compute_per_agent(
     folded_to_bet: dict[str, int] = defaultdict(int)
     postflop_raise_hands: dict[str, set[str]] = defaultdict(set)
     intent_bluff_hands: dict[str, set[str]] = defaultdict(set)
+    street_action_hands: dict[str, dict[str, set[str]]] = defaultdict(
+        lambda: defaultdict(set)
+    )
+    all_in_hands: dict[str, set[str]] = defaultdict(set)
     for event in events:
         if event.get("event") != "action":
             continue
@@ -172,6 +176,10 @@ def _compute_per_agent(
         action = str(event.get("action_type"))
         hand_id = str(event.get("hand_id"))
         action_counts[agent_id][action] += 1
+        phase = str(event.get("phase", "unknown"))
+        street_action_hands[agent_id][phase].add(hand_id)
+        if _is_all_in_action(event):
+            all_in_hands[agent_id].add(hand_id)
         if str(event.get("phase")) == "preflop" and action in {"call", "raise"}:
             vpip_hands[agent_id].add(hand_id)
         if int(event.get("to_call") or 0) > 0:
@@ -213,6 +221,11 @@ def _compute_per_agent(
         reward = rewards_by_agent[agent_id]
         counts = dict(action_counts.get(agent_id, {}))
         hand_rewards = hand_rewards_by_agent[agent_id]
+        bust_hands = {
+            str(hand.get("hand_id"))
+            for hand in hand_summaries
+            if int((hand.get("final_stacks", {}) or {}).get(agent_id, 1)) <= 0
+        }
         max_reward = max(hand_rewards, key=lambda value: (abs(value), value))
         absolute_activity = sum(abs(value) for value in hand_rewards)
         winsorized = _winsorized(hand_rewards)
@@ -224,10 +237,23 @@ def _compute_per_agent(
             "bb_per_100": (reward / max(1, big_blind)) / hands * 100,
             "win_rate": wins_by_agent[agent_id] / hands,
             "vpip": len(vpip_hands.get(agent_id, set())) / hands,
+            "voluntary_participation_hands": len(vpip_hands.get(agent_id, set())),
             "fold_rate": counts.get("fold", 0) / total_actions,
             "check_rate": counts.get("check", 0) / total_actions,
             "call_rate": counts.get("call", 0) / total_actions,
             "raise_rate": counts.get("raise", 0) / total_actions,
+            "street_action_hands": {
+                street: len(hand_ids)
+                for street, hand_ids in street_action_hands.get(agent_id, {}).items()
+            },
+            "street_coverage": {
+                street: len(street_action_hands.get(agent_id, {}).get(street, set())) / hands
+                for street in ("preflop", "flop", "turn", "river")
+            },
+            "all_in_hands": len(all_in_hands.get(agent_id, set())),
+            "all_in_hand_rate": len(all_in_hands.get(agent_id, set())) / hands,
+            "bust_hands": len(bust_hands),
+            "bust_hand_rate": len(bust_hands) / hands,
             "fold_to_raise": (
                 folded_to_raise[agent_id] / faced_raise[agent_id]
                 if faced_raise[agent_id]

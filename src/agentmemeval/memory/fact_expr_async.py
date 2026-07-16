@@ -65,6 +65,7 @@ class FactExprAsyncMemory:
         revision_strategy: str = "deterministic",
         llm_client: LLMClient | None = None,
         model: str = "",
+        fact_options: dict[str, object] | None = None,
     ) -> None:
         """
         功能：初始化异步组合记忆。
@@ -90,6 +91,7 @@ class FactExprAsyncMemory:
             top_k=top_k,
             max_records=max_records,
             embedding_backend=embedding_backend,
+            **(fact_options or {}),
         )
         self.expr = ExperientialMemory(
             agent_id,
@@ -111,6 +113,7 @@ class FactExprAsyncMemory:
         self.stability_max = stability_max
         self.recent: list[HandTrajectory] = []
         self.sweep_log: list[dict[str, object]] = []
+        self.evidence_review_queue: list[dict[str, object]] = []
         self.fact_state: dict[str, dict[str, object]] = {}
         self.hand_counter = 0
         self.eligible_hand_counter = 0
@@ -214,7 +217,7 @@ class FactExprAsyncMemory:
                     "linked_exp_revs": [],
                 }
         self.hand_counter += 1
-        if not quality["memory_eligible"]:
+        if not quality["memory_eligible"] or self.fact.last_admission_status != "admitted":
             self.skipped_trajectory_hand_ids.append(trajectory.hand_id)
             return
         self.eligible_hand_counter += 1
@@ -278,6 +281,7 @@ class FactExprAsyncMemory:
                 "stability_min": self.stability_min,
                 "stability_max": self.stability_max,
                 "sweep_log": list(self.sweep_log),
+                "evidence_review_queue": list(self.evidence_review_queue),
                 "fact_state": self.fact_state,
                 "hand_counter": self.hand_counter,
                 "eligible_hand_counter": self.eligible_hand_counter,
@@ -311,6 +315,9 @@ class FactExprAsyncMemory:
         self.stability_min = float(snapshot.payload.get("stability_min", self.stability_min))
         self.stability_max = float(snapshot.payload.get("stability_max", self.stability_max))
         self.sweep_log = list(snapshot.payload.get("sweep_log", []))
+        self.evidence_review_queue = list(
+            snapshot.payload.get("evidence_review_queue", [])
+        )
         self.fact_state = {
             str(record_id): dict(state)
             for record_id, state in dict(snapshot.payload.get("fact_state", {})).items()
@@ -354,6 +361,10 @@ class FactExprAsyncMemory:
             "salience_threshold": self.salience_threshold,
             "fact_state_count": len(self.fact_state),
             "skipped_fallback_trajectories": len(self.skipped_trajectory_hand_ids),
+            "skipped_fact_admission_trajectories": len(self.skipped_trajectory_hand_ids),
+            "evidence_classification_status": "pending_human_review",
+            "evidence_review_queue_count": len(self.evidence_review_queue),
+            "evidence_review_queue": list(self.evidence_review_queue),
         }
 
     def _sweep(self, evidence: list[object]) -> dict[str, object]:
@@ -594,24 +605,24 @@ class FactExprAsyncMemory:
         设计说明：离线替代原版 LLM self-check 的结构化输出。
         """
 
-        avg_reward = (
-            sum(item.final_reward for item in self.recent) / len(self.recent)
-            if self.recent
-            else 0.0
-        )
-        supporting: list[str] = []
-        contradicting: list[str] = []
-        noise: list[str] = []
+        recent_rewards = [item.final_reward for item in self.recent]
         for record in evidence:
             reward = int(getattr(record, "final_reward", 0))
             record_id = str(getattr(record, "record_id", ""))
-            if abs(reward) >= 50:
-                noise.append(record_id)
-            elif avg_reward == 0 or reward == 0 or (avg_reward > 0) == (reward > 0):
-                supporting.append(record_id)
-            else:
-                contradicting.append(record_id)
-        return supporting, contradicting, noise
+            self.evidence_review_queue.append(
+                {
+                    "record_id": record_id,
+                    "final_reward_chips": reward,
+                    "recent_reward_chips": list(recent_rewards),
+                    "phase": _record_phase(record),
+                    "action_summary": getattr(record, "action_summary", ""),
+                    "suggested_labels": ["supporting", "contradicting", "noise"],
+                    "human_label": None,
+                    "classification_status": "pending_human_review",
+                }
+            )
+        self.evidence_review_queue = self.evidence_review_queue[-500:]
+        return [], [], []
 
     def _reweight_fact_state(
         self,
@@ -648,3 +659,11 @@ class FactExprAsyncMemory:
                 linked = list(state.get("linked_exp_revs", []))
                 linked.append(revision_number)
                 state["linked_exp_revs"] = linked
+
+
+def _record_phase(record: object) -> str:
+    source = getattr(record, "source", {})
+    decisions = source.get("decisions", []) if isinstance(source, dict) else []
+    if decisions and isinstance(decisions[-1], dict):
+        return str(decisions[-1].get("phase", "unknown"))
+    return "unknown"
