@@ -172,13 +172,17 @@ def _runtime_lock_blockers(
     lock = experiment.get("formal_runtime_lock")
     if not isinstance(lock, dict):
         return ["experiment.formal_runtime_lock is required"]
-    blockers: list[str] = []
     devices = dict(runtime.get("gpu", {})).get("devices", [])
     observed_gpu = devices[0] if isinstance(devices, list) and devices else {}
+    service_runtime = dict(runtime.get("model_service_runtime", {}))
+    blockers: list[str] = []
+    if service_runtime.get("status") != "verified":
+        blockers.append("model service runtime probe must be verified")
     observed = {
         "gpu_name": observed_gpu.get("name"),
         "gpu_driver": observed_gpu.get("driver"),
-        "torch_cuda_version": dict(runtime.get("cuda", {})).get("torch_cuda_version"),
+        "service_torch_cuda_version": service_runtime.get("torch_cuda_version"),
+        "vllm_version": service_runtime.get("vllm_version"),
     }
     for field, actual in observed.items():
         expected = lock.get(field)

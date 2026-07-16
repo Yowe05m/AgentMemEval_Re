@@ -235,8 +235,16 @@ def validate_runtime_homogeneity(manifests: list[dict[str, Any]]) -> dict[str, A
             (device.get("name"), device.get("driver"), device.get("pci_bus_id"))
             for device in item.get("metadata", {}).get("gpu", {}).get("devices", [])
         ),
-        "cuda": lambda item: item.get("metadata", {}).get("cuda", {}).get(
-            "torch_cuda_version"
+        "cuda": lambda item: (
+            item.get("metadata", {})
+            .get("model_service_runtime", {})
+            .get("torch_cuda_version")
+            or item.get("metadata", {}).get("cuda", {}).get("torch_cuda_version")
+        ),
+        "vllm_runtime": lambda item: (
+            item.get("metadata", {})
+            .get("model_service_runtime", {})
+            .get("vllm_version")
         ),
         "model": lambda item: tuple(
             sorted(item.get("metadata", {}).get("model", {}).items())

@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 
 from agentmemeval.core.errors import ConfigError
-from agentmemeval.experiments.admission import assess_run_admission
+from agentmemeval.experiments.admission import (
+    _runtime_lock_blockers,
+    assess_run_admission,
+)
 
 
 def _config(mode: str) -> dict[str, object]:
@@ -78,3 +81,32 @@ def test_formal_rejects_unfrozen_protocol_before_run_directory() -> None:
     with pytest.raises(ConfigError, match="protocol_readiness must be ready") as exc_info:
         assess_run_admission(config, Path.cwd())
     assert "statistical_plan_status must be frozen" in str(exc_info.value)
+
+
+def test_formal_runtime_lock_uses_verified_model_service_environment() -> None:
+    experiment = {
+        "formal_runtime_lock": {
+            "gpu_name": "RTX 4090",
+            "gpu_driver": "595.71.05",
+            "service_torch_cuda_version": "13.0",
+            "vllm_version": "0.23.1",
+        }
+    }
+    runtime = {
+        "gpu": {
+            "devices": [
+                {"name": "RTX 4090", "driver": "595.71.05", "pci_bus_id": "0"}
+            ]
+        },
+        "model_service_runtime": {
+            "status": "verified",
+            "torch_cuda_version": "13.0",
+            "vllm_version": "0.23.1",
+        },
+        "cuda": {"available": False, "collection_error": "ModuleNotFoundError"},
+    }
+    assert _runtime_lock_blockers(experiment, runtime) == []
+    runtime["model_service_runtime"]["vllm_version"] = "different"
+    assert "runtime vllm_version mismatch" in _runtime_lock_blockers(
+        experiment, runtime
+    )[0]

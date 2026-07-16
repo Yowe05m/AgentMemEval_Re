@@ -275,6 +275,7 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
                 "provider", "temperature", "max_output_tokens", "timeout_seconds",
                 "max_retries", "structured_output_mode", "rate_limit_policy",
                 "service_startup_parameters", "served_model_name",
+                "runtime_probe_python",
             )
             if key in provider
         },
@@ -291,6 +292,7 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
             name: _package_version(name) for name in ("torch", "vllm", "treys")
         },
         "gpu": _gpu_metadata(),
+        "model_service_runtime": _service_runtime_metadata(provider),
     }
     try:
         import torch
@@ -303,6 +305,43 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
     except Exception as exc:  # noqa: BLE001
         runtime["cuda"] = {"available": False, "collection_error": type(exc).__name__}
     return runtime
+
+
+def _service_runtime_metadata(provider: dict[str, Any]) -> dict[str, Any]:
+    """Probe the Python environment that actually hosts the model service."""
+
+    executable = provider.get("runtime_probe_python")
+    if not executable:
+        return {"status": "not_configured"}
+    probe = (
+        "import importlib.metadata as metadata,json,platform,torch;"
+        "print(json.dumps({"
+        "'python':platform.python_version(),"
+        "'torch_version':torch.__version__,"
+        "'torch_cuda_version':torch.version.cuda,"
+        "'cuda_available':torch.cuda.is_available(),"
+        "'cuda_device_count':torch.cuda.device_count(),"
+        "'vllm_version':metadata.version('vllm')"
+        "},sort_keys=True))"
+    )
+    try:
+        result = subprocess.run(
+            [str(executable), "-c", probe],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict):
+            raise ValueError("service runtime probe did not return a JSON object")
+        return {"status": "verified", "python_executable": str(executable), **data}
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "error",
+            "python_executable": str(executable),
+            "collection_error": type(exc).__name__,
+        }
 
 
 def _package_version(name: str) -> str | None:

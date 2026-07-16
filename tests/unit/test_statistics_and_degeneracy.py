@@ -189,3 +189,30 @@ def test_runtime_homogeneity_detects_hardware_mix() -> None:
     audit = validate_runtime_homogeneity([manifest("RTX 5090"), manifest("RTX 4090")])
     assert audit["homogeneous"] is False
     assert "gpu" in audit["mismatches"]
+
+
+def test_runtime_homogeneity_uses_model_service_cuda_and_vllm() -> None:
+    def manifest(cuda: str, vllm: str) -> dict[str, object]:
+        return {
+            "metadata": {
+                "gpu": {
+                    "devices": [
+                        {"name": "RTX 4090", "driver": "1", "pci_bus_id": "0"}
+                    ]
+                },
+                "cuda": {"collection_error": "ModuleNotFoundError"},
+                "model_service_runtime": {
+                    "status": "verified",
+                    "torch_cuda_version": cuda,
+                    "vllm_version": vllm,
+                },
+                "model": {"name": "m", "revision": "r", "weights_hash": "h"},
+                "service": {"port": 8000},
+            }
+        }
+
+    audit = validate_runtime_homogeneity(
+        [manifest("13.0", "0.23.1"), manifest("13.0", "0.23.2")]
+    )
+    assert audit["homogeneous"] is False
+    assert audit["mismatches"] == {"vllm_runtime": ["0.23.1", "0.23.2"]}
