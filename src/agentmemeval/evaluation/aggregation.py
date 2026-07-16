@@ -232,6 +232,9 @@ def validate_runtime_homogeneity(manifests: list[dict[str, Any]]) -> dict[str, A
     """Compare hardware and service identities before any cross-run formal aggregation."""
 
     fields = {
+        "code": lambda item: tuple(
+            sorted(item.get("metadata", {}).get("code", {}).items())
+        ),
         "gpu": lambda item: tuple(
             (device.get("name"), device.get("driver"), device.get("pci_bus_id"))
             for device in item.get("metadata", {}).get("gpu", {}).get("devices", [])
@@ -254,16 +257,23 @@ def validate_runtime_homogeneity(manifests: list[dict[str, Any]]) -> dict[str, A
         "embedding": lambda item: repr(
             item.get("metadata", {}).get("embedding", {})
         ),
+        "prompts": lambda item: tuple(
+            sorted(item.get("metadata", {}).get("prompts", {}).items())
+        ),
     }
     mismatches: dict[str, list[object]] = {}
+    identity: dict[str, object] = {}
     for name, getter in fields.items():
         values = [getter(manifest) for manifest in manifests]
         unique = list(dict.fromkeys(values))
         if len(unique) > 1:
             mismatches[name] = unique
+        elif unique:
+            identity[name] = unique[0]
     return {
         "homogeneous": not mismatches,
         "run_count": len(manifests),
         "mismatches": mismatches,
+        "identity": identity if manifests and not mismatches else None,
         "formal_aggregation_allowed": bool(manifests) and not mismatches,
     }

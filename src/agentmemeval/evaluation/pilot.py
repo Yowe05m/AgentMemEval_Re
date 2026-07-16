@@ -38,6 +38,14 @@ def build_pilot_power_plan(
     blockers: list[str] = []
     _validate_pilot_aggregate(campaign_p, "campaign_p", blockers)
     _validate_pilot_aggregate(campaign_e, "campaign_e", blockers)
+    p_runtime = campaign_p.get("runtime_homogeneity", {})
+    e_runtime = campaign_e.get("runtime_homogeneity", {})
+    p_identity = p_runtime.get("identity") if isinstance(p_runtime, dict) else None
+    e_identity = e_runtime.get("identity") if isinstance(e_runtime, dict) else None
+    if not isinstance(p_identity, dict) or not isinstance(e_identity, dict):
+        blockers.append("campaign P/E runtime identities are missing")
+    elif p_identity != e_identity:
+        blockers.append("campaign P/E runtime identities differ")
     contrasts: dict[str, list[float]] = {}
 
     p_estimand = (
@@ -110,6 +118,7 @@ def build_pilot_freeze_proposal(
     campaign_e: dict[str, Any],
     campaign_p_metrics: list[dict[str, Any]],
     campaign_p_protocol_audits: list[dict[str, Any]],
+    campaign_e_protocol_audits: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Combine power, behavior, execution, and retrieval freeze gates."""
 
@@ -120,7 +129,13 @@ def build_pilot_freeze_proposal(
         for index, audit in enumerate(campaign_p_protocol_audits)
         if dict(audit.get("execution_health", {})).get("valid") is not True
     ]
+    execution_blockers.extend(
+        f"campaign_e run {index} execution health is not valid"
+        for index, audit in enumerate(campaign_e_protocol_audits)
+        if dict(audit.get("execution_health", {})).get("valid") is not True
+    )
     expected_p = int(campaign_p.get("expected_run_count", 0))
+    expected_e = int(campaign_e.get("expected_run_count", 0))
     if len(campaign_p_metrics) != expected_p:
         execution_blockers.append(
             f"campaign_p metrics count mismatch: {len(campaign_p_metrics)}/{expected_p}"
@@ -129,6 +144,11 @@ def build_pilot_freeze_proposal(
         execution_blockers.append(
             "campaign_p protocol audit count mismatch: "
             f"{len(campaign_p_protocol_audits)}/{expected_p}"
+        )
+    if len(campaign_e_protocol_audits) != expected_e:
+        execution_blockers.append(
+            "campaign_e protocol audit count mismatch: "
+            f"{len(campaign_e_protocol_audits)}/{expected_e}"
         )
     blockers = [
         *list(power_plan["blockers"]),
@@ -164,26 +184,54 @@ def build_pilot_freeze_proposal_from_paths(
     campaign_p_aggregate_path: str | Path,
     campaign_e_aggregate_path: str | Path,
     campaign_p_dir: str | Path,
+    campaign_e_dir: str | Path,
 ) -> dict[str, Any]:
-    """Load only completed P leaf evidence and build the immutable proposal."""
+    """Load only completed P/E leaf evidence and build the immutable proposal."""
 
     p_aggregate = _read_json(Path(campaign_p_aggregate_path))
     e_aggregate = _read_json(Path(campaign_e_aggregate_path))
-    state_path = Path(campaign_p_dir) / "state.tsv"
+    p_completed, p_evidence = _completed_state_rows(campaign_p_dir, "campaign_p")
+    e_completed, e_evidence = _completed_state_rows(campaign_e_dir, "campaign_e")
+    metrics = [_read_json(Path(row["run_dir"]) / "metrics.json") for row in p_completed]
+    p_audits = [
+        _read_json(Path(row["run_dir"]) / "protocol_audit.json")
+        for row in p_completed
+    ]
+    e_audits = [
+        _read_json(Path(row["run_dir"]) / "protocol_audit.json")
+        for row in e_completed
+    ]
+    proposal = build_pilot_freeze_proposal(
+        p_aggregate, e_aggregate, metrics, p_audits, e_audits
+    )
+    proposal["campaign_p_evidence"] = p_evidence
+    proposal["campaign_e_evidence"] = e_evidence
+    return proposal
+
+
+def _completed_state_rows(
+    campaign_dir: str | Path, label: str
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    directory = Path(campaign_dir).resolve()
+    state_path = directory / "state.tsv"
     with state_path.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
     completed = [row for row in rows if row.get("status") == "complete"]
-    metrics = [_read_json(Path(row["run_dir"]) / "metrics.json") for row in completed]
-    audits = [
-        _read_json(Path(row["run_dir"]) / "protocol_audit.json") for row in completed
+    identities = [
+        (str(row.get("condition_id", "")), str(row.get("seed", "")))
+        for row in completed
     ]
-    proposal = build_pilot_freeze_proposal(p_aggregate, e_aggregate, metrics, audits)
-    proposal["campaign_p_evidence"] = {
-        "campaign_dir": str(Path(campaign_p_dir).resolve()),
+    duplicate_identities = sorted(
+        identity for identity in set(identities) if identities.count(identity) > 1
+    )
+    if duplicate_identities:
+        raise ValueError(f"{label} has duplicate completed matrix units: {duplicate_identities}")
+    return completed, {
+        "campaign_dir": str(directory),
         "completed_state_rows": len(completed),
+        "unique_completed_matrix_units": len(set(identities)),
         "ignored_noncomplete_state_rows": len(rows) - len(completed),
     }
-    return proposal
 
 
 def calibrate_behavior_thresholds(

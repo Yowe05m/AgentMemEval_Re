@@ -16,7 +16,10 @@ def _p() -> dict[str, object]:
         "status": "descriptive_only",
         "completed_run_count": 3,
         "expected_run_count": 3,
-        "runtime_homogeneity": {"homogeneous": True},
+        "runtime_homogeneity": {
+            "homogeneous": True,
+            "identity": {"code": [["commit", "same"], ["dirty", False]]},
+        },
         "aggregate_metrics": {
             "paired_estimand_descriptive": {
                 "effects_by_mechanism": {
@@ -33,7 +36,10 @@ def _e() -> dict[str, object]:
         "status": "descriptive_only",
         "completed_run_count": 6,
         "expected_run_count": 6,
-        "runtime_homogeneity": {"homogeneous": True},
+        "runtime_homogeneity": {
+            "homogeneous": True,
+            "identity": {"code": [["commit", "same"], ["dirty", False]]},
+        },
         "primary_endpoint": "final_test_bb_per_100",
         "paired_comparisons": {
             "fact_target": {
@@ -69,6 +75,16 @@ def test_pilot_power_plan_blocks_incomplete_matrix() -> None:
     assert plan["status"] == "blocked_invalid_or_incomplete_pilot"
     assert plan["required_seed_pairs_primary_max_across_p_and_e"] is None
     assert "campaign_e matrix is incomplete: 5/6" in plan["blockers"]
+
+
+def test_pilot_power_plan_blocks_cross_campaign_runtime_mismatch() -> None:
+    campaign_e = _e()
+    campaign_e["runtime_homogeneity"]["identity"] = {  # type: ignore[index]
+        "code": [["commit", "different"], ["dirty", False]]
+    }
+    plan = build_pilot_power_plan(_p(), campaign_e)
+    assert plan["status"] == "blocked_invalid_or_incomplete_pilot"
+    assert "campaign P/E runtime identities differ" in plan["blockers"]
 
 
 def _metrics(*, fold_rate: float = 0.40) -> dict[str, object]:
@@ -110,8 +126,11 @@ def test_behavior_freeze_uses_quantiles_and_domain_caps() -> None:
 
 def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
     metrics = [_metrics(), _metrics(), _metrics()]
-    audits = [{"execution_health": {"valid": True}} for _ in metrics]
-    proposal = build_pilot_freeze_proposal(_p(), _e(), metrics, audits)
+    p_audits = [{"execution_health": {"valid": True}} for _ in metrics]
+    e_audits = [{"execution_health": {"valid": True}} for _ in range(6)]
+    proposal = build_pilot_freeze_proposal(
+        _p(), _e(), metrics, p_audits, e_audits
+    )
     assert proposal["status"] == "ready_to_generate_immutable_formal_configs"
     assert proposal["retrieval_freeze"] == {
         "retrieval_threshold_status": "frozen",
@@ -121,15 +140,29 @@ def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
             "than tune retrieval on reward or test outcomes"
         ),
     }
-    audits[0] = {"execution_health": {"valid": False}}
-    blocked = build_pilot_freeze_proposal(_p(), _e(), metrics, audits)
+    p_audits[0] = {"execution_health": {"valid": False}}
+    blocked = build_pilot_freeze_proposal(
+        _p(), _e(), metrics, p_audits, e_audits
+    )
     assert blocked["status"] == "no_go_pilot_freeze_blocked"
     assert blocked["execution_blockers"]
+    p_audits[0] = {"execution_health": {"valid": True}}
+    e_audits[0] = {"execution_health": {"valid": False}}
+    blocked_e = build_pilot_freeze_proposal(
+        _p(), _e(), metrics, p_audits, e_audits
+    )
+    assert "campaign_e run 0 execution health is not valid" in blocked_e[
+        "execution_blockers"
+    ]
 
 
 def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> None:
     p_path = tmp_path / "p.json"
     e_path = tmp_path / "e.json"
+    p_dir = tmp_path / "campaign-p"
+    e_dir = tmp_path / "campaign-e"
+    p_dir.mkdir()
+    e_dir.mkdir()
     p_path.write_text(json.dumps(_p()), encoding="utf-8")
     e_path.write_text(json.dumps(_e()), encoding="utf-8")
     state_lines = [
@@ -137,7 +170,7 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
         "run_id\trun_dir\tfailure_class\tmessage"
     ]
     for index in range(3):
-        run_dir = tmp_path / f"run-{index}"
+        run_dir = tmp_path / f"p-run-{index}"
         run_dir.mkdir()
         (run_dir / "metrics.json").write_text(
             json.dumps(_metrics()), encoding="utf-8"
@@ -152,12 +185,27 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
         f"t\tmixed\tmixed\t99\t1\tinterrupted\tpartial\t{tmp_path / 'partial'}"
         "\tsuperseded\tpartial"
     )
-    (tmp_path / "state.tsv").write_text(
+    (p_dir / "state.tsv").write_text(
         "\n".join(state_lines) + "\n", encoding="utf-8"
     )
+    e_state_lines = [state_lines[0]]
+    for index in range(6):
+        run_dir = tmp_path / f"e-run-{index}"
+        run_dir.mkdir()
+        (run_dir / "protocol_audit.json").write_text(
+            json.dumps({"execution_health": {"valid": True}}), encoding="utf-8"
+        )
+        e_state_lines.append(
+            f"t\tcondition-{index}\ttarget\t{index}\t1\tcomplete\te{index}"
+            f"\t{run_dir}\t\t"
+        )
+    (e_dir / "state.tsv").write_text(
+        "\n".join(e_state_lines) + "\n", encoding="utf-8"
+    )
     proposal = build_pilot_freeze_proposal_from_paths(
-        p_path, e_path, tmp_path
+        p_path, e_path, p_dir, e_dir
     )
     assert proposal["status"] == "ready_to_generate_immutable_formal_configs"
     assert proposal["campaign_p_evidence"]["completed_state_rows"] == 3
     assert proposal["campaign_p_evidence"]["ignored_noncomplete_state_rows"] == 1
+    assert proposal["campaign_e_evidence"]["completed_state_rows"] == 6
