@@ -14,6 +14,7 @@ from pathlib import Path
 
 from agentmemeval.config.loader import load_raw_config
 from agentmemeval.core.errors import AgentMemEvalError
+from agentmemeval.evaluation.pilot import build_pilot_power_plan
 from agentmemeval.evaluation.reporting import rebuild_report
 from agentmemeval.experiments.campaign import aggregate_campaign, run_campaign
 from agentmemeval.experiments.runner import run_config
@@ -42,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
             return _campaign(args)
         if args.command == "campaign-aggregate":
             return _campaign_aggregate(args)
+        if args.command == "pilot-plan":
+            return _pilot_plan(args)
         if args.command == "report":
             return _report(args)
         parser.print_help()
@@ -79,6 +82,12 @@ def build_parser() -> argparse.ArgumentParser:
         "campaign-aggregate", help="不重跑实验，从 campaign 原始工件重建聚合"
     )
     campaign_aggregate.add_argument("--input", required=True, help="campaign 目录")
+    pilot_plan = sub.add_parser(
+        "pilot-plan", help="从完整 Campaign P/E pilot aggregate 生成审计功效计划"
+    )
+    pilot_plan.add_argument("--campaign-p", required=True, help="Campaign P aggregate JSON")
+    pilot_plan.add_argument("--campaign-e", required=True, help="Campaign E aggregate JSON")
+    pilot_plan.add_argument("--output", required=True, help="新功效计划 JSON；拒绝覆盖")
     report = sub.add_parser("report", help="从 run 目录重建报告")
     report.add_argument("--input", required=True, help="outputs/<run_id> 目录")
     report.add_argument("--big-blind", type=int, default=2, help="重算 BB/100 使用的大盲")
@@ -140,6 +149,20 @@ def _campaign_aggregate(args: argparse.Namespace) -> int:
 
     result = aggregate_campaign(args.input)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _pilot_plan(args: argparse.Namespace) -> int:
+    """Generate one immutable pilot power plan from versioned P/E aggregates."""
+
+    campaign_p = json.loads(Path(args.campaign_p).read_text(encoding="utf-8"))
+    campaign_e = json.loads(Path(args.campaign_e).read_text(encoding="utf-8"))
+    plan = build_pilot_power_plan(campaign_p, campaign_e)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("x", encoding="utf-8") as handle:
+        json.dump(plan, handle, ensure_ascii=False, indent=2)
+    print(json.dumps({"output": str(output), **plan}, ensure_ascii=False, indent=2))
     return 0
 
 

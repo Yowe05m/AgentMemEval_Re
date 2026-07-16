@@ -223,6 +223,7 @@ def _aggregate_table_run_units(
             "deterministic_monte_carlo_100000"
         ),
         "required_seed_pairs": required_seed_pairs,
+        "effects_by_mechanism": effects,
         "metrics": summaries,
     }
 

@@ -143,6 +143,10 @@ def test_formal_A7_R_aggregation_uses_one_effect_per_seed_and_holm() -> None:
     main = aggregate["main_table"]
     assert main["status"] == "ready"
     assert main["independent_seed_count"] == 3
+    assert main["effects_by_mechanism"] == {
+        "expr": [2.0, 4.0, 6.0],
+        "sync": [1.0, 2.0, 3.0],
+    }
     assert main["metrics"]["expr"]["n"] == 3.0
     assert main["metrics"]["expr"]["adjusted_p_value"] is not None
 
