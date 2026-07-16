@@ -143,6 +143,19 @@ python tools/task4/build_campaign_analysis.py `
   --output-dir outputs/campaigns/<campaign>/analysis_<utc>
 ```
 
+服务器打包前和本地解压后使用同一文件级 SHA-256 manifest 工具。manifest 必须放在
+被归档根目录之外；默认同时拒绝缺失、大小/哈希不符、危险相对路径和额外文件：
+
+```powershell
+python tools/task4/file_manifest.py build `
+  --root outputs/campaigns/<campaign> `
+  --output outputs/campaigns/<campaign>_files.tsv
+
+python tools/task4/file_manifest.py verify `
+  --root outputs/R_<date>/<snapshot>/extracted/<campaign> `
+  --manifest outputs/R_<date>/<snapshot>/<campaign>_files.tsv
+```
+
 先从完整 P/E Pilot 的真实语义检索事件生成 240 条分层、结果盲化的人工审查表。
 `blind_review.jsonl` 不含检索分数或牌局收益；人工填写 `human_labels.tsv` 后，
 审计命令才会按预注册精度下界和空检索率约束冻结阈值。模型标签不能冒充人工标签：

@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from agentmemeval.storage.archive import build_file_manifest, verify_file_manifest
+
+
+def test_file_manifest_round_trip_and_detects_changes(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    (root / "a.txt").write_text("alpha", encoding="utf-8")
+    nested = root / "nested"
+    nested.mkdir()
+    (nested / "b.json").write_text('{"b": 2}', encoding="utf-8")
+    manifest = tmp_path / "manifest.tsv"
+    built = build_file_manifest(root, manifest)
+    assert built["file_count"] == 2
+    verified = verify_file_manifest(root, manifest)
+    assert verified["verified"] is True
+    (root / "a.txt").write_text("changed", encoding="utf-8")
+    changed = verify_file_manifest(root, manifest)
+    assert changed["verified"] is False
+    assert changed["size_mismatches"]
+
+
+def test_file_manifest_detects_missing_and_extra_files(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    expected = root / "expected.txt"
+    expected.write_text("expected", encoding="utf-8")
+    manifest = tmp_path / "manifest.tsv"
+    build_file_manifest(root, manifest)
+    expected.unlink()
+    (root / "extra.txt").write_text("extra", encoding="utf-8")
+    result = verify_file_manifest(root, manifest)
+    assert result["missing_files"] == ["expected.txt"]
+    assert result["extra_files"] == ["extra.txt"]
+
+
+def test_manifest_rejects_unsafe_relative_path(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    manifest = tmp_path / "manifest.tsv"
+    manifest.write_text(
+        "relative_path\tsize_bytes\tsha256\n../escape\t0\t00\n",
+        encoding="utf-8",
+    )
+    result = verify_file_manifest(root, manifest)
+    assert result["verified"] is False
+    assert result["unsafe_or_duplicate_paths"] == ["../escape"]
