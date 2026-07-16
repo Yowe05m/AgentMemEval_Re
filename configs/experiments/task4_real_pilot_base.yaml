@@ -8,7 +8,22 @@ provider:
   model_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
   model_weights_hash: 250e641cf3762c622c5e74761cd6ad8b407bc4f1da86b7587bcfb44422b9baeb
   served_model_name: qwen/qwen3.5-9b
-  service_startup_parameters: null
+  service_startup_parameters:
+    model_path: /root/autodl-tmp/hf_cache/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+    host: 127.0.0.1
+    port: 8000
+    tensor_parallel_size: 1
+    dtype: auto
+    max_model_len: 8192
+    gpu_memory_utilization: 0.62
+    max_num_seqs: 4
+    reasoning_parser: qwen3
+    default_chat_template_kwargs:
+      enable_thinking: false
+    language_model_only: true
+    generation_config: vllm
+    hf_hub_offline: true
+    vllm_version: 0.23.1rc1.dev1032+g4a6440ace
   base_url_env: LOCAL_LLM_BASE_URL
   api_key_env: LOCAL_LLM_API_KEY
   api_key_required: false
@@ -25,7 +40,18 @@ agent:
   embedding_model: Qwen/Qwen3-Embedding-4B
   embedding_revision: 5cf2132abc99cad020ac570b19d031efec650f2b
   embedding_weights_hash: 0dac947dc26cecd6a7608ea64505f64b410117234d43d4d3d02676e4de6bbc7b
-  embedding_service_startup_parameters: null
+  embedding_service_startup_parameters:
+    model_path: /root/autodl-tmp/models/Qwen3-Embedding-4B/5cf2132abc99cad020ac570b19d031efec650f2b
+    host: 127.0.0.1
+    port: 8001
+    runner: pooling
+    tensor_parallel_size: 1
+    dtype: auto
+    max_model_len: 8192
+    gpu_memory_utilization: 0.24
+    max_num_seqs: 16
+    hf_hub_offline: true
+    vllm_version: 0.23.1rc1.dev1032+g4a6440ace
   embedding_base_url_env: EMBEDDING_BASE_URL
   embedding_api_key_env: EMBEDDING_API_KEY
   embedding_api_key_required: false
@@ -80,9 +106,9 @@ experiment:
   multiple_comparison_method: holm
   required_seed_pairs: null
   runtime_verification:
-    decision_service_smoke_passed: false
-    embedding_service_smoke_passed: false
-    uniform_hardware_verified: false
+    decision_service_smoke_passed: true
+    embedding_service_smoke_passed: true
+    uniform_hardware_verified: true
   preregistered_primary_metrics:
     - final_test_bb_per_100
   auxiliary_metrics:
