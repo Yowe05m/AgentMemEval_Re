@@ -262,6 +262,10 @@ def _completed_state_rows(
     state_path = directory / "state.tsv"
     with state_path.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
+    for row in rows:
+        local_run = directory / "runs" / str(row.get("run_id", ""))
+        if local_run.is_dir():
+            row["run_dir"] = str(local_run.resolve())
     completed = [row for row in rows if row.get("status") == "complete"]
     identities = [
         (str(row.get("condition_id", "")), str(row.get("seed", "")))

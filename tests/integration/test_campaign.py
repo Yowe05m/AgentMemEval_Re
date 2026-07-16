@@ -41,6 +41,16 @@ def test_mixed_nonformal_campaign_is_complete_descriptive_only(tmp_path: Path) -
     assert result["aggregate_status"] == "descriptive_only"
     aggregate = yaml.safe_load(Path(result["aggregate_path"]).read_text(encoding="utf-8"))
     assert aggregate["status"] == "descriptive_only"
+    campaign_dir = Path(result["campaign_dir"])
+    state_path = campaign_dir / "state.tsv"
+    state_text = state_path.read_text(encoding="utf-8")
+    state_path.write_text(
+        state_text.replace(str(campaign_dir.resolve()), "Z:/missing/server/campaign"),
+        encoding="utf-8",
+    )
+    relocated = aggregate_campaign(campaign_dir)
+    assert relocated["status"] == "descriptive_only"
+    assert relocated["completed_run_count"] == 1
 
 
 def test_campaign_e_runs_append_only_matrix_and_resumes(tmp_path: Path) -> None:

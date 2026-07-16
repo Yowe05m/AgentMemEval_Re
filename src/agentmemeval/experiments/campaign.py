@@ -231,7 +231,8 @@ def run_campaign(path: str | Path, *, resume: bool = False) -> dict[str, Any]:
                     active[next_future] = next_unit
 
     aggregate_result = aggregate_campaign(campaign_dir)
-    completed_runs = _completed_runs(_read_state(state_path))
+    state_rows = _prefer_campaign_local_run_dirs(campaign_dir, _read_state(state_path))
+    completed_runs = _completed_runs(state_rows)
     summary = {
         "campaign_id": campaign_id,
         "campaign_dir": str(campaign_dir),
@@ -262,7 +263,8 @@ def aggregate_campaign(campaign_dir: str | Path) -> dict[str, Any]:
     base_config = manifest.get("base_config")
     if not isinstance(spec, dict) or not isinstance(base_config, dict):
         raise ConfigError("campaign manifest 缺少冻结的 campaign/base_config")
-    completed_runs = _completed_runs(_read_state(state_path))
+    state_rows = _prefer_campaign_local_run_dirs(root, _read_state(state_path))
+    completed_runs = _completed_runs(state_rows)
     aggregate = _aggregate_campaign(spec, base_config, completed_runs)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     output_path = root / f"campaign_aggregate_{stamp}.json"
@@ -273,6 +275,22 @@ def aggregate_campaign(campaign_dir: str | Path) -> dict[str, Any]:
         "status": aggregate.get("status"),
         "completed_run_count": len(completed_runs),
     }
+
+
+def _prefer_campaign_local_run_dirs(
+    campaign_dir: Path, rows: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Make copied campaign evidence portable without rewriting its source state.tsv."""
+
+    localized: list[dict[str, str]] = []
+    for row in rows:
+        copy_row = dict(row)
+        run_id = str(copy_row.get("run_id", ""))
+        local_run = campaign_dir / "runs" / run_id
+        if run_id and local_run.is_dir():
+            copy_row["run_dir"] = str(local_run.resolve())
+        localized.append(copy_row)
+    return localized
 
 
 def _read_campaign_yaml(path: Path) -> dict[str, Any]:

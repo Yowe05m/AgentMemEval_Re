@@ -233,3 +233,43 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
     assert proposal["campaign_p_evidence"]["completed_state_rows"] == 3
     assert proposal["campaign_p_evidence"]["ignored_noncomplete_state_rows"] == 1
     assert proposal["campaign_e_evidence"]["completed_state_rows"] == 6
+
+
+def test_freeze_path_loader_prefers_relocated_campaign_leaf(tmp_path: Path) -> None:
+    p_dir = tmp_path / "campaign-p"
+    e_dir = tmp_path / "campaign-e"
+    p_dir.mkdir()
+    e_dir.mkdir()
+    header = (
+        "event_utc\tcondition_id\ttarget_mechanism\tseed\tattempt\tstatus\t"
+        "run_id\trun_dir\tfailure_class\tmessage\n"
+    )
+    for campaign_dir, prefix, count in ((p_dir, "p", 3), (e_dir, "e", 6)):
+        rows = [header.rstrip("\n")]
+        for index in range(count):
+            run_id = f"{prefix}{index}"
+            run_dir = campaign_dir / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            (run_dir / "metrics.json").write_text(
+                json.dumps(_metrics()), encoding="utf-8"
+            )
+            (run_dir / "protocol_audit.json").write_text(
+                json.dumps({"execution_health": {"valid": True}}), encoding="utf-8"
+            )
+            rows.append(
+                f"t\tc{index}\ttarget\t{index}\t1\tcomplete\t{run_id}\t"
+                f"/missing/server/{run_id}\t\t"
+            )
+        (campaign_dir / "state.tsv").write_text(
+            "\n".join(rows) + "\n", encoding="utf-8"
+        )
+    p_path = tmp_path / "p.json"
+    e_path = tmp_path / "e.json"
+    review_path = tmp_path / "review.json"
+    p_path.write_text(json.dumps(_p()), encoding="utf-8")
+    e_path.write_text(json.dumps(_e()), encoding="utf-8")
+    review_path.write_text(json.dumps(_review()), encoding="utf-8")
+    proposal = build_pilot_freeze_proposal_from_paths(
+        p_path, e_path, p_dir, e_dir, review_path
+    )
+    assert proposal["status"] == "ready_to_generate_immutable_formal_configs"
