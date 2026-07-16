@@ -156,6 +156,19 @@ python tools/task4/file_manifest.py verify `
   --manifest outputs/R_<date>/<snapshot>/<campaign>_files.tsv
 ```
 
+回收多个 campaign 后生成一份 `server_run_map.csv` 和 formal 主表排除清单。工具按
+campaign/condition/seed/attempt 折叠 lifecycle，只把完整、formal、execution valid、
+paper eligible 且非 model-substituted 的 leaf 标为候选；Pilot、失败、partial 和敏感性
+实验保留但分层排除：
+
+```powershell
+python tools/task4/build_run_map.py `
+  --campaign-dir outputs/campaigns/<p> `
+  --campaign-dir outputs/campaigns/<e> `
+  --output-csv outputs/R_<date>/server_run_map.csv `
+  --exclusion-json outputs/R_<date>/formal_main_exclusions.json
+```
+
 先从完整 P/E Pilot 的真实语义检索事件生成 240 条分层、结果盲化的人工审查表。
 `blind_review.jsonl` 不含检索分数或牌局收益；人工填写 `human_labels.tsv` 后，
 审计命令才会按预注册精度下界和空检索率约束冻结阈值。模型标签不能冒充人工标签：

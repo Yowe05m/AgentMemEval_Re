@@ -179,6 +179,9 @@ def _table_row(
 def _plot_primary_effects(
     rows: list[dict[str, Any]], path: Path, data_path: Path
 ) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
     means = [float(row["mean_effect"]) for row in rows]
