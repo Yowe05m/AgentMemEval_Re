@@ -110,6 +110,20 @@ python -m agentmemeval campaign --config configs/campaigns/task4_campaign_p_pilo
 python -m agentmemeval campaign --config configs/campaigns/task4_campaign_e_pilot.yaml
 ```
 
+事实记忆防自强化修复必须先经过真实 decision/embedding 双服务短 smoke。smoke 完成后
+使用排他 gate 核对代码与 prompt 身份、execution health、fallback、事实快照 schema、
+单次 preflop fold 拒收策略、旧模型理由泄漏和系统性行为坍塌：
+
+```powershell
+python tools/task4/gate_memory_debias_smoke.py `
+  --run-dir outputs/task4_memory_debias_smoke/task4_campaign_p_memory_debias_smoke_s2026071899 `
+  --output outputs/task4_memory_debias_smoke/memory_debias_smoke_gate_<utc>.json `
+  --expected-code-sha <full-commit-sha>
+```
+
+只有 gate 状态为 `ready_to_start_v5_pilot` 才能启动对应 V5 calibration Pilot；该状态
+不授予 formal 或 paper eligibility，Pilot 仍需独立行为、检索人工审查和功效冻结。
+
 断点续跑只处理未完成/失败条件；标准工件完整的 completed run 不会重跑：
 
 ```powershell
