@@ -102,6 +102,7 @@ def test_formal_freeze_generates_self_contained_valid_p_and_e_bundle(
         )["campaign"]
         assert campaign["seeds"] == result["seeds"]
         assert campaign["protocol_label"] == "paper_robust_formal_frozen"
+        assert campaign["max_parallel_runs"] == 4
         assert (output / campaign["base_experiment_config"]).is_file()
 
 

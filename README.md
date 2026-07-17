@@ -218,8 +218,8 @@ runtime lock，用 P/E campaign 的设计骨架和 robust formal 实验模板生
 python -m agentmemeval formal-freeze `
   --proposal outputs/campaigns/pilot_freeze_proposal_<utc>.json `
   --runtime-lock outputs/campaigns/formal_runtime_lock_<utc>.json `
-  --campaign-p-template configs/campaigns/task4_campaign_p_pilot.yaml `
-  --campaign-e-template configs/campaigns/task4_campaign_e_pilot.yaml `
+  --campaign-p-template configs/campaigns/task4_campaign_p_pilot_parallel_v2.yaml `
+  --campaign-e-template configs/campaigns/task4_campaign_e_pilot_parallel_v2.yaml `
   --formal-p-template configs/experiments/task4_campaign_p_robust_formal_template.yaml `
   --formal-e-template configs/experiments/task4_campaign_e_robust_formal_template.yaml `
   --output-dir configs/frozen/task4_<freeze_id> `
