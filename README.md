@@ -7,7 +7,7 @@
 | 能力 | 当前状态 |
 | --- | --- |
 | Python 包安装 | `pyproject.toml` + `src/` 布局，支持 editable install |
-| CLI | `doctor`、`run`、`campaign`、`campaign-aggregate`、`pilot-plan`、`pilot-freeze`、`report` |
+| CLI | `doctor`、`run`、`campaign`、`campaign-aggregate`、`pilot-plan`、`pilot-freeze`、`formal-freeze`、`report` |
 | 离线 Provider | 默认 `mock`，无需密钥即可跑实验和测试 |
 | 真实 Provider | 提供 `openai_compatible` 骨架，通过环境变量接入 |
 | 本地扑克环境 | 覆盖 no-limit Hold'em 合法动作、加注重开、all-in、边池、摊牌和筹码守恒 |
@@ -209,6 +209,27 @@ python -m agentmemeval pilot-freeze `
   --retrieval-review-audit outputs/campaigns/retrieval_review_<utc>/relevance_audit.json `
   --output outputs/campaigns/pilot_freeze_proposal_<utc>.json
 ```
+
+冻结提案状态必须为 `ready_to_generate_immutable_formal_configs`。随后结合双服务
+runtime lock，用 P/E campaign 的设计骨架和 robust formal 实验模板生成一个全新的、
+拒绝覆盖的配置包。`seed-start` 必须来自预注册且不得与 Pilot seeds 重叠：
+
+```powershell
+python -m agentmemeval formal-freeze `
+  --proposal outputs/campaigns/pilot_freeze_proposal_<utc>.json `
+  --runtime-lock outputs/campaigns/formal_runtime_lock_<utc>.json `
+  --campaign-p-template configs/campaigns/task4_campaign_p_pilot.yaml `
+  --campaign-e-template configs/campaigns/task4_campaign_e_pilot.yaml `
+  --formal-p-template configs/experiments/task4_campaign_p_robust_formal_template.yaml `
+  --formal-e-template configs/experiments/task4_campaign_e_robust_formal_template.yaml `
+  --output-dir configs/frozen/task4_<freeze_id> `
+  --freeze-id <freeze_id> `
+  --seed-start <preregistered_formal_seed_start>
+```
+
+输出目录包含 P/E 两份自包含实验 YAML、两份完整 campaign YAML 和带源文件 SHA-256、
+runtime lock、seed 规则的 freeze manifest。目录已存在、提案未 ready、人工检索审计未冻结、
+runtime lock 缺字段或模板验证失败时，命令都会 fail-closed，不能原地修改模板绕过。
 
 Formal manifest 通过 `runtime_probe_python` 从实际 vLLM 服务环境采集 torch CUDA
 和 vLLM 版本；项目运行环境无需重复安装 torch。探针缺失或与 frozen runtime
