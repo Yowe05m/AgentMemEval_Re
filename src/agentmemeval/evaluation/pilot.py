@@ -280,6 +280,9 @@ def _completed_state_rows(
         "campaign_dir": str(directory),
         "completed_state_rows": len(completed),
         "unique_completed_matrix_units": len(set(identities)),
+        "completed_seeds": sorted(
+            {int(row["seed"]) for row in completed if str(row.get("seed", "")).isdigit()}
+        ),
         "ignored_noncomplete_state_rows": len(rows) - len(completed),
     }
 

@@ -83,6 +83,14 @@ def test_formal_rejects_unfrozen_protocol_before_run_directory() -> None:
     assert "statistical_plan_status must be frozen" in str(exc_info.value)
 
 
+def test_frozen_preflight_reuses_formal_gates_but_is_not_formal() -> None:
+    config = _config("pilot")
+    config["experiment"]["frozen_config_preflight"] = True
+    with pytest.raises(ConfigError, match="protocol_readiness must be ready") as exc_info:
+        assess_run_admission(config, Path.cwd())
+    assert "statistical_plan_status must be frozen" in str(exc_info.value)
+
+
 def test_formal_runtime_lock_uses_verified_model_service_environment() -> None:
     experiment = {
         "formal_runtime_lock": {

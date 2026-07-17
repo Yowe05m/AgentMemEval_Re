@@ -224,12 +224,17 @@ python -m agentmemeval formal-freeze `
   --formal-e-template configs/experiments/task4_campaign_e_robust_formal_template.yaml `
   --output-dir configs/frozen/task4_<freeze_id> `
   --freeze-id <freeze_id> `
-  --seed-start <preregistered_formal_seed_start>
+  --seed-start <preregistered_formal_seed_start> `
+  --preflight-seed <independent_extra_pilot_seed>
 ```
 
-输出目录包含 P/E 两份自包含实验 YAML、两份完整 campaign YAML 和带源文件 SHA-256、
-runtime lock、seed 规则的 freeze manifest。目录已存在、提案未 ready、人工检索审计未冻结、
-runtime lock 缺字段或模板验证失败时，命令都会 fail-closed，不能原地修改模板绕过。
+`preflight-seed` 必须与 calibration Pilot 和 formal seeds 都不重叠。输出目录包含
+P/E 两份自包含 formal YAML、两份仅改变 seed、`run_mode` 与
+`frozen_config_preflight` 标记的 not-for-paper preflight YAML、对应四份完整 campaign
+YAML，以及带源文件 SHA-256、runtime lock、seed 规则的 freeze manifest。先完整运行
+两份 preflight campaign；它们复用 formal 的 protocol/runtime 准入检查，但永久不进入
+论文主表。目录已存在、提案未 ready、人工检索审计未冻结、seed 重叠、runtime lock
+缺字段或模板验证失败时，命令都会 fail-closed，不能原地修改模板绕过。
 
 Formal manifest 通过 `runtime_probe_python` 从实际 vLLM 服务环境采集 torch CUDA
 和 vLLM 版本；项目运行环境无需重复安装 torch。探针缺失或与 frozen runtime

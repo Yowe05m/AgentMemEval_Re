@@ -32,6 +32,7 @@ def generate_formal_freeze_bundle(
     formal_e_template_path: str | Path,
     output_dir: str | Path,
     freeze_id: str,
+    preflight_seed: int,
     seed_start: int = 2026071801,
 ) -> dict[str, Any]:
     """Create a new P/E formal bundle only after every frozen gate is valid."""
@@ -62,6 +63,17 @@ def generate_formal_freeze_bundle(
     seeds = [first_seed + offset for offset in range(required_seed_pairs)]
     if len(set(seeds)) != required_seed_pairs:
         raise ConfigError("generated formal seeds are not unique")
+    pilot_seeds = _pilot_seeds(proposal)
+    try:
+        validated_preflight_seed = int(preflight_seed)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("preflight_seed must be an integer") from exc
+    if validated_preflight_seed < 1:
+        raise ConfigError("preflight_seed must be positive")
+    if validated_preflight_seed in set(seeds):
+        raise ConfigError("preflight_seed must not overlap formal seeds")
+    if validated_preflight_seed in pilot_seeds:
+        raise ConfigError("preflight_seed must not overlap calibration Pilot seeds")
 
     source_hashes = {
         label: _sha256(path) for label, path in sorted(inputs.items())
@@ -88,11 +100,27 @@ def generate_formal_freeze_bundle(
             source_hashes,
         ),
     }
+    preflight_configs = {
+        label: _build_preflight_config(config, validated_preflight_seed)
+        for label, config in formal_configs.items()
+    }
     names = {
         "formal_p": f"task4_campaign_p_robust_formal_{normalized_freeze_id}.yaml",
         "formal_e": f"task4_campaign_e_robust_formal_{normalized_freeze_id}.yaml",
         "campaign_p": f"task4_campaign_p_robust_formal_{normalized_freeze_id}_campaign.yaml",
         "campaign_e": f"task4_campaign_e_robust_formal_{normalized_freeze_id}_campaign.yaml",
+        "preflight_p": (
+            f"task4_campaign_p_frozen_preflight_{normalized_freeze_id}.yaml"
+        ),
+        "preflight_e": (
+            f"task4_campaign_e_frozen_preflight_{normalized_freeze_id}.yaml"
+        ),
+        "preflight_campaign_p": (
+            f"task4_campaign_p_frozen_preflight_{normalized_freeze_id}_campaign.yaml"
+        ),
+        "preflight_campaign_e": (
+            f"task4_campaign_e_frozen_preflight_{normalized_freeze_id}_campaign.yaml"
+        ),
         "manifest": f"formal_freeze_manifest_{normalized_freeze_id}.json",
     }
     campaigns = {
@@ -113,6 +141,28 @@ def generate_formal_freeze_bundle(
             label="e",
         ),
     }
+    preflight_campaigns = {
+        "p": _build_campaign(
+            inputs["campaign_p_template"],
+            expected_design="mixed_table",
+            freeze_id=normalized_freeze_id,
+            base_name=names["preflight_p"],
+            seeds=[validated_preflight_seed],
+            label="p_preflight",
+            protocol_label="frozen_config_preflight_not_for_paper",
+            minimum_seeds=1,
+        ),
+        "e": _build_campaign(
+            inputs["campaign_e_template"],
+            expected_design="target_vs_seven_no_memory",
+            freeze_id=normalized_freeze_id,
+            base_name=names["preflight_e"],
+            seeds=[validated_preflight_seed],
+            label="e_preflight",
+            protocol_label="frozen_config_preflight_not_for_paper",
+            minimum_seeds=1,
+        ),
+    }
     destination = Path(output_dir).resolve()
     if destination.exists():
         raise FileExistsError(f"formal freeze output directory already exists: {destination}")
@@ -129,6 +179,17 @@ def generate_formal_freeze_bundle(
             "no_silent_resource_cap": True,
         },
         "seeds": seeds,
+        "calibration_pilot_seeds": sorted(pilot_seeds),
+        "preflight_seed": validated_preflight_seed,
+        "preflight_policy": {
+            "paper_eligible": False,
+            "uses_formal_admission_checks": True,
+            "allowed_config_differences_from_formal": [
+                "experiment.seed",
+                "experiment.run_mode",
+                "experiment.frozen_config_preflight",
+            ],
+        },
         "runtime_lock": runtime_lock,
         "source_sha256": source_hashes,
         "files": names,
@@ -139,10 +200,42 @@ def generate_formal_freeze_bundle(
     _write_new_text(destination / names["campaign_p"], dump_yaml(campaigns["p"]))
     _write_new_text(destination / names["campaign_e"], dump_yaml(campaigns["e"]))
     _write_new_text(
+        destination / names["preflight_p"], dump_yaml(preflight_configs["p"])
+    )
+    _write_new_text(
+        destination / names["preflight_e"], dump_yaml(preflight_configs["e"])
+    )
+    _write_new_text(
+        destination / names["preflight_campaign_p"],
+        dump_yaml(preflight_campaigns["p"]),
+    )
+    _write_new_text(
+        destination / names["preflight_campaign_e"],
+        dump_yaml(preflight_campaigns["e"]),
+    )
+    _write_new_text(
         destination / names["manifest"],
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
     )
     return {"output_dir": str(destination), **manifest}
+
+
+def _pilot_seeds(proposal: dict[str, Any]) -> set[int]:
+    seeds: set[int] = set()
+    for label in ("campaign_p_evidence", "campaign_e_evidence"):
+        evidence = proposal.get(label)
+        if not isinstance(evidence, dict) or not isinstance(
+            evidence.get("completed_seeds"), list
+        ):
+            raise ConfigError(f"pilot proposal is missing {label}.completed_seeds")
+        for value in evidence["completed_seeds"]:
+            try:
+                seeds.add(int(value))
+            except (TypeError, ValueError) as exc:
+                raise ConfigError(f"invalid calibration Pilot seed: {value}") from exc
+    if not seeds:
+        raise ConfigError("pilot proposal contains no completed calibration seeds")
+    return seeds
 
 
 def _validate_proposal(
@@ -246,6 +339,23 @@ def _build_formal_config(
     return config
 
 
+def _build_preflight_config(
+    formal_config: dict[str, Any], preflight_seed: int
+) -> dict[str, Any]:
+    config = copy.deepcopy(formal_config)
+    experiment = dict(config["experiment"])
+    experiment.update(
+        {
+            "seed": preflight_seed,
+            "run_mode": "pilot",
+            "frozen_config_preflight": True,
+        }
+    )
+    config["experiment"] = experiment
+    validate_config(config)
+    return config
+
+
 def _build_campaign(
     template_path: Path,
     *,
@@ -254,6 +364,8 @@ def _build_campaign(
     base_name: str,
     seeds: list[int],
     label: str,
+    protocol_label: str = "paper_robust_formal_frozen",
+    minimum_seeds: int = 2,
 ) -> dict[str, Any]:
     raw = yaml.safe_load(template_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or not isinstance(raw.get("campaign"), dict):
@@ -266,12 +378,15 @@ def _build_campaign(
     campaign.update(
         {
             "campaign_id": f"task4_campaign_{label}_robust_formal_{freeze_id}",
-            "protocol_label": "paper_robust_formal_frozen",
+            "protocol_label": protocol_label,
             "base_experiment_config": base_name,
             "seeds": list(seeds),
         }
     )
-    if len(campaign["seeds"]) < 2 or len(set(campaign["seeds"])) != len(seeds):
+    if (
+        len(campaign["seeds"]) < minimum_seeds
+        or len(set(campaign["seeds"])) != len(seeds)
+    ):
         raise ConfigError("generated formal campaign seed matrix is invalid")
     return {"campaign": campaign}
 

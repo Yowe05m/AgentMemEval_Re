@@ -20,9 +20,11 @@ def assess_run_admission(config: dict[str, Any], cwd: Path) -> dict[str, Any]:
     mode = str(experiment.get("run_mode", "smoke"))
     if mode not in RUN_MODES:
         raise ConfigError(f"未知 experiment.run_mode：{mode}")
+    frozen_preflight = experiment.get("frozen_config_preflight") is True
 
     audit: dict[str, Any] = {
         "run_mode": mode,
+        "frozen_config_preflight": frozen_preflight,
         "paper_eligible_at_start": False,
         "not_for_paper": mode != "formal",
         "blockers": [],
@@ -88,7 +90,7 @@ def assess_run_admission(config: dict[str, Any], cwd: Path) -> dict[str, Any]:
             else "not_required"
         ),
     }
-    if mode == "formal":
+    if mode == "formal" or frozen_preflight:
         readiness = str(experiment.get("protocol_readiness", ""))
         if readiness != "ready":
             blockers.append(

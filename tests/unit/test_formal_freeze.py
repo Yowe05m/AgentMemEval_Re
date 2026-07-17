@@ -41,6 +41,8 @@ def _proposal(required: int = 4) -> dict[str, object]:
             "retrieval_threshold_status": "frozen",
             "minimum_retrieval_score": 0.0,
         },
+        "campaign_p_evidence": {"completed_seeds": [2026071701, 2026071702]},
+        "campaign_e_evidence": {"completed_seeds": [2026071701, 2026071702]},
     }
 
 
@@ -77,6 +79,7 @@ def _generate(tmp_path: Path, proposal: dict[str, object] | None = None) -> dict
         output_dir=tmp_path / "bundle",
         freeze_id="pilot_20260717_v1",
         seed_start=2026071801,
+        preflight_seed=2026071799,
     )
 
 
@@ -104,6 +107,27 @@ def test_formal_freeze_generates_self_contained_valid_p_and_e_bundle(
         assert campaign["protocol_label"] == "paper_robust_formal_frozen"
         assert campaign["max_parallel_runs"] == 4
         assert (output / campaign["base_experiment_config"]).is_file()
+    for label in ("preflight_p", "preflight_e"):
+        preflight = load_config(output / result["files"][label])
+        assert preflight["experiment"]["run_mode"] == "pilot"
+        assert preflight["experiment"]["seed"] == 2026071799
+        assert preflight["experiment"]["frozen_config_preflight"] is True
+        formal_label = label.removeprefix("preflight_")
+        formal = load_config(output / result["files"][f"formal_{formal_label}"])
+        preflight_experiment = dict(preflight["experiment"])
+        formal_experiment = dict(formal["experiment"])
+        for key in ("seed", "run_mode", "frozen_config_preflight"):
+            preflight_experiment.pop(key, None)
+            formal_experiment.pop(key, None)
+        assert preflight_experiment == formal_experiment
+        assert preflight["agent"] == formal["agent"]
+        assert preflight["provider"] == formal["provider"]
+    for label in ("preflight_campaign_p", "preflight_campaign_e"):
+        campaign = yaml.safe_load(
+            (output / result["files"][label]).read_text(encoding="utf-8")
+        )["campaign"]
+        assert campaign["seeds"] == [2026071799]
+        assert campaign["protocol_label"] == "frozen_config_preflight_not_for_paper"
 
 
 def test_formal_freeze_rejects_blocked_proposal_before_creating_output(
@@ -138,6 +162,7 @@ def test_formal_freeze_rejects_missing_runtime_field(tmp_path: Path) -> None:
             / "configs/experiments/task4_campaign_e_robust_formal_template.yaml",
             output_dir=tmp_path / "bundle",
             freeze_id="pilot_20260717_v1",
+            preflight_seed=2026071799,
         )
     assert not (tmp_path / "bundle").exists()
 
@@ -146,3 +171,28 @@ def test_formal_freeze_refuses_to_overwrite_existing_bundle(tmp_path: Path) -> N
     _generate(tmp_path)
     with pytest.raises(FileExistsError, match="already exists"):
         _generate(tmp_path)
+
+
+def test_formal_freeze_rejects_preflight_seed_overlap(tmp_path: Path) -> None:
+    proposal_path = tmp_path / "proposal.json"
+    runtime_path = tmp_path / "runtime.json"
+    _write_json(proposal_path, _proposal())
+    _write_json(runtime_path, _runtime_lock())
+    root = Path(__file__).resolve().parents[2]
+    with pytest.raises(ConfigError, match="calibration Pilot"):
+        generate_formal_freeze_bundle(
+            proposal_path=proposal_path,
+            runtime_lock_path=runtime_path,
+            campaign_p_template_path=root
+            / "configs/campaigns/task4_campaign_p_pilot_parallel_v2.yaml",
+            campaign_e_template_path=root
+            / "configs/campaigns/task4_campaign_e_pilot_parallel_v2.yaml",
+            formal_p_template_path=root
+            / "configs/experiments/task4_campaign_p_robust_formal_template.yaml",
+            formal_e_template_path=root
+            / "configs/experiments/task4_campaign_e_robust_formal_template.yaml",
+            output_dir=tmp_path / "bundle",
+            freeze_id="pilot_20260717_v1",
+            seed_start=2026071801,
+            preflight_seed=2026071701,
+        )

@@ -121,6 +121,12 @@ def build_parser() -> argparse.ArgumentParser:
     formal_freeze.add_argument("--output-dir", required=True, help="全新输出目录；拒绝覆盖")
     formal_freeze.add_argument("--freeze-id", required=True, help="不可变冻结标识")
     formal_freeze.add_argument("--seed-start", type=int, default=2026071801)
+    formal_freeze.add_argument(
+        "--preflight-seed",
+        type=int,
+        required=True,
+        help="与 calibration Pilot 和 formal seeds 均不重叠的冻结预检 seed",
+    )
     report = sub.add_parser("report", help="从 run 目录重建报告")
     report.add_argument("--input", required=True, help="outputs/<run_id> 目录")
     report.add_argument("--big-blind", type=int, default=2, help="重算 BB/100 使用的大盲")
@@ -230,6 +236,7 @@ def _formal_freeze(args: argparse.Namespace) -> int:
         output_dir=args.output_dir,
         freeze_id=args.freeze_id,
         seed_start=args.seed_start,
+        preflight_seed=args.preflight_seed,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
