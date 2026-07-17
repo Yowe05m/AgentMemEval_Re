@@ -110,6 +110,21 @@ def test_task4_memory_debiased_pilot_campaigns_are_valid_and_seed_paired() -> No
     assert len(seed_sets[0]) == 8
 
 
+def test_task4_memory_debias_smoke_is_real_roster_and_not_for_paper() -> None:
+    config = load_config(
+        "configs/experiments/task4_campaign_p_memory_debias_smoke.yaml"
+    )
+    experiment = config["experiment"]
+    assert experiment["run_mode"] == "pilot"
+    assert "not_for_main_table" in experiment["protocol_label"]
+    assert experiment["seed"] == 2026071899
+    assert experiment["train_hands"] == 30
+    assert experiment["checkpoint_test_hands"] == 10
+    assert len(experiment["agent_roster"]) == 8
+    assert config["agent"]["embedding_backend"] == "openai_compatible"
+    assert config["agent"]["reject_single_preflop_fold"] is True
+
+
 def test_validate_config_rejects_incomplete_A7_R_preregistration() -> None:
     config = _valid_config()
     config["experiment"].update(  # type: ignore[union-attr]

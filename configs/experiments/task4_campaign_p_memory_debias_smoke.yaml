@@ -1,0 +1,12 @@
+extends: task4_campaign_p_pilot.yaml
+
+experiment:
+  seed: 2026071899
+  run_id: task4_campaign_p_memory_debias_smoke_s2026071899
+  output_root: outputs/task4_memory_debias_smoke
+  run_mode: pilot
+  protocol_label: real_service_memory_debias_smoke_not_for_main_table
+  train_hands: 30
+  checkpoint_interval: 30
+  checkpoint_test_hands: 10
+  test_hands: 10
