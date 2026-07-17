@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agentmemeval.storage.archive import build_file_manifest, verify_file_manifest
+from agentmemeval.storage.archive import (
+    _filesystem_path,
+    build_file_manifest,
+    verify_file_manifest,
+)
 
 
 def test_file_manifest_round_trip_and_detects_changes(tmp_path: Path) -> None:
@@ -48,3 +52,29 @@ def test_manifest_rejects_unsafe_relative_path(tmp_path: Path) -> None:
     result = verify_file_manifest(root, manifest)
     assert result["verified"] is False
     assert result["unsafe_or_duplicate_paths"] == ["../escape"]
+
+
+def test_file_manifest_round_trip_supports_paths_over_260_characters(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    root.mkdir()
+    relative = (
+        Path("a" * 90)
+        / ("b" * 90)
+        / ("c" * 60)
+        / "async_00_checkpoint_0150.json"
+    )
+    long_path = root / relative
+    filesystem_path = _filesystem_path(long_path)
+    filesystem_path.parent.mkdir(parents=True)
+    filesystem_path.write_text('{"verified": true}', encoding="utf-8")
+    assert len(str(long_path)) > 260
+
+    manifest = tmp_path / "long_manifest.tsv"
+    built = build_file_manifest(root, manifest)
+    verified = verify_file_manifest(root, manifest)
+
+    assert built["file_count"] == 1
+    assert verified["verified"] is True
+    assert verified["verified_file_count"] == 1

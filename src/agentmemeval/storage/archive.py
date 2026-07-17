@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -19,20 +20,27 @@ def build_file_manifest(root: str | Path, output: str | Path) -> dict[str, Any]:
         raise NotADirectoryError(directory)
     if target == directory or directory in target.parents:
         raise ValueError("manifest output must be outside the archived root")
+    filesystem_directory = _filesystem_path(directory)
     rows = []
-    for path in sorted(directory.rglob("*"), key=lambda item: item.as_posix()):
-        if path.is_symlink():
-            raise ValueError(f"archive root contains a symlink: {path}")
-        if path.is_file():
+    paths = sorted(
+        filesystem_directory.rglob("*"),
+        key=lambda item: item.relative_to(filesystem_directory).as_posix(),
+    )
+    for filesystem_path in paths:
+        relative = filesystem_path.relative_to(filesystem_directory).as_posix()
+        if filesystem_path.is_symlink():
+            raise ValueError(f"archive root contains a symlink: {relative}")
+        if filesystem_path.is_file():
             rows.append(
                 {
-                    "relative_path": path.relative_to(directory).as_posix(),
-                    "size_bytes": path.stat().st_size,
-                    "sha256": _sha256(path),
+                    "relative_path": relative,
+                    "size_bytes": filesystem_path.stat().st_size,
+                    "sha256": _sha256(filesystem_path),
                 }
             )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("x", encoding="utf-8", newline="") as handle:
+    filesystem_target = _filesystem_path(target)
+    filesystem_target.parent.mkdir(parents=True, exist_ok=True)
+    with filesystem_target.open("x", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=MANIFEST_FIELDS, delimiter="\t")
         writer.writeheader()
         writer.writerows(rows)
@@ -42,7 +50,7 @@ def build_file_manifest(root: str | Path, output: str | Path) -> dict[str, Any]:
         "manifest": str(target),
         "file_count": len(rows),
         "total_size_bytes": sum(int(row["size_bytes"]) for row in rows),
-        "manifest_sha256": _sha256(target),
+        "manifest_sha256": _sha256(filesystem_target),
     }
 
 
@@ -53,7 +61,8 @@ def verify_file_manifest(
 
     directory = Path(root).resolve()
     manifest_path = Path(manifest).resolve()
-    with manifest_path.open("r", encoding="utf-8", newline="") as handle:
+    filesystem_manifest = _filesystem_path(manifest_path)
+    with filesystem_manifest.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
     seen: set[str] = set()
     missing: list[str] = []
@@ -73,11 +82,12 @@ def verify_file_manifest(
             continue
         seen.add(relative)
         path = directory.joinpath(*pure.parts)
-        if not path.is_file() or path.is_symlink():
+        filesystem_path = _filesystem_path(path)
+        if not filesystem_path.is_file() or filesystem_path.is_symlink():
             missing.append(relative)
             continue
         expected_size = int(row["size_bytes"])
-        observed_size = path.stat().st_size
+        observed_size = filesystem_path.stat().st_size
         if observed_size != expected_size:
             size_mismatches.append(
                 {
@@ -88,7 +98,7 @@ def verify_file_manifest(
             )
             continue
         expected_hash = str(row["sha256"]).lower()
-        observed_hash = _sha256(path)
+        observed_hash = _sha256(filesystem_path)
         if observed_hash != expected_hash:
             hash_mismatches.append(
                 {
@@ -99,9 +109,10 @@ def verify_file_manifest(
             )
     extras = []
     if reject_extra_files:
+        filesystem_directory = _filesystem_path(directory)
         observed = {
-            path.relative_to(directory).as_posix()
-            for path in directory.rglob("*")
+            path.relative_to(filesystem_directory).as_posix()
+            for path in filesystem_directory.rglob("*")
             if path.is_file() and not path.is_symlink()
         }
         extras = sorted(observed - seen)
@@ -110,7 +121,7 @@ def verify_file_manifest(
         "schema_version": "task4_file_manifest_verification_v1",
         "root": str(directory),
         "manifest": str(manifest_path),
-        "manifest_sha256": _sha256(manifest_path),
+        "manifest_sha256": _sha256(filesystem_manifest),
         "expected_file_count": len(rows),
         "verified_file_count": len(rows)
         - len(unsafe)
@@ -133,3 +144,16 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _filesystem_path(path: Path) -> Path:
+    """Use the Win32 extended path namespace so 260-char evidence paths remain visible."""
+
+    if os.name != "nt":
+        return path
+    raw = str(path)
+    if raw.startswith("\\\\?\\"):
+        return path
+    if raw.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + raw.lstrip("\\"))
+    return Path("\\\\?\\" + raw)
