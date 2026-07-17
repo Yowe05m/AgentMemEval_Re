@@ -134,6 +134,15 @@ def test_behavior_freeze_uses_quantiles_and_domain_caps() -> None:
     assert degenerate["status"] == "blocked_pilot_behavior_degenerate"
 
 
+def test_pilot_is_judged_by_hard_domain_gate_not_its_frozen_quantile() -> None:
+    freeze = calibrate_behavior_thresholds(
+        [*[_metrics(fold_rate=0.40) for _ in range(20)], _metrics(fold_rate=0.95)]
+    )
+    assert freeze["thresholds"]["max_fold_rate"] < 0.95
+    assert freeze["pilot_domain_gate_thresholds"]["max_fold_rate"] == 0.98
+    assert freeze["status"] == "frozen"
+
+
 def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
     metrics = [_metrics(), _metrics(), _metrics()]
     p_audits = [{"execution_health": {"valid": True}} for _ in metrics]

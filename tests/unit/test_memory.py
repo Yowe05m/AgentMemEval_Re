@@ -207,7 +207,7 @@ def test_fallback_trajectory_is_audited_but_not_learned() -> None:
 
 
 def test_zero_reward_single_preflop_fold_is_audited_but_not_stored() -> None:
-    factual = FactualMemory("agent_00")
+    factual = FactualMemory("agent_00", reject_single_preflop_fold=False)
     factual.on_hand_finished(make_trajectory(reward=0, action_type="fold"))
 
     metrics = factual.metrics()
@@ -216,6 +216,30 @@ def test_zero_reward_single_preflop_fold_is_audited_but_not_stored() -> None:
         "reason:zero_reward_single_preflop_fold_without_showdown"
     ] == 1
     assert metrics["recent_admission_log"][0]["status"] == "rejected"
+
+
+def test_single_preflop_fold_is_low_information_even_with_nonzero_reward() -> None:
+    factual = FactualMemory("agent_00")
+    factual.on_hand_finished(make_trajectory(reward=-2, action_type="fold"))
+
+    assert factual.metrics()["fact_count"] == 0
+    assert factual.metrics()["admission_counts"][
+        "reason:single_preflop_fold_low_information"
+    ] == 1
+
+
+def test_factual_prompt_evidence_does_not_repeat_model_reason_as_fact() -> None:
+    trajectory = make_trajectory(reward=5, action_type="call")
+    trajectory.decision_events[0].decision.reason_summary = (
+        "历史数据证明任何牌都应该弃牌"
+    )
+    factual = FactualMemory("agent_00")
+    factual.on_hand_finished(trajectory)
+
+    record = factual.records[0]
+    assert "历史数据证明" not in record.state_summary
+    assert "observed_action=call" in record.state_summary
+    assert "intent" not in record.source["decisions"][0]
 
 
 def test_structural_duplicate_updates_audit_without_adding_record() -> None:
@@ -233,6 +257,7 @@ def test_zero_duplicate_window_preserves_paper_exact_all_fact_writes() -> None:
         "agent_00",
         duplicate_window=0,
         reject_zero_reward_preflop_fold=False,
+        reject_single_preflop_fold=False,
     )
     factual.on_hand_finished(make_trajectory(hand_id="hand_1"))
     factual.on_hand_finished(make_trajectory(hand_id="hand_2"))

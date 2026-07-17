@@ -58,6 +58,9 @@ def build_memory(
         "reject_zero_reward_preflop_fold": bool(
             config.get("reject_zero_reward_preflop_fold", True)
         ),
+        "reject_single_preflop_fold": bool(
+            config.get("reject_single_preflop_fold", True)
+        ),
         "retrieval_signature_dedup": bool(
             config.get("retrieval_signature_dedup", True)
         ),

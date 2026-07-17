@@ -5,6 +5,7 @@ extends: task4_campaign_p_pilot.yaml
 # TASK4 robust formal 主表；运行结果必须标记 paper_protocol_model_substituted。
 agent:
   reject_zero_reward_preflop_fold: false
+  reject_single_preflop_fold: false
   fact_duplicate_window: 0
   retrieval_signature_dedup: false
   minimum_retrieval_score: null

@@ -62,6 +62,7 @@ class FactualMemory:
         retrieval_threshold_status: str = "pending_pilot",
         duplicate_window: int = 50,
         reject_zero_reward_preflop_fold: bool = True,
+        reject_single_preflop_fold: bool = True,
         retrieval_signature_dedup: bool = True,
         admission_log_limit: int = 500,
     ) -> None:
@@ -91,6 +92,7 @@ class FactualMemory:
         # Zero explicitly preserves the original paper behavior: keep every fact.
         self.duplicate_window = max(0, duplicate_window)
         self.reject_zero_reward_preflop_fold = reject_zero_reward_preflop_fold
+        self.reject_single_preflop_fold = reject_single_preflop_fold
         self.retrieval_signature_dedup = retrieval_signature_dedup
         self.admission_log_limit = max(1, admission_log_limit)
         self.records: list[FactualMemoryRecord] = []
@@ -240,6 +242,7 @@ class FactualMemory:
             decisions,
             quality,
             reject_zero_reward_preflop_fold=self.reject_zero_reward_preflop_fold,
+            reject_single_preflop_fold=self.reject_single_preflop_fold,
         )
         if rejection_reasons:
             self._record_admission(
@@ -383,7 +386,7 @@ class FactualMemory:
             agent_id=self.agent_id,
             scope=self.scope,
             payload={
-                "schema_version": 4,
+                "schema_version": 5,
                 "top_k": self.top_k,
                 "max_records": self.max_records,
                 "retrieval_backend": self.retrieval_backend,
@@ -393,6 +396,7 @@ class FactualMemory:
                 "retrieval_threshold_status": self.retrieval_threshold_status,
                 "duplicate_window": self.duplicate_window,
                 "reject_zero_reward_preflop_fold": self.reject_zero_reward_preflop_fold,
+                "reject_single_preflop_fold": self.reject_single_preflop_fold,
                 "retrieval_signature_dedup": self.retrieval_signature_dedup,
                 "next_record_index": self.next_record_index,
                 "admission_log": list(self.admission_log),
@@ -443,6 +447,11 @@ class FactualMemory:
         self.reject_zero_reward_preflop_fold = bool(
             snapshot.payload.get(
                 "reject_zero_reward_preflop_fold", self.reject_zero_reward_preflop_fold
+            )
+        )
+        self.reject_single_preflop_fold = bool(
+            snapshot.payload.get(
+                "reject_single_preflop_fold", self.reject_single_preflop_fold
             )
         )
         self.retrieval_signature_dedup = bool(
@@ -521,6 +530,7 @@ class FactualMemory:
             "admission_counts": dict(self.admission_counts),
             "last_admission_status": self.last_admission_status,
             "last_admission_reasons": list(self.last_admission_reasons),
+            "reject_single_preflop_fold": self.reject_single_preflop_fold,
             "recent_admission_log": list(self.admission_log),
             "max_structural_signature_share": _max_signature_share(self.records),
             "embedding": self.embedding_backend.audit_metadata(),
@@ -533,6 +543,7 @@ def _admission_rejection_reasons(
     quality: dict[str, int | bool],
     *,
     reject_zero_reward_preflop_fold: bool,
+    reject_single_preflop_fold: bool,
 ) -> list[str]:
     reasons: list[str] = []
     if int(quality["fallback_count"]) > 0:
@@ -541,7 +552,15 @@ def _admission_rejection_reasons(
         reasons.append("guard_action_type_mismatch")
     only = decisions[0] if len(decisions) == 1 else None
     if (
+        reject_single_preflop_fold
+        and only is not None
+        and only.get("phase") == "preflop"
+        and only.get("action_type") == "fold"
+    ):
+        reasons.append("single_preflop_fold_low_information")
+    if (
         reject_zero_reward_preflop_fold
+        and not reject_single_preflop_fold
         and trajectory.final_reward == 0
         and only is not None
         and only.get("phase") == "preflop"
@@ -641,7 +660,7 @@ def _decision_view(event: DecisionEvent) -> dict[str, object]:
     返回：字典。
     副作用：无。
     异常：无。
-    设计说明：保留 intent/reason 但不保存长链路原始回复。
+    设计说明：保留可观察状态和已提交动作，不把模型自述理由升级为历史事实。
     """
 
     return {
@@ -654,7 +673,6 @@ def _decision_view(event: DecisionEvent) -> dict[str, object]:
         "raw_action_type": event.decision.action_type,
         "committed_action_type": event.committed_action.action_type,
         "amount": event.committed_action.amount,
-        "intent": event.decision.reason_summary or event.committed_action.reason_summary,
         "guard_repaired": bool(event.llm_metadata.get("guard_repaired")),
         "fallback_used": bool(event.llm_metadata.get("fallback_used")),
     }
@@ -683,9 +701,8 @@ def _render_fact_text(
     decision_lines = []
     for item in decisions:
         amount = f"({item['amount']})" if item.get("amount") else ""
-        intent = item.get("intent") or "(无)"
         decision_lines.append(
-            f"  [{item['phase']}] intent={intent} action={item['action_type']}{amount}"
+            f"  [{item['phase']}] observed_action={item['action_type']}{amount}"
         )
     decision_text = "\n".join(decision_lines) or "  (无)"
     outcome = (

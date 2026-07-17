@@ -70,6 +70,8 @@ def test_system_prompt_states_ev_and_raise_total_semantics() -> None:
     assert "加注到的总额" in BASE_SYSTEM_PROMPT
     assert "必须来自本次给出的合法动作" in BASE_SYSTEM_PROMPT
     assert "机械映射成固定动作" in BASE_SYSTEM_PROMPT
+    assert "不证明旧动作最优" in BASE_SYSTEM_PROMPT
+    assert "不得把一次历史动作" in BASE_SYSTEM_PROMPT
 
 
 def test_prompt_includes_authoritative_river_hand_and_call_cost() -> None:

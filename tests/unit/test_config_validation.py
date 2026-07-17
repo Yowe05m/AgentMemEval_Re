@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from agentmemeval.config.loader import load_config, validate_config
 from agentmemeval.core.errors import ConfigError
+from agentmemeval.experiments.campaign import (
+    _read_campaign_yaml,
+    _validate_campaign_spec,
+)
 
 
 def _valid_config() -> dict[str, object]:
@@ -81,6 +87,27 @@ def test_task4_real_pilot_has_independent_experience_revision_budget() -> None:
     assert config["provider"]["experience_max_output_tokens"] == 3072
     assert config["provider"]["experience_repair_max_output_tokens"] == 2048
     assert config["provider"]["service_startup_parameters"]["max_model_len"] == 16384
+
+
+def test_task4_memory_debiased_pilot_campaigns_are_valid_and_seed_paired() -> None:
+    root = Path(__file__).resolve().parents[2]
+    campaign_paths = [
+        root
+        / "configs/campaigns/task4_campaign_p_pilot_parallel_v5_memory_debiased.yaml",
+        root
+        / "configs/campaigns/task4_campaign_e_pilot_parallel_v5_memory_debiased.yaml",
+    ]
+    seed_sets: list[list[int]] = []
+    for path in campaign_paths:
+        raw = _read_campaign_yaml(path)
+        spec = raw["campaign"]
+        base_path = (path.parent / str(spec["base_experiment_config"])).resolve()
+        _validate_campaign_spec(spec, load_config(base_path))
+        seed_sets.append([int(seed) for seed in spec["seeds"]])
+        assert spec["max_parallel_runs"] == 4
+        assert "not_for_main_table" in spec["protocol_label"]
+    assert seed_sets[0] == seed_sets[1]
+    assert len(seed_sets[0]) == 8
 
 
 def test_validate_config_rejects_incomplete_A7_R_preregistration() -> None:

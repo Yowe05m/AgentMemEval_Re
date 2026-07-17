@@ -1,0 +1,19 @@
+campaign:
+  campaign_id: task4_campaign_p_pilot_parallel_v5_memory_debiased
+  design: mixed_table
+  protocol_label: calibration_pilot_parallel4_context16k_memory_debiased_not_for_main_table
+  base_experiment_config: ../experiments/task4_campaign_p_pilot.yaml
+  output_root: outputs/campaigns
+  max_parallel_runs: 4
+  seeds:
+    - 2026071901
+    - 2026071902
+    - 2026071903
+    - 2026071904
+    - 2026071905
+    - 2026071906
+    - 2026071907
+    - 2026071908
+  conditions:
+    - condition_id: mixed_table
+      target_mechanism: mixed

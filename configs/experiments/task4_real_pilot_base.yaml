@@ -72,6 +72,7 @@ agent:
   sweep_every: 5
   evidence_k: 30
   reject_zero_reward_preflop_fold: true
+  reject_single_preflop_fold: true
   fact_duplicate_window: 50
   retrieval_signature_dedup: true
   minimum_retrieval_score: null

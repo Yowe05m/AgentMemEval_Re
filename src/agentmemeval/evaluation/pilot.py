@@ -387,10 +387,27 @@ def calibrate_behavior_thresholds(
         name: round(float(value), 6) if not isinstance(value, int) else value
         for name, value in thresholds.items()
     }
+    domain_thresholds = {
+        "min_vpip": float(BEHAVIOR_FREEZE_POLICY["domain_floors"]["min_vpip"]),
+        "max_fold_rate": float(caps["max_fold_rate"]),
+        "min_voluntary_participation_hands": 1,
+        "max_all_in_hand_rate": float(caps["max_all_in_hand_rate"]),
+        "max_bust_hand_rate": float(caps["max_bust_hand_rate"]),
+        "max_single_hand_reward_activity_share": float(
+            caps["max_single_hand_reward_activity_share"]
+        ),
+        "max_empty_retrieval_rate": float(caps["max_empty_retrieval_rate"]),
+        "max_structural_signature_share": float(
+            caps["max_structural_signature_share"]
+        ),
+    }
     audits = [
         evaluate_behavior_health(
             metrics,
-            {"behavior_threshold_status": "frozen", "behavior_thresholds": thresholds},
+            {
+                "behavior_threshold_status": "frozen",
+                "behavior_thresholds": domain_thresholds,
+            },
         )
         for metrics in metrics_list
     ]
@@ -401,6 +418,7 @@ def calibrate_behavior_thresholds(
         "blockers": freeze_blockers,
         "policy": BEHAVIOR_FREEZE_POLICY,
         "thresholds": thresholds,
+        "pilot_domain_gate_thresholds": domain_thresholds,
         "sample_counts": {name: len(values) for name, values in samples.items()},
         "failed_run_indexes": failed,
     }

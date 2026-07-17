@@ -246,6 +246,11 @@ Qwen3.5-9B，不能冒充原论文两模型的完全复现，也不会进入 rob
 `task4_campaign_*_robust_formal_template.yaml` 是故意保持 NO-GO 的模板；pilot 后会
 生成新的 immutable frozen config，而不是原地把模板改成“已冻结”。
 
+Robust/Pilot 的事实记忆默认拒收仅含一次 preflop fold 的低信息轨迹，并且可检索事实
+只保留可观察状态、已提交动作和结果，不把模型自己的旧 `reason_summary` 当成策略证据。
+`task4_campaign_p_strict_model_substituted.yaml` 显式关闭该过滤，以保留作者协议“全部事实
+写入”的敏感性边界；strict 结果不得与 robust 主表混合。
+
 ## 输出工件
 
 每次 `run` 会创建一个独立的 `outputs/<run_id>/` 目录：
