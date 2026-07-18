@@ -47,10 +47,25 @@ class RetrievalScore:
     semantic: float
     feature: float
     salience: float
+    dense: float | None = None
+    sparse: float | None = None
+    colbert: float | None = None
+
+
+@dataclass(slots=True)
+class SemanticScore:
+    """Model-native semantic score components for one query/document pair."""
+
+    combined: float
+    dense: float | None
+    sparse: float | None
+    colbert: float | None
 
 
 class EmbeddingBackend(Protocol):
     """Versioned batch embedding boundary used by factual memory."""
+
+    def score_documents(self, query: str, documents: list[str]) -> list[SemanticScore]: ...
 
     def embed_query(self, text: str) -> list[float]: ...
 
@@ -75,6 +90,13 @@ class HashEmbeddingBackend:
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return self.embed_texts(texts)
+
+    def score_documents(self, query: str, documents: list[str]) -> list[SemanticScore]:
+        query_vector = self.embed_query(query)
+        return [
+            SemanticScore(_dot(query_vector, vector), _dot(query_vector, vector), None, None)
+            for vector in self.embed_documents(documents)
+        ]
 
     def audit_metadata(self) -> dict[str, object]:
         return {
@@ -136,6 +158,14 @@ class OpenAICompatibleEmbeddingBackend:
         """Compatibility alias: untyped texts are encoded as documents."""
 
         return self.embed_documents(texts)
+
+    def score_documents(self, query: str, documents: list[str]) -> list[SemanticScore]:
+        query_vector = self.embed_query(query)
+        scores: list[SemanticScore] = []
+        for vector in self.embed_documents(documents):
+            dense = _dot(query_vector, vector)
+            scores.append(SemanticScore(dense, dense, None, None))
+        return scores
 
     def _embed_cached(self, texts: list[str]) -> list[list[float]]:
         keys = [self._key(text) for text in texts]
@@ -207,12 +237,152 @@ class OpenAICompatibleEmbeddingBackend:
         temporary.replace(self.cache_path)
 
 
+class BgeM3HybridHttpBackend:
+    """BGE-M3 native dense+sparse+ColBERT scoring over a dedicated local service."""
+
+    QUERY_POLICY = "raw_symmetric_no_instruction"
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        revision: str,
+        base_url_env: str = "BGEM3_BASE_URL",
+        api_key_env: str = "BGEM3_API_KEY",
+        api_key_required: bool = False,
+        timeout_seconds: float = 120.0,
+        weights: list[float] | tuple[float, float, float] = (0.4, 0.2, 0.4),
+    ) -> None:
+        if not model or not revision:
+            raise ValueError("BGE-M3 hybrid backend 必须固定 model 和 revision")
+        parsed_weights = tuple(float(value) for value in weights)
+        if len(parsed_weights) != 3 or any(value < 0 for value in parsed_weights):
+            raise ValueError("BGE-M3 hybrid weights 必须是三个非负数")
+        if sum(parsed_weights) <= 0:
+            raise ValueError("BGE-M3 hybrid weights 之和必须大于零")
+        self.model = model
+        self.revision = revision
+        self.base_url_env = base_url_env
+        self.api_key_env = api_key_env
+        self.api_key_required = api_key_required
+        self.timeout_seconds = timeout_seconds
+        self.weights = parsed_weights
+        self.request_count = 0
+        self.scored_document_count = 0
+
+    def score_documents(self, query: str, documents: list[str]) -> list[SemanticScore]:
+        if not documents:
+            return []
+        body = self._request(query, documents)
+        if str(body.get("model", "")) != self.model:
+            raise RuntimeError("BGE-M3 scoring service model identity mismatch")
+        if str(body.get("revision", "")) != self.revision:
+            raise RuntimeError("BGE-M3 scoring service revision identity mismatch")
+        if str(body.get("query_policy", "")) != self.QUERY_POLICY:
+            raise RuntimeError("BGE-M3 scoring service query policy mismatch")
+        raw_scores = body.get("scores")
+        if not isinstance(raw_scores, list) or len(raw_scores) != len(documents):
+            raise RuntimeError("BGE-M3 scoring service response count mismatch")
+        scores: list[SemanticScore] = []
+        for item in raw_scores:
+            if not isinstance(item, dict):
+                raise RuntimeError("BGE-M3 scoring service returned a malformed score")
+            scores.append(
+                SemanticScore(
+                    combined=float(item["combined"]),
+                    dense=float(item["dense"]),
+                    sparse=float(item["sparse"]),
+                    colbert=float(item["colbert"]),
+                )
+            )
+        self.request_count += 1
+        self.scored_document_count += len(documents)
+        return scores
+
+    def embed_query(self, text: str) -> list[float]:
+        raise RuntimeError("BGE-M3 hybrid backend exposes scores, not dense-only query vectors")
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("BGE-M3 hybrid backend exposes scores, not dense-only document vectors")
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return self.embed_documents(texts)
+
+    def audit_metadata(self) -> dict[str, object]:
+        return {
+            "backend": "bgem3_hybrid_http",
+            "model": self.model,
+            "revision": self.revision,
+            "semantic_model": True,
+            "query_instruction": None,
+            "query_instruction_sha256": None,
+            "query_template": "{query}",
+            "document_instruction": None,
+            "document_template": "{historical_state_query}\\n{fact_text}",
+            "query_policy": self.QUERY_POLICY,
+            "retrieval_modes": ["dense", "sparse", "colbert"],
+            "hybrid_weights": {
+                "dense": self.weights[0],
+                "sparse": self.weights[1],
+                "colbert": self.weights[2],
+            },
+            "normalization": "model_native",
+            "base_url_env": self.base_url_env,
+            "request_count": self.request_count,
+            "scored_document_count": self.scored_document_count,
+        }
+
+    def _request(self, query: str, documents: list[str]) -> dict[str, object]:
+        base_url = os.environ.get(self.base_url_env)
+        api_key = os.environ.get(self.api_key_env, "")
+        if not base_url:
+            raise RuntimeError(f"BGE-M3 hybrid backend 缺少环境变量 {self.base_url_env}")
+        if self.api_key_required and not api_key:
+            raise RuntimeError(f"BGE-M3 hybrid backend 缺少环境变量 {self.api_key_env}")
+        payload = json.dumps(
+            {
+                "query": query,
+                "documents": documents,
+                "weights": list(self.weights),
+                "query_policy": self.QUERY_POLICY,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        request = urllib.request.Request(
+            base_url.rstrip("/") + "/score",
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        if not isinstance(body, dict):
+            raise RuntimeError("BGE-M3 scoring service returned a non-object response")
+        return body
+
+
 def build_embedding_backend(config: dict[str, object], agent_id: str) -> EmbeddingBackend:
     """Build a configured embedding backend without silently selecting a real model."""
 
     backend = str(config.get("embedding_backend", "hash"))
     if backend == "hash":
         return HashEmbeddingBackend(int(config.get("embedding_dimensions", 256)))
+    if backend == "bgem3_hybrid_http":
+        raw_weights = config.get("embedding_hybrid_weights", [0.4, 0.2, 0.4])
+        if not isinstance(raw_weights, (list, tuple)):
+            raise ValueError("embedding_hybrid_weights 必须是列表")
+        return BgeM3HybridHttpBackend(
+            model=str(config.get("embedding_model", "")),
+            revision=str(config.get("embedding_revision", "")),
+            base_url_env=str(config.get("embedding_base_url_env", "BGEM3_BASE_URL")),
+            api_key_env=str(config.get("embedding_api_key_env", "BGEM3_API_KEY")),
+            api_key_required=bool(config.get("embedding_api_key_required", False)),
+            timeout_seconds=float(config.get("embedding_timeout_seconds", 120)),
+            weights=[float(value) for value in raw_weights],
+        )
     if backend != "openai_compatible":
         raise ValueError(f"未知 embedding backend：{backend}")
     cache_template = str(
@@ -271,6 +441,20 @@ def fact_retrieval_text(record: FactualMemoryRecord) -> str:
         f"我的决策序列: {record.action_summary}\n"
         f"hand_outcome: final_reward={record.final_reward:+d}"
     )
+
+
+def retrieval_text_for_backend(
+    record: FactualMemoryRecord,
+    backend: EmbeddingBackend,
+) -> str:
+    """Use a schema-aligned historical state prefix for BGE-M3 lexical matching."""
+
+    fact_text = fact_retrieval_text(record)
+    if isinstance(backend, BgeM3HybridHttpBackend):
+        historical_query = str(record.source.get("retrieval_query", "")).strip()
+        if historical_query:
+            return f"{historical_query}\n{fact_text}"
+    return fact_text
 
 
 def embed_text(text: str, dimensions: int = 256) -> list[float]:
@@ -340,17 +524,29 @@ def topk_by_similarity(
     if not candidates or k <= 0:
         return []
     backend = embedding_backend or HashEmbeddingBackend(dimensions)
-    query_vec = backend.embed_query(query_text)
-    vectors = backend.embed_documents([fact_retrieval_text(record) for record in candidates])
+    documents = [retrieval_text_for_backend(record, backend) for record in candidates]
+    semantic_scores = backend.score_documents(query_text, documents)
     scored: list[RetrievalScore] = []
     for index, record in enumerate(candidates):
-        record_vec = (vec_lookup or {}).get(record.record_id)
-        if record_vec is None:
-            record_vec = vectors[index]
-        semantic = _dot(query_vec, record_vec)
+        component = semantic_scores[index]
+        semantic = component.combined
+        if vec_lookup and record.record_id in vec_lookup:
+            query_vec = backend.embed_query(query_text)
+            semantic = _dot(query_vec, vec_lookup[record.record_id])
         salience = float(salience_fn(record.record_id) if salience_fn else 1.0)
         score = semantic + math.log(max(salience, 1e-6)) if salience_fn else semantic
-        scored.append(RetrievalScore(record, score, semantic, 0.0, salience))
+        scored.append(
+            RetrievalScore(
+                record,
+                score,
+                semantic,
+                0.0,
+                salience,
+                component.dense,
+                component.sparse,
+                component.colbert,
+            )
+        )
     scored.sort(
         key=lambda item: (item.score, item.record.created_at, item.record.record_id),
         reverse=True,
@@ -388,17 +584,30 @@ def hybrid_top_k_records(
         return []
     query_text = build_retrieval_query(observation)
     backend = embedding_backend or HashEmbeddingBackend(dimensions)
-    query_vec = backend.embed_query(query_text)
-    vectors = backend.embed_documents([fact_retrieval_text(record) for record in records])
+    semantic_scores = backend.score_documents(
+        query_text, [retrieval_text_for_backend(record, backend) for record in records]
+    )
     query_features = observation_features(observation)
     scored: list[RetrievalScore] = []
     for index, record in enumerate(records):
-        semantic = _dot(query_vec, vectors[index])
+        component = semantic_scores[index]
+        semantic = component.combined
         feature = jaccard_similarity(query_features, record.features)
         salience = float(salience_fn(record.record_id) if salience_fn else 1.0)
         base = semantic_weight * semantic + feature_weight * feature
         score = base + math.log(max(salience, 1e-6)) if salience_fn else base
-        scored.append(RetrievalScore(record, score, semantic, feature, salience))
+        scored.append(
+            RetrievalScore(
+                record,
+                score,
+                semantic,
+                feature,
+                salience,
+                component.dense,
+                component.sparse,
+                component.colbert,
+            )
+        )
     scored.sort(
         key=lambda item: (item.score, item.record.created_at, item.record.record_id),
         reverse=True,

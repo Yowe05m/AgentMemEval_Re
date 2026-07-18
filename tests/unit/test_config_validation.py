@@ -62,6 +62,34 @@ def test_validate_config_requires_versioned_instructed_semantic_embedding() -> N
         validate_config(config)
 
 
+def test_validate_config_accepts_bgem3_native_hybrid_without_instruction() -> None:
+    config = _valid_config()
+    config["agent"] = {
+        "embedding_backend": "bgem3_hybrid_http",
+        "embedding_model": "BAAI/bge-m3",
+        "embedding_revision": "fixed-revision",
+        "embedding_base_url_env": "BGEM3_BASE_URL",
+        "embedding_query_policy": "raw_symmetric_no_instruction",
+        "embedding_hybrid_weights": [0.4, 0.2, 0.4],
+    }
+    validate_config(config)
+
+
+def test_validate_config_rejects_qwen_instruction_for_bgem3_native_hybrid() -> None:
+    config = _valid_config()
+    config["agent"] = {
+        "embedding_backend": "bgem3_hybrid_http",
+        "embedding_model": "BAAI/bge-m3",
+        "embedding_revision": "fixed-revision",
+        "embedding_base_url_env": "BGEM3_BASE_URL",
+        "embedding_query_policy": "raw_symmetric_no_instruction",
+        "embedding_hybrid_weights": [0.4, 0.2, 0.4],
+        "embedding_query_instruction": "Instruct: Qwen-style retrieval",
+    }
+    with pytest.raises(ConfigError, match="禁止 Qwen-style"):
+        validate_config(config)
+
+
 def test_paper_main_config_contains_reviewed_protocol_choices() -> None:
     config = load_config("configs/experiments/paper_exp1_mixed_local.yaml")
     agent = config["agent"]
@@ -87,6 +115,23 @@ def test_task4_real_pilot_has_independent_experience_revision_budget() -> None:
     assert config["provider"]["experience_max_output_tokens"] == 3072
     assert config["provider"]["experience_repair_max_output_tokens"] == 2048
     assert config["provider"]["service_startup_parameters"]["max_model_len"] == 16384
+
+
+def test_528_bgem3_v6_uses_native_hybrid_and_same_campaign_seeds() -> None:
+    config = load_config(
+        "configs/experiments/task4_campaign_p_pilot_bgem3_native_528.yaml"
+    )
+    agent = config["agent"]
+    assert agent["embedding_backend"] == "bgem3_hybrid_http"
+    assert agent["embedding_model"] == "BAAI/bge-m3"
+    assert agent["embedding_query_policy"] == "raw_symmetric_no_instruction"
+    assert "embedding_query_instruction" not in agent
+    assert agent["embedding_hybrid_weights"] == [0.4, 0.2, 0.4]
+
+    campaign = _read_campaign_yaml(
+        Path("configs/campaigns/task4_campaign_p_pilot_parallel_v6_bgem3_native_528.yaml")
+    )
+    assert campaign["campaign"]["seeds"] == list(range(2026072101, 2026072109))
 
 
 def test_task4_target_scoped_pilot_campaigns_are_valid_and_seed_paired() -> None:

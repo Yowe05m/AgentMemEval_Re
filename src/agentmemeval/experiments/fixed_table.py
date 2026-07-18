@@ -246,6 +246,8 @@ class FixedTableScenario:
                     "embedding_revision",
                     "embedding_base_url_env",
                     "embedding_query_instruction",
+                    "embedding_query_policy",
+                    "embedding_hybrid_weights",
                 )
             },
             "rebuy_counts": rebuy_counts,

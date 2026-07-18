@@ -53,8 +53,14 @@ def assess_run_admission(config: dict[str, Any], cwd: Path) -> dict[str, Any]:
     )
     uses_factual_memory = _uses_factual_memory(config)
     if uses_factual_memory:
-        if str(agent.get("embedding_backend", "hash")) != "openai_compatible":
-            blockers.append("pilot/formal factual memory requires openai_compatible embedding")
+        if str(agent.get("embedding_backend", "hash")) not in {
+            "openai_compatible",
+            "bgem3_hybrid_http",
+        }:
+            blockers.append(
+                "pilot/formal factual memory requires openai_compatible embedding "
+                "or bgem3_hybrid_http"
+            )
         _require_identity(
             agent,
             (

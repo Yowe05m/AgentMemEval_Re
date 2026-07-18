@@ -495,3 +495,25 @@ python -m agentmemeval run --config configs/experiments/rotating_20_agents_mock.
 ```
 
 如果只修改文档，可以跳过实验命令；如果修改了环境、记忆、实验调度或报告生成，建议同时验证固定桌和换桌路径。
+
+## 528 BGE-M3 原生混合检索分支
+
+`bgem3-native-528` 分支是隔离的模型迁移实验分支，不替代 `origin/main`。它使用
+`tools/bgem3_hybrid_server.py` 在一个常驻 GPU 进程中生成 BGE-M3 的 dense、sparse
+lexical 和 ColBERT multi-vector 表示，并按固定权重 `0.4 / 0.2 / 0.4` 组合。
+
+该后端的查询与文档都保持原始文本，不添加 Qwen3 Embedding 的
+`Instruct: ...\nQuery:...` 前缀。客户端配置必须设置：
+
+```yaml
+embedding_backend: bgem3_hybrid_http
+embedding_model: BAAI/bge-m3
+embedding_query_policy: raw_symmetric_no_instruction
+embedding_hybrid_weights: [0.4, 0.2, 0.4]
+```
+
+528 对照 Campaign 使用
+`configs/campaigns/task4_campaign_p_pilot_parallel_v6_bgem3_native_528.yaml`，其
+seeds、手数、roster 和并行度与 Qwen Embedding 的 Campaign P V6 相同，但输出目录
+和 embedding runtime identity 完全隔离。该 Campaign 是模型迁移对照 Pilot，
+`not_for_main_table`。

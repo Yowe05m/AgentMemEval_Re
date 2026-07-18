@@ -1,0 +1,129 @@
+extends: local_base_small.yaml
+
+# 528-only BGE-M3 native hybrid pilot baseline. The decision service remains
+# Qwen3.5-9B; factual retrieval uses BGE-M3 dense+sparse+ColBERT without an
+# instruction prefix. This isolated comparison is not eligible for the paper
+# main table unless it is later reviewed and frozen through the normal process.
+provider:
+  provider: openai_compatible
+  model: qwen/qwen3.5-9b
+  model_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  model_weights_hash: 250e641cf3762c622c5e74761cd6ad8b407bc4f1da86b7587bcfb44422b9baeb
+  served_model_name: qwen/qwen3.5-9b
+  runtime_probe_python: /root/autodl-tmp/envs/vllm/bin/python
+  service_startup_parameters:
+    model_path: /root/autodl-tmp/hf_cache/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+    host: 127.0.0.1
+    port: 8000
+    tensor_parallel_size: 1
+    dtype: auto
+    max_model_len: 16384
+    gpu_memory_utilization: 0.64
+    max_num_seqs: 4
+    reasoning_parser: qwen3
+    default_chat_template_kwargs:
+      enable_thinking: false
+    language_model_only: true
+    generation_config: vllm
+    hf_hub_offline: true
+    vllm_use_flashinfer_sampler: false
+    vllm_version: 0.23.1rc1.dev1032+g4a6440ace
+  base_url_env: LOCAL_LLM_BASE_URL
+  api_key_env: LOCAL_LLM_API_KEY
+  api_key_required: false
+  temperature: 0.0
+  max_output_tokens: 2048
+  experience_max_output_tokens: 3072
+  experience_repair_max_output_tokens: 2048
+  repair_max_output_tokens: 256
+  timeout_seconds: 120
+  max_retries: 1
+  rate_limit_policy: local_manual
+  structured_output_mode: json_schema
+
+agent:
+  embedding_backend: bgem3_hybrid_http
+  embedding_model: BAAI/bge-m3
+  embedding_revision: 5617a9f61b028005a4858fdac845db406aefb181
+  embedding_weights_hash: b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38
+  embedding_query_policy: raw_symmetric_no_instruction
+  embedding_hybrid_weights: [0.4, 0.2, 0.4]
+  embedding_service_startup_parameters:
+    model_path: /root/autodl-tmp/hf_cache/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181
+    service_script: /root/autodl-tmp/AgentMemEval_Re_bgem3_528/tools/bgem3_hybrid_server.py
+    python: /root/autodl-tmp/envs/bgem3-native-528/bin/python
+    host: 127.0.0.1
+    port: 8001
+    dtype: float16
+    normalize_embeddings: true
+    query_instruction: null
+    query_policy: raw_symmetric_no_instruction
+    retrieval_modes: [dense, sparse, colbert]
+    hybrid_weights: [0.4, 0.2, 0.4]
+    batch_size: 16
+    query_max_length: 256
+    passage_max_length: 1024
+    cache_capacity: 4096
+    flagembedding_version: 1.4.0
+    hf_hub_offline: true
+  embedding_base_url_env: BGEM3_BASE_URL
+  embedding_api_key_env: BGEM3_API_KEY
+  embedding_api_key_required: false
+  embedding_timeout_seconds: 120
+  experience_revision_strategy: llm
+  raise_sizing_policy: local_discrete
+  strategy_risk_gate: disabled
+  memory_scope: per_agent
+  top_k: 30
+  window_size: 30
+  sweep_every: 5
+  evidence_k: 30
+  reject_zero_reward_preflop_fold: true
+  reject_single_preflop_fold: true
+  fact_duplicate_window: 50
+  retrieval_signature_dedup: true
+  minimum_retrieval_score: null
+  retrieval_threshold_status: pending_pilot
+
+opponent_agent:
+  mechanism: no_memory
+  raise_sizing_policy: local_discrete
+  strategy_risk_gate: disabled
+  memory_scope: per_agent
+
+heldout_agent:
+  mechanism: no_memory
+  raise_sizing_policy: local_discrete
+  strategy_risk_gate: disabled
+  memory_scope: per_agent
+
+table:
+  lifecycle: continuous_rebuy
+
+experiment:
+  run_mode: pilot
+  scenario: fixed_evolving_table
+  seed: 2026071701
+  train_hands: 150
+  test_hands: 25
+  checkpoint_interval: 150
+  checkpoint_test_hands: 50
+  update_memory_train: true
+  update_memory_test: false
+  protocol_readiness: bgem3_native_528_comparison_pilot_ready
+  behavior_threshold_status: pending_pilot
+  statistical_plan_status: pending_pilot_power_calibration
+  primary_endpoint: final_test_bb_per_100
+  multiple_comparison_method: holm
+  required_seed_pairs: null
+  runtime_verification:
+    decision_service_smoke_passed: true
+    embedding_service_smoke_passed: true
+    uniform_hardware_verified: true
+  preregistered_primary_metrics:
+    - final_test_bb_per_100
+  auxiliary_metrics:
+    - final_test_chip_per_hand
+    - train_bb_per_100
+    - train_chip_per_hand
+    - train_to_test_generalization_gap

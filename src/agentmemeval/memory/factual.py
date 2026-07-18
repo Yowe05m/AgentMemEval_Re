@@ -163,6 +163,9 @@ class FactualMemory:
                     "record_id": item.record.record_id,
                     "score": item.score,
                     "semantic": item.semantic,
+                    "dense": item.dense,
+                    "sparse": item.sparse,
+                    "colbert": item.colbert,
                     "feature": item.feature,
                     "salience": item.salience,
                 }

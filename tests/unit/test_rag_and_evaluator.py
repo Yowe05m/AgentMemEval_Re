@@ -16,9 +16,11 @@ from agentmemeval.core.domain import (
 )
 from agentmemeval.environment.hand_evaluator import evaluate_best, split_side_pots
 from agentmemeval.memory.rag import (
+    BgeM3HybridHttpBackend,
     HashEmbeddingBackend,
     OpenAICompatibleEmbeddingBackend,
     hybrid_top_k_records,
+    retrieval_text_for_backend,
 )
 from tests.unit.test_memory import make_observation
 
@@ -113,6 +115,67 @@ def test_qwen_query_instruction_is_separate_from_document_encoding() -> None:
     ]
     assert backend.requested[1] == ["historical fact"]
     assert backend.audit_metadata()["document_instruction"] is None
+
+
+def test_bgem3_hybrid_backend_uses_raw_query_and_preserves_all_score_modes() -> None:
+    class RecordingBgeM3Backend(BgeM3HybridHttpBackend):
+        requested: list[tuple[str, list[str]]]
+
+        def __init__(self) -> None:
+            super().__init__(
+                model="BAAI/bge-m3",
+                revision="fixed-bgem3-revision",
+                weights=[0.4, 0.2, 0.4],
+            )
+            self.requested = []
+
+        def _request(self, query: str, documents: list[str]) -> dict[str, object]:
+            self.requested.append((query, list(documents)))
+            return {
+                "model": "BAAI/bge-m3",
+                "revision": "fixed-bgem3-revision",
+                "query_policy": "raw_symmetric_no_instruction",
+                "scores": [
+                    {
+                        "combined": 0.61,
+                        "dense": 0.50,
+                        "sparse": 0.25,
+                        "colbert": 0.80,
+                    }
+                    for _document in documents
+                ],
+            }
+
+    backend = RecordingBgeM3Backend()
+    scores = backend.score_documents("phase=flop", ["historical fact"])
+
+    assert backend.requested == [("phase=flop", ["historical fact"])]
+    assert scores[0].combined == 0.61
+    assert scores[0].dense == 0.50
+    assert scores[0].sparse == 0.25
+    assert scores[0].colbert == 0.80
+    metadata = backend.audit_metadata()
+    assert metadata["query_instruction"] is None
+    assert metadata["query_template"] == "{query}"
+    assert metadata["retrieval_modes"] == ["dense", "sparse", "colbert"]
+    record = FactualMemoryRecord(
+        record_id="fact_1",
+        agent_id="agent_00",
+        table_id="table_a",
+        hand_id="h1",
+        scope="per_agent",
+        state_summary="historical fact",
+        action_summary="call",
+        final_reward=3,
+        features=[],
+        source={
+            "retrieval_query": "phase=flop pot=10 to_call=2",
+            "fact_text": "flop call won",
+        },
+    )
+    assert retrieval_text_for_backend(record, backend) == (
+        "phase=flop pot=10 to_call=2\nflop call won"
+    )
 
 
 def test_poker_evaluator_names_straight_flush() -> None:

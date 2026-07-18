@@ -21,6 +21,11 @@ dev = [
 poker = [
   "treys>=0.1.8",
 ]
+bgem3-server = [
+  "FlagEmbedding==1.4.0",
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+]
 
 [project.scripts]
 agentmemeval = "agentmemeval.cli.main:main"
