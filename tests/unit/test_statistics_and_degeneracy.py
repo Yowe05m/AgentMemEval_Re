@@ -63,6 +63,36 @@ def test_behavior_health_frozen_thresholds_reject_degenerate_agent() -> None:
     }
 
 
+def test_reward_activity_can_be_reported_as_nonblocking_diagnostic() -> None:
+    config = {
+        "behavior_threshold_status": "frozen",
+        "behavior_thresholds": {
+            "max_single_hand_reward_activity_share": 0.75,
+            "single_hand_reward_activity_diagnostic_only": True,
+        },
+    }
+    metrics = _metrics()
+    per_agent = metrics["primary_metrics"]["per_agent"]  # type: ignore[index]
+    per_agent["fact_00"]["hand_reward_sensitivity"][  # type: ignore[index]
+        "share_of_absolute_reward_activity"
+    ] = 0.90
+    audit = evaluate_behavior_health(metrics, config, ["fact_00"])
+    failed = [check for check in audit["checks"] if not check["passed"]]
+    assert audit["status"] == "passed"
+    assert audit["valid_for_main_table"] is True
+    assert failed == [
+        {
+            "scope": "fact_00:combined",
+            "metric": "share_of_absolute_reward_activity",
+            "operator": "<=",
+            "threshold": 0.75,
+            "actual": 0.9,
+            "passed": False,
+            "hard_gate": False,
+        }
+    ]
+
+
 def test_execution_health_rejects_fallback_and_conservation_violation() -> None:
     metrics = {
         "exploratory_metrics": {

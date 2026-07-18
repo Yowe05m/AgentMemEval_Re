@@ -21,6 +21,7 @@ BEHAVIOR_FREEZE_POLICY = {
     "upper_quantile": 0.95,
     "rate_margin": 0.02,
     "concentration_margin": 0.05,
+    "single_hand_reward_activity_role": "diagnostic_only_not_behavior_exclusion",
     "domain_floors": {"min_vpip": 0.02},
     "domain_caps": {
         "max_fold_rate": 0.98,
@@ -128,7 +129,10 @@ def build_pilot_freeze_proposal(
     """Combine power, behavior, execution, and retrieval freeze gates."""
 
     power_plan = build_pilot_power_plan(campaign_p, campaign_e)
-    behavior = calibrate_behavior_thresholds(campaign_p_metrics)
+    behavior = calibrate_behavior_thresholds(
+        campaign_p_metrics,
+        _evaluation_target_ids_by_run(campaign_p_protocol_audits),
+    )
     execution_blockers = [
         f"campaign_p run {index} execution health is not valid"
         for index, audit in enumerate(campaign_p_protocol_audits)
@@ -289,9 +293,15 @@ def _completed_state_rows(
 
 def calibrate_behavior_thresholds(
     metrics_list: list[dict[str, Any]],
+    agent_ids_by_run: list[list[str]] | None = None,
 ) -> dict[str, Any]:
     """Apply the outcome-independent quantile-plus-domain-cap freeze policy."""
 
+    if agent_ids_by_run is not None and len(agent_ids_by_run) != len(metrics_list):
+        raise ValueError(
+            "agent_ids_by_run length must match metrics_list length: "
+            f"{len(agent_ids_by_run)} != {len(metrics_list)}"
+        )
     samples: dict[str, list[float]] = {
         "vpip": [],
         "fold_rate": [],
@@ -301,7 +311,14 @@ def calibrate_behavior_thresholds(
         "empty_retrieval_rate": [],
         "structural_signature_share": [],
     }
-    for metrics in metrics_list:
+    evaluated_ids_by_run: list[list[str] | str] = []
+    for run_index, metrics in enumerate(metrics_list):
+        selected_ids = (
+            set(str(value) for value in agent_ids_by_run[run_index])
+            if agent_ids_by_run is not None
+            else set()
+        )
+        evaluated_ids_by_run.append(sorted(selected_ids) if selected_ids else "all")
         primary = dict(metrics.get("primary_metrics", {}))
         stage_per_agent = primary.get("stage_per_agent", {})
         tables = (
@@ -312,7 +329,9 @@ def calibrate_behavior_thresholds(
         for per_agent in tables:
             if not isinstance(per_agent, dict):
                 continue
-            for values in per_agent.values():
+            for agent_id, values in per_agent.items():
+                if selected_ids and str(agent_id) not in selected_ids:
+                    continue
                 if not isinstance(values, dict):
                     continue
                 samples["vpip"].append(float(values.get("vpip", 0.0)))
@@ -372,6 +391,7 @@ def calibrate_behavior_thresholds(
             _quantile(samples["single_hand_reward_activity_share"], upper)
             + concentration_margin,
         ),
+        "single_hand_reward_activity_diagnostic_only": True,
         "max_empty_retrieval_rate": min(
             float(caps["max_empty_retrieval_rate"]),
             _quantile(samples["empty_retrieval_rate"], upper)
@@ -396,6 +416,7 @@ def calibrate_behavior_thresholds(
         "max_single_hand_reward_activity_share": float(
             caps["max_single_hand_reward_activity_share"]
         ),
+        "single_hand_reward_activity_diagnostic_only": True,
         "max_empty_retrieval_rate": float(caps["max_empty_retrieval_rate"]),
         "max_structural_signature_share": float(
             caps["max_structural_signature_share"]
@@ -408,8 +429,12 @@ def calibrate_behavior_thresholds(
                 "behavior_threshold_status": "frozen",
                 "behavior_thresholds": domain_thresholds,
             },
+            agent_ids,
         )
-        for metrics in metrics_list
+        for run_index, metrics in enumerate(metrics_list)
+        for agent_ids in [
+            agent_ids_by_run[run_index] if agent_ids_by_run is not None else None
+        ]
     ]
     failed = [index for index, audit in enumerate(audits) if audit.get("status") != "passed"]
     freeze_blockers = [f"campaign_p run {index} fails frozen behavior gates" for index in failed]
@@ -420,8 +445,23 @@ def calibrate_behavior_thresholds(
         "thresholds": thresholds,
         "pilot_domain_gate_thresholds": domain_thresholds,
         "sample_counts": {name: len(values) for name, values in samples.items()},
+        "evaluated_agent_ids_by_run": evaluated_ids_by_run,
         "failed_run_indexes": failed,
     }
+
+
+def _evaluation_target_ids_by_run(
+    protocol_audits: list[dict[str, Any]],
+) -> list[list[str]]:
+    targets_by_run: list[list[str]] = []
+    for index, audit in enumerate(protocol_audits):
+        targets = audit.get("evaluation_target_ids", [])
+        if not isinstance(targets, list) or not targets:
+            raise ValueError(
+                f"campaign_p protocol audit {index} lacks evaluation_target_ids"
+            )
+        targets_by_run.append([str(value) for value in targets])
+    return targets_by_run
 
 
 def _quantile(values: list[float], probability: float) -> float:

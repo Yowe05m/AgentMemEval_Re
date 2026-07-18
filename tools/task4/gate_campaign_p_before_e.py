@@ -81,6 +81,7 @@ def build_gate(
         blockers.append(f"duplicate complete matrix units: {duplicates}")
 
     metrics_list: list[dict[str, Any]] = []
+    evaluation_target_ids_by_run: list[list[str]] = []
     leaf_evidence: list[dict[str, Any]] = []
     runtime_identities: list[dict[str, Any]] = []
     for row in completed:
@@ -97,6 +98,14 @@ def build_gate(
         protocol = _read_json(run_dir / "protocol_audit.json")
         run_manifest = _read_json(run_dir / "manifest.json")
         metrics_list.append(metrics)
+        evaluation_targets = protocol.get("evaluation_target_ids", [])
+        if not isinstance(evaluation_targets, list) or not evaluation_targets:
+            blockers.append(f"{row['run_id']} lacks evaluation_target_ids")
+            evaluation_target_ids_by_run.append([])
+        else:
+            evaluation_target_ids_by_run.append(
+                [str(value) for value in evaluation_targets]
+            )
         execution = protocol.get("execution_health", {})
         if not isinstance(execution, dict) or execution.get("valid") is not True:
             blockers.append(f"{row['run_id']} execution health invalid")
@@ -147,14 +156,17 @@ def build_gate(
         blockers.append(
             f"runtime identity is not homogeneous: {len(canonical_runtime)} identities"
         )
-    behavior = calibrate_behavior_thresholds(metrics_list)
+    behavior = calibrate_behavior_thresholds(
+        metrics_list,
+        evaluation_target_ids_by_run,
+    )
     if behavior.get("status") != "frozen":
         blockers.extend(str(item) for item in behavior.get("blockers", []))
         if not behavior.get("blockers"):
             blockers.append(f"behavior gate status is {behavior.get('status')}")
 
     return {
-        "schema_version": "task4_campaign_p_before_e_gate_v1",
+        "schema_version": "task4_campaign_p_before_e_gate_v2",
         "campaign_dir": str(campaign_dir),
         "campaign_id": campaign.get("campaign_id"),
         "expected_matrix_units": expected,

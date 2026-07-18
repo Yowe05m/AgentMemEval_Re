@@ -80,7 +80,10 @@ def _campaign(tmp_path: Path, *, dirty: bool = False, revision_fallback: int = 0
     json_files = {
         "manifest.json": runtime,
         "metrics.json": _metrics(revision_fallback),
-        "protocol_audit.json": {"execution_health": {"valid": True}},
+        "protocol_audit.json": {
+            "evaluation_target_ids": ["expr_00"],
+            "execution_health": {"valid": True},
+        },
         "checkpoint_generalization.json": {"results": []},
         "experiment_result.json": {"status": "complete"},
     }
@@ -101,6 +104,7 @@ def test_campaign_p_gate_accepts_complete_clean_homogeneous_evidence(
         expected_max_model_len=16384,
     )
     assert audit["status"] == "ready_to_start_campaign_e"
+    assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v2"
     assert audit["blockers"] == []
     assert audit["behavior_freeze_preview"]["status"] == "frozen"
     assert len(audit["leaf_evidence"][0]["sha256"]) == 8

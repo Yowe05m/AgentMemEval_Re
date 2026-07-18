@@ -51,7 +51,9 @@ def evaluate_behavior_health(
     audit["evaluated_agent_ids"] = sorted(selected_ids) if selected_ids else "all"
     audit["evaluated_stages"] = [stage for stage, _values in source_tables]
     audit["checks"] = checks
-    audit["degenerate"] = any(not item["passed"] for item in checks)
+    audit["degenerate"] = any(
+        not item["passed"] and item.get("hard_gate", True) for item in checks
+    )
     audit["valid_for_main_table"] = bool(checks) and not audit["degenerate"]
     audit["status"] = "passed" if audit["valid_for_main_table"] else "degenerate"
     audit["calibration_required"] = False
@@ -98,6 +100,9 @@ def _agent_behavior_checks(
         sensitivity,
         thresholds,
         "max_single_hand_reward_activity_share",
+        hard_gate=not bool(
+            thresholds.get("single_hand_reward_activity_diagnostic_only", False)
+        ),
     )
     memory = values.get("memory", {})
     _maximum_check(
@@ -257,6 +262,8 @@ def _maximum_check(
     values: dict[str, Any],
     thresholds: dict[str, Any],
     threshold_name: str,
+    *,
+    hard_gate: bool = True,
 ) -> None:
     if threshold_name not in thresholds:
         return
@@ -270,5 +277,6 @@ def _maximum_check(
             "threshold": threshold,
             "actual": actual,
             "passed": actual <= threshold,
+            "hard_gate": hard_gate,
         }
     )

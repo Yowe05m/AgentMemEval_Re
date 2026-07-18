@@ -87,7 +87,11 @@ def test_pilot_power_plan_blocks_cross_campaign_runtime_mismatch() -> None:
     assert "campaign P/E runtime identities differ" in plan["blockers"]
 
 
-def _metrics(*, fold_rate: float = 0.40) -> dict[str, object]:
+def _metrics(
+    *,
+    fold_rate: float = 0.40,
+    heldout_fold_rate: float | None = None,
+) -> dict[str, object]:
     values = {
         "vpip": 0.30,
         "fold_rate": fold_rate,
@@ -100,11 +104,16 @@ def _metrics(*, fold_rate: float = 0.40) -> dict[str, object]:
             "max_structural_signature_share": 0.15,
         },
     }
+    test = {"fact_00": dict(values)}
+    if heldout_fold_rate is not None:
+        heldout = dict(values)
+        heldout["fold_rate"] = heldout_fold_rate
+        test["heldout_fact_00_00"] = heldout
     return {
         "primary_metrics": {
             "stage_per_agent": {
                 "train": {"fact_00": dict(values)},
-                "test": {"fact_00": dict(values)},
+                "test": test,
             }
         }
     }
@@ -143,9 +152,28 @@ def test_pilot_is_judged_by_hard_domain_gate_not_its_frozen_quantile() -> None:
     assert freeze["status"] == "frozen"
 
 
+def test_behavior_freeze_ignores_heldout_opponents() -> None:
+    freeze = calibrate_behavior_thresholds(
+        [
+            _metrics(heldout_fold_rate=1.0),
+            _metrics(heldout_fold_rate=1.0),
+        ],
+        [["fact_00"], ["fact_00"]],
+    )
+    assert freeze["status"] == "frozen"
+    assert freeze["sample_counts"]["fold_rate"] == 4
+    assert freeze["evaluated_agent_ids_by_run"] == [["fact_00"], ["fact_00"]]
+
+
 def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
     metrics = [_metrics(), _metrics(), _metrics()]
-    p_audits = [{"execution_health": {"valid": True}} for _ in metrics]
+    p_audits = [
+        {
+            "evaluation_target_ids": ["fact_00"],
+            "execution_health": {"valid": True},
+        }
+        for _ in metrics
+    ]
     e_audits = [{"execution_health": {"valid": True}} for _ in range(6)]
     proposal = build_pilot_freeze_proposal(
         _p(), _e(), metrics, p_audits, metrics * 2, e_audits, _review()
@@ -157,13 +185,19 @@ def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
         "reason": "independent outcome-blind human relevance review",
         "review_audit_schema_version": "task4_retrieval_relevance_audit_v1",
     }
-    p_audits[0] = {"execution_health": {"valid": False}}
+    p_audits[0] = {
+        "evaluation_target_ids": ["fact_00"],
+        "execution_health": {"valid": False},
+    }
     blocked = build_pilot_freeze_proposal(
         _p(), _e(), metrics, p_audits, metrics * 2, e_audits, _review()
     )
     assert blocked["status"] == "no_go_pilot_freeze_blocked"
     assert blocked["execution_blockers"]
-    p_audits[0] = {"execution_health": {"valid": True}}
+    p_audits[0] = {
+        "evaluation_target_ids": ["fact_00"],
+        "execution_health": {"valid": True},
+    }
     e_audits[0] = {"execution_health": {"valid": False}}
     blocked_e = build_pilot_freeze_proposal(
         _p(), _e(), metrics, p_audits, metrics * 2, e_audits, _review()
@@ -206,7 +240,13 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
             json.dumps(_metrics()), encoding="utf-8"
         )
         (run_dir / "protocol_audit.json").write_text(
-            json.dumps({"execution_health": {"valid": True}}), encoding="utf-8"
+            json.dumps(
+                {
+                    "evaluation_target_ids": ["fact_00"],
+                    "execution_health": {"valid": True},
+                }
+            ),
+            encoding="utf-8",
         )
         state_lines.append(
             f"t\tmixed\tmixed\t{index}\t1\tcomplete\tr{index}\t{run_dir}\t\t"
@@ -263,7 +303,13 @@ def test_freeze_path_loader_prefers_relocated_campaign_leaf(tmp_path: Path) -> N
                 json.dumps(_metrics()), encoding="utf-8"
             )
             (run_dir / "protocol_audit.json").write_text(
-                json.dumps({"execution_health": {"valid": True}}), encoding="utf-8"
+                json.dumps(
+                    {
+                        "evaluation_target_ids": ["fact_00"],
+                        "execution_health": {"valid": True},
+                    }
+                ),
+                encoding="utf-8",
             )
             rows.append(
                 f"t\tc{index}\ttarget\t{index}\t1\tcomplete\t{run_id}\t"

@@ -210,9 +210,12 @@ python tools/task4/retrieval_relevance_review.py audit `
 ```
 
 行为、执行、检索和功效的联合冻结提案只读取 P/E campaign 中 state 为
-`complete` 的 leaf；partial、failed 或 interrupted run 会被排除。行为门槛采用
-预注册分位数裕量和不可放宽的领域退化上限；人工相关性审计缺失或任何门槛越界
-都会 NO-GO：
+`complete` 的 leaf；partial、failed 或 interrupted run 会被排除。行为门槛只检查
+`protocol_audit.json` 中预注册的 evaluation targets，不把 heldout 对手纳入目标
+样本。VPIP、弃牌、主动参与、all-in、bust、检索和结构集中度采用预注册分位数裕量
+及领域退化上限；单手绝对收益活动占比继续逐 target 报告，但作为结果敏感性诊断，
+不把正常扑克收益方差误作策略退化。人工相关性审计缺失或任何行为硬门槛越界仍会
+NO-GO：
 
 ```powershell
 python -m agentmemeval pilot-freeze `
@@ -232,8 +235,8 @@ runtime lock，用 P/E campaign 的设计骨架和 robust formal 实验模板生
 python -m agentmemeval formal-freeze `
   --proposal outputs/campaigns/pilot_freeze_proposal_<utc>.json `
   --runtime-lock outputs/campaigns/formal_runtime_lock_<utc>.json `
-  --campaign-p-template configs/campaigns/task4_campaign_p_pilot_parallel_v2.yaml `
-  --campaign-e-template configs/campaigns/task4_campaign_e_pilot_parallel_v2.yaml `
+  --campaign-p-template configs/campaigns/task4_campaign_p_pilot_parallel_v6_target_scoped.yaml `
+  --campaign-e-template configs/campaigns/task4_campaign_e_pilot_parallel_v6_target_scoped.yaml `
   --formal-p-template configs/experiments/task4_campaign_p_robust_formal_template.yaml `
   --formal-e-template configs/experiments/task4_campaign_e_robust_formal_template.yaml `
   --output-dir configs/frozen/task4_<freeze_id> `

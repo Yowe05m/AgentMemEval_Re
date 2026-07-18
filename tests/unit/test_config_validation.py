@@ -89,13 +89,13 @@ def test_task4_real_pilot_has_independent_experience_revision_budget() -> None:
     assert config["provider"]["service_startup_parameters"]["max_model_len"] == 16384
 
 
-def test_task4_memory_debiased_pilot_campaigns_are_valid_and_seed_paired() -> None:
+def test_task4_target_scoped_pilot_campaigns_are_valid_and_seed_paired() -> None:
     root = Path(__file__).resolve().parents[2]
     campaign_paths = [
         root
-        / "configs/campaigns/task4_campaign_p_pilot_parallel_v5_memory_debiased.yaml",
+        / "configs/campaigns/task4_campaign_p_pilot_parallel_v6_target_scoped.yaml",
         root
-        / "configs/campaigns/task4_campaign_e_pilot_parallel_v5_memory_debiased.yaml",
+        / "configs/campaigns/task4_campaign_e_pilot_parallel_v6_target_scoped.yaml",
     ]
     seed_sets: list[list[int]] = []
     for path in campaign_paths:
