@@ -217,6 +217,7 @@ def test_pilot_runtime_equivalence_accepts_registered_post_p_v7_changes() -> Non
         "tests/unit/test_statistics_and_degeneracy.py",
         "tests/unit/test_study_reporting.py",
         "tests/integration/test_campaign.py",
+        "tools/task4/audit_campaign_archive_handoff.py",
         "tools/task4/audit_pilot_prelaunch_code_paths.py",
         "tools/task4/audit_pilot_runtime_equivalence.py",
         "tools/task4/audit_campaign_seal.py",
@@ -293,6 +294,21 @@ def test_pilot_prelaunch_code_audit_is_narrow_and_does_not_grant_runtime_equival
         "src/agentmemeval/experiments/fixed_table.py"
     ]
     assert any("full lowercase SHA-1" in item for item in blocked["blockers"])
+
+
+def test_campaign_e_start_requires_verified_campaign_p_archive_handoff() -> None:
+    repo = Path(__file__).resolve().parents[2]
+    script = (
+        repo / "tools" / "task4" / "start_campaign_e_v7_pilot.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'if [ "$#" -ne 6 ]; then' in script
+    assert 'test -f "$p_seal_readiness"' in script
+    assert 'test -f "$p_snapshot_receipt"' in script
+    assert 'test ! -e "$archive_handoff_audit"' in script
+    audit_index = script.index("tools/task4/audit_campaign_archive_handoff.py")
+    campaign_index = script.index("campaign \\\n")
+    assert audit_index < campaign_index
 
 
 def test_pilot_runtime_equivalence_rejects_execution_relevant_change() -> None:

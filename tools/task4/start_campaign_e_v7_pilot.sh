@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 set -eu
 
-if [ "$#" -ne 3 ]; then
-  echo "usage: $0 <expected-code-sha> <campaign-p-v7-gate-v6.json> <prelaunch-code-audit.json>" >&2
+if [ "$#" -ne 6 ]; then
+  echo "usage: $0 <expected-code-sha> <campaign-p-v7-gate-v6.json> <prelaunch-code-audit.json> <campaign-p-seal-readiness.json> <campaign-p-snapshot-receipt.json> <new-archive-handoff-audit.json>" >&2
   exit 2
 fi
 
 expected_sha=$1
 gate=$2
 prelaunch_audit=$3
+p_seal_readiness=$4
+p_snapshot_receipt=$5
+archive_handoff_audit=$6
 repo=/root/autodl-tmp/agentmemeval_rebuild
 service=/root/autodl-tmp/services/task4_dual_20260716T175829Z
+p_campaign_dir="$repo/outputs/campaigns/task4_campaign_p_pilot_parallel_v7_counterfactual_calibrated"
 campaign_id=task4_campaign_e_pilot_parallel_v7_counterfactual_calibrated
 campaign_dir="$repo/outputs/campaigns/$campaign_id"
 short_sha=$(printf '%s' "$expected_sha" | cut -c1-7)
@@ -20,11 +24,21 @@ cd "$repo"
 test "$(git rev-parse HEAD)" = "$expected_sha"
 test -z "$(git status --porcelain)"
 test -f "$gate"
+test -f "$p_seal_readiness"
+test -f "$p_snapshot_receipt"
 test ! -e "$prelaunch_audit"
+test ! -e "$archive_handoff_audit"
 test ! -e "$campaign_dir"
 test ! -e "$log"
 
 export PYTHONPATH="$repo/src"
+
+/root/autodl-tmp/envs/agentmemeval/bin/python \
+  tools/task4/audit_campaign_archive_handoff.py \
+  --campaign-dir "$p_campaign_dir" \
+  --seal-readiness "$p_seal_readiness" \
+  --snapshot-receipt "$p_snapshot_receipt" \
+  --output "$archive_handoff_audit"
 
 /root/autodl-tmp/envs/agentmemeval/bin/python \
   tools/task4/audit_pilot_prelaunch_code_paths.py \

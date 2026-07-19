@@ -10,8 +10,10 @@ import pytest
 
 from agentmemeval.storage.campaign_seal import (
     REQUIRED_LEAF_ARTIFACTS,
+    audit_campaign_archive_handoff,
     audit_campaign_seal_readiness,
 )
+from agentmemeval.storage.snapshot_archive import build_snapshot_archive
 
 
 def test_complete_quiet_canonical_campaign_is_ready_to_seal(
@@ -148,6 +150,60 @@ def test_campaign_symlink_is_not_ready_to_seal(tmp_path: Path) -> None:
 
     assert result["status"] == "not_ready_to_seal"
     assert any("campaign contains symlinks" in item for item in result["blockers"])
+
+
+def test_archive_handoff_reverifies_seal_snapshot_and_live_campaign(
+    tmp_path: Path,
+) -> None:
+    campaign = _campaign(tmp_path, status="complete")
+    old = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+    for path in campaign.rglob("*"):
+        if path.is_file():
+            os.utime(path, (old, old))
+    seal = audit_campaign_seal_readiness(
+        campaign,
+        minimum_quiet_seconds=120,
+        now_utc=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    seal_path = tmp_path / "seal.json"
+    seal_path.write_text(json.dumps(seal), encoding="utf-8")
+    receipt_path = tmp_path / "snapshot.receipt.json"
+    build_snapshot_archive(
+        campaign,
+        tmp_path / "snapshot.tar.gz",
+        tmp_path / "snapshot.files.tsv",
+        tmp_path / "snapshot.tar.gz.sha256",
+        receipt_path,
+    )
+
+    verified = audit_campaign_archive_handoff(
+        campaign,
+        seal_readiness_path=seal_path,
+        snapshot_receipt_path=receipt_path,
+    )
+
+    assert verified["status"] == "verified_campaign_archive_handoff"
+    assert verified["blockers"] == []
+    assert verified["file_count"] == seal["file_count"]
+    assert verified["archive_sha256"]
+    with (campaign / "state.tsv").open("a", encoding="utf-8") as handle:
+        handle.write("\n")
+
+    blocked = audit_campaign_archive_handoff(
+        campaign,
+        seal_readiness_path=seal_path,
+        snapshot_receipt_path=receipt_path,
+    )
+
+    assert blocked["status"] == "blocked_campaign_archive_handoff"
+    assert any(
+        "current campaign does not match snapshot manifest" in item
+        for item in blocked["blockers"]
+    )
+    assert any(
+        "state.tsv changed after seal readiness" in item
+        for item in blocked["blockers"]
+    )
 
 
 def _campaign(tmp_path: Path, *, status: str) -> Path:

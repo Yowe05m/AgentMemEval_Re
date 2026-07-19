@@ -9,6 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from agentmemeval.storage.archive import verify_file_manifest
+from agentmemeval.storage.snapshot_archive import verify_archive_checksum
+
 REQUIRED_LEAF_ARTIFACTS = (
     "resolved_config.yaml",
     "manifest.json",
@@ -193,6 +196,200 @@ def audit_campaign_seal_readiness(
         campaign_manifest_sha256=_sha256(manifest_path),
         state_tsv_sha256=_sha256(state_path),
     )
+
+
+def audit_campaign_archive_handoff(
+    campaign_dir: str | Path,
+    *,
+    seal_readiness_path: str | Path,
+    snapshot_receipt_path: str | Path,
+) -> dict[str, Any]:
+    """Reverify a sealed server snapshot before a later campaign may start."""
+
+    root_input = Path(campaign_dir).absolute()
+    seal_input = Path(seal_readiness_path).absolute()
+    receipt_input = Path(snapshot_receipt_path).absolute()
+    root = root_input.resolve()
+    seal_path = seal_input.resolve()
+    receipt_path = receipt_input.resolve()
+    blockers: list[str] = []
+    for label, source, path in (
+        ("campaign", root_input, root),
+        ("seal readiness", seal_input, seal_path),
+        ("snapshot receipt", receipt_input, receipt_path),
+    ):
+        if source.is_symlink():
+            blockers.append(f"{label} path is a symlink")
+        expected = path.is_dir() if label == "campaign" else path.is_file()
+        if not expected:
+            blockers.append(f"{label} path is missing")
+    if blockers:
+        return _archive_handoff_result(
+            root,
+            seal_path=seal_path,
+            receipt_path=receipt_path,
+            blockers=blockers,
+        )
+
+    seal = _read_json(seal_path)
+    receipt = _read_json(receipt_path)
+    if seal.get("schema_version") != "task4_campaign_seal_readiness_v1":
+        blockers.append("seal readiness schema mismatch")
+    if seal.get("status") != "ready_to_seal" or seal.get("blockers") != []:
+        blockers.append("seal readiness is not verified ready_to_seal")
+    if Path(str(seal.get("campaign_dir", ""))).resolve() != root:
+        blockers.append("seal readiness campaign root mismatch")
+    if receipt.get("schema_version") != "task4_snapshot_archive_receipt_v1":
+        blockers.append("snapshot receipt schema mismatch")
+    if receipt.get("status") != "verified":
+        blockers.append("snapshot receipt is not verified")
+    if Path(str(receipt.get("root", ""))).resolve() != root:
+        blockers.append("snapshot receipt campaign root mismatch")
+    for key in (
+        "source_verification",
+        "archive_verification",
+        "checksum_verification",
+    ):
+        nested = receipt.get(key)
+        if (
+            not isinstance(nested, dict)
+            or nested.get("verified") is not True
+            or nested.get("status") != "verified"
+        ):
+            blockers.append(f"snapshot receipt {key} is not verified")
+
+    manifest_input = Path(str(receipt.get("manifest", ""))).absolute()
+    archive_input = Path(str(receipt.get("archive", ""))).absolute()
+    checksum_input = Path(str(receipt.get("checksum", ""))).absolute()
+    manifest_path = manifest_input.resolve()
+    archive_path = archive_input.resolve()
+    checksum_path = checksum_input.resolve()
+    for label, source, path in (
+        ("snapshot manifest", manifest_input, manifest_path),
+        ("snapshot archive", archive_input, archive_path),
+        ("snapshot checksum", checksum_input, checksum_path),
+    ):
+        if not path.is_file() or source.is_symlink():
+            blockers.append(f"{label} is missing or a symlink")
+
+    source_verification: dict[str, Any] = {}
+    checksum_verification: dict[str, Any] = {}
+    manifest_sha256: str | None = None
+    archive_sha256: str | None = None
+    if not blockers:
+        try:
+            source_verification = verify_file_manifest(root, manifest_path)
+            checksum_verification = verify_archive_checksum(
+                archive_path,
+                checksum_path,
+            )
+            manifest_sha256 = _sha256(manifest_path)
+            archive_sha256 = str(checksum_verification.get("observed_sha256"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            blockers.append(f"snapshot material reverification failed: {type(exc).__name__}")
+    if source_verification and source_verification.get("verified") is not True:
+        blockers.append("current campaign does not match snapshot manifest")
+    if checksum_verification and checksum_verification.get("verified") is not True:
+        blockers.append("current snapshot archive checksum is not verified")
+    if manifest_sha256 is not None and manifest_sha256 != receipt.get(
+        "manifest_sha256"
+    ):
+        blockers.append("current snapshot manifest hash mismatch")
+    if archive_sha256 is not None and archive_sha256 != receipt.get(
+        "archive_sha256"
+    ):
+        blockers.append("current snapshot archive hash mismatch")
+
+    manifest_path_live = root / "campaign_manifest.json"
+    state_path_live = root / "state.tsv"
+    if manifest_path_live.is_file() and _sha256(manifest_path_live) != seal.get(
+        "campaign_manifest_sha256"
+    ):
+        blockers.append("campaign manifest changed after seal readiness")
+    if state_path_live.is_file() and _sha256(state_path_live) != seal.get(
+        "state_tsv_sha256"
+    ):
+        blockers.append("state.tsv changed after seal readiness")
+
+    observed_files = [path for path in root.rglob("*") if path.is_file()]
+    observed_file_count = len(observed_files)
+    observed_total_bytes = sum(path.stat().st_size for path in observed_files)
+    for label, value in (
+        ("seal file count", seal.get("file_count")),
+        ("snapshot receipt file count", receipt.get("file_count")),
+        (
+            "current manifest expected file count",
+            source_verification.get("expected_file_count"),
+        ),
+        (
+            "current manifest verified file count",
+            source_verification.get("verified_file_count"),
+        ),
+    ):
+        if value != observed_file_count:
+            blockers.append(f"{label} mismatch: {value}/{observed_file_count}")
+    for label, value in (
+        ("seal total bytes", seal.get("total_bytes")),
+        (
+            "snapshot receipt uncompressed bytes",
+            receipt.get("total_uncompressed_size_bytes"),
+        ),
+    ):
+        if value != observed_total_bytes:
+            blockers.append(f"{label} mismatch: {value}/{observed_total_bytes}")
+
+    return _archive_handoff_result(
+        root,
+        seal_path=seal_path,
+        receipt_path=receipt_path,
+        blockers=blockers,
+        seal_readiness_sha256=_sha256(seal_path),
+        snapshot_receipt_sha256=_sha256(receipt_path),
+        manifest_sha256=manifest_sha256,
+        archive_sha256=archive_sha256,
+        file_count=observed_file_count,
+        total_bytes=observed_total_bytes,
+        source_verification=source_verification,
+        checksum_verification=checksum_verification,
+    )
+
+
+def _archive_handoff_result(
+    root: Path,
+    *,
+    seal_path: Path,
+    receipt_path: Path,
+    blockers: list[str],
+    seal_readiness_sha256: str | None = None,
+    snapshot_receipt_sha256: str | None = None,
+    manifest_sha256: str | None = None,
+    archive_sha256: str | None = None,
+    file_count: int | None = None,
+    total_bytes: int | None = None,
+    source_verification: dict[str, Any] | None = None,
+    checksum_verification: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    blockers = sorted(set(blockers))
+    return {
+        "schema_version": "task4_campaign_archive_handoff_v1",
+        "campaign_dir": str(root),
+        "seal_readiness_path": str(seal_path),
+        "seal_readiness_sha256": seal_readiness_sha256,
+        "snapshot_receipt_path": str(receipt_path),
+        "snapshot_receipt_sha256": snapshot_receipt_sha256,
+        "manifest_sha256": manifest_sha256,
+        "archive_sha256": archive_sha256,
+        "file_count": file_count,
+        "total_bytes": total_bytes,
+        "source_verification": source_verification or {},
+        "checksum_verification": checksum_verification or {},
+        "blockers": blockers,
+        "status": (
+            "verified_campaign_archive_handoff"
+            if not blockers
+            else "blocked_campaign_archive_handoff"
+        ),
+    }
 
 
 def _result(

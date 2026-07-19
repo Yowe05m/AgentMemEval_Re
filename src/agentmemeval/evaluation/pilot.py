@@ -74,6 +74,7 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     "tests/unit/test_statistics_and_degeneracy.py",
     "tests/unit/test_study_reporting.py",
     "tests/integration/test_campaign.py",
+    "tools/task4/audit_campaign_archive_handoff.py",
     "tools/task4/audit_pilot_prelaunch_code_paths.py",
     "tools/task4/audit_pilot_runtime_equivalence.py",
     "tools/task4/audit_campaign_seal.py",

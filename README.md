@@ -147,8 +147,15 @@ python tools/task4/audit_pilot_prelaunch_code_paths.py \
 bash tools/task4/start_campaign_e_v7_pilot.sh \
   <e-full-sha> \
   <campaign-p-v7-gate-v6.json> \
-  <new-prelaunch-code-audit.json>
+  <new-prelaunch-code-audit.json> \
+  <campaign-p-seal-readiness.json> \
+  <campaign-p-snapshot-build-receipt.json> \
+  <new-campaign-p-archive-handoff-audit.json>
 ```
+
+启动器会在 E 进程创建前重新验证 P 的 seal readiness、snapshot build receipt、
+archive checksum、外置 manifest 和当前 P Campaign 全部文件；seal 后新增写入、文件
+漂移、缺失/symlink、receipt/manifest/archive hash 或文件数不一致均会阻止 E 启动。
 
 只从 immutable manifest、append-only state 和 run 工件重建新的版本化聚合：
 
