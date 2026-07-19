@@ -175,6 +175,28 @@ python tools/task4/file_manifest.py verify `
   --manifest outputs/R_<date>/<snapshot>/<campaign>_files.tsv
 ```
 
+已完成且停止写入的 campaign 可用单一 append-only 命令生成 tar.gz、外置文件 manifest、
+GNU 风格 `.sha256` 和最后写入的 verified receipt。工具会重新校验源目录、逐 tar member
+读取大小/SHA-256、拒绝危险或特殊成员，并在本地下载后提供严格 checksum 验证：
+
+```bash
+python tools/task4/snapshot_archive.py build \
+  --root outputs/campaigns/<campaign> \
+  --archive /root/autodl-tmp/backups/<snapshot>.tar.gz \
+  --manifest /root/autodl-tmp/backups/<snapshot>.files.tsv \
+  --checksum /root/autodl-tmp/backups/<snapshot>.tar.gz.sha256 \
+  --receipt /root/autodl-tmp/backups/<snapshot>.receipt.json
+```
+
+```powershell
+python tools/task4/snapshot_archive.py verify-checksum `
+  --archive outputs/R_<date>/<snapshot>/<snapshot>.tar.gz `
+  --checksum outputs/R_<date>/<snapshot>/<snapshot>.tar.gz.sha256
+```
+
+只有 receipt `status=verified`、下载后 checksum 通过、解压后 file-manifest V2 也通过的
+快照，才能成为本地分析输入。打包失败时已有 partial 输出永久保留，重试必须换新名称。
+
 回收多个 campaign 后生成一份 `server_run_map.csv` 和 formal 主表排除清单。工具按
 campaign/condition/seed/attempt 折叠 lifecycle，只把完整、formal、execution valid、
 paper eligible 且非 model-substituted 的 leaf 标为候选；Pilot、失败、partial 和敏感性
