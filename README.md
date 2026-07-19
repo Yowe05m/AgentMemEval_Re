@@ -232,14 +232,26 @@ python -m agentmemeval pilot-freeze `
 
 冻结提案状态必须为 `ready_to_generate_immutable_formal_configs`。随后结合双服务
 runtime lock，用 P/E campaign 的设计骨架和 robust formal 实验模板生成一个全新的、
-拒绝覆盖的配置包。`seed-start` 必须来自预注册且不得与 Pilot seeds 重叠：
+拒绝覆盖的配置包。runtime lock 必须从已通过真实双服务准入的 Pilot run manifest
+生成；旧四字段手填 lock 不再接受。它会锁定 GPU/驱动/CUDA/vLLM、decision 与
+embedding revision/weights/启动参数哈希，以及两个 prompt 哈希：
+
+```powershell
+python tools/task4/build_formal_runtime_lock.py `
+  --manifest outputs/campaigns/<complete_p_or_e>/runs/<run_id>/manifest.json `
+  --output outputs/campaigns/formal_runtime_lock_<utc>.json
+```
+
+`formal-freeze` 会重新读取上述源 manifest 并重建 runtime lock，也会从原始 P/E
+aggregate、leaf、retrieval audit 重新构建 Pilot proposal；任一手工改写都会
+fail-closed。`seed-start` 必须来自预注册且不得与 Pilot seeds 重叠：
 
 ```powershell
 python -m agentmemeval formal-freeze `
   --proposal outputs/campaigns/pilot_freeze_proposal_<utc>.json `
   --runtime-lock outputs/campaigns/formal_runtime_lock_<utc>.json `
-  --campaign-p-template configs/campaigns/task4_campaign_p_pilot_parallel_v6_target_scoped.yaml `
-  --campaign-e-template configs/campaigns/task4_campaign_e_pilot_parallel_v6_target_scoped.yaml `
+  --campaign-p-template configs/campaigns/task4_campaign_p_pilot_parallel_v7_counterfactual_calibrated.yaml `
+  --campaign-e-template configs/campaigns/task4_campaign_e_pilot_parallel_v7_counterfactual_calibrated.yaml `
   --formal-p-template configs/experiments/task4_campaign_p_robust_formal_template.yaml `
   --formal-e-template configs/experiments/task4_campaign_e_robust_formal_template.yaml `
   --output-dir configs/frozen/task4_<freeze_id> `

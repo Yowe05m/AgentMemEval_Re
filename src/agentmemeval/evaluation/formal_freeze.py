@@ -13,12 +13,13 @@ import yaml
 
 from agentmemeval.config.loader import dump_yaml, load_config, validate_config
 from agentmemeval.core.errors import ConfigError
-
-RUNTIME_LOCK_FIELDS = (
-    "gpu_name",
-    "gpu_driver",
-    "service_torch_cuda_version",
-    "vllm_version",
+from agentmemeval.evaluation.aggregation import validate_runtime_homogeneity
+from agentmemeval.evaluation.pilot import build_pilot_freeze_proposal_from_paths
+from agentmemeval.evaluation.runtime_lock import (
+    CONFIG_BOUND_RUNTIME_LOCK_FIELDS,
+    FORMAL_RUNTIME_LOCK_FIELDS,
+    build_formal_runtime_lock_from_manifest,
+    configured_runtime_identity,
 )
 
 
@@ -50,7 +51,11 @@ def generate_formal_freeze_bundle(
             raise ConfigError(f"formal freeze input does not exist ({label}): {path}")
     normalized_freeze_id = _validate_freeze_id(freeze_id)
     proposal = _read_json(inputs["proposal"])
-    runtime_lock = _validate_runtime_lock(_read_json(inputs["runtime_lock"]))
+    proposal_rebuild_sha256 = _validate_proposal_source_rebuild(proposal)
+    runtime_lock = _validate_runtime_lock(
+        _read_json(inputs["runtime_lock"]),
+        proposal,
+    )
     required_seed_pairs, behavior_thresholds, retrieval_score = _validate_proposal(
         proposal
     )
@@ -168,7 +173,7 @@ def generate_formal_freeze_bundle(
         raise FileExistsError(f"formal freeze output directory already exists: {destination}")
 
     manifest = {
-        "schema_version": "agentmemeval_formal_freeze_bundle_v1",
+        "schema_version": "agentmemeval_formal_freeze_bundle_v2",
         "freeze_id": normalized_freeze_id,
         "status": "immutable_formal_configs_generated",
         "required_seed_pairs": required_seed_pairs,
@@ -191,6 +196,10 @@ def generate_formal_freeze_bundle(
             ],
         },
         "runtime_lock": runtime_lock,
+        "proposal_source_rebuild": {
+            "verified": True,
+            "canonical_sha256": proposal_rebuild_sha256,
+        },
         "source_sha256": source_hashes,
         "files": names,
     }
@@ -282,12 +291,130 @@ def _validate_proposal(
     return required_seed_pairs, copy.deepcopy(thresholds), float(score)
 
 
-def _validate_runtime_lock(data: dict[str, Any]) -> dict[str, str]:
+def _validate_proposal_source_rebuild(proposal: dict[str, Any]) -> str:
+    p_aggregate = _evidence_file(
+        proposal,
+        "campaign_p_aggregate_evidence",
+    )
+    e_aggregate = _evidence_file(
+        proposal,
+        "campaign_e_aggregate_evidence",
+    )
+    review = _evidence_file(
+        proposal,
+        "retrieval_review_evidence",
+    )
+    p_campaign = _evidence_directory(proposal, "campaign_p_evidence")
+    e_campaign = _evidence_directory(proposal, "campaign_e_evidence")
+    runtime_evidence = proposal.get("runtime_equivalence_evidence")
+    runtime_path: Path | None = None
+    if runtime_evidence is not None:
+        runtime_path = _evidence_file(
+            proposal,
+            "runtime_equivalence_evidence",
+        )
+    try:
+        rebuilt = build_pilot_freeze_proposal_from_paths(
+            p_aggregate,
+            e_aggregate,
+            p_campaign,
+            e_campaign,
+            review,
+            runtime_path,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ConfigError(
+            "pilot freeze proposal source rebuild failed: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if rebuilt != proposal:
+        raise ConfigError(
+            "pilot freeze proposal differs from deterministic source rebuild"
+        )
+    return _json_sha256(rebuilt)
+
+
+def _evidence_file(proposal: dict[str, Any], key: str) -> Path:
+    evidence = proposal.get(key)
+    if not isinstance(evidence, dict):
+        raise ConfigError(f"pilot proposal is missing {key}")
+    path = Path(str(evidence.get("path", ""))).resolve()
+    if not path.is_file():
+        raise ConfigError(f"pilot proposal evidence file is missing ({key}): {path}")
+    expected_hash = str(evidence.get("sha256", ""))
+    if not _is_sha256(expected_hash) or _sha256(path) != expected_hash:
+        raise ConfigError(f"pilot proposal evidence hash mismatch: {key}")
+    return path
+
+
+def _evidence_directory(proposal: dict[str, Any], key: str) -> Path:
+    evidence = proposal.get(key)
+    if not isinstance(evidence, dict):
+        raise ConfigError(f"pilot proposal is missing {key}")
+    path = Path(str(evidence.get("campaign_dir", ""))).resolve()
+    if not path.is_dir():
+        raise ConfigError(f"pilot proposal campaign directory is missing ({key}): {path}")
+    return path
+
+
+def _validate_runtime_lock(
+    data: dict[str, Any],
+    proposal: dict[str, Any],
+) -> dict[str, str]:
+    if data.get("schema_version") != "task4_formal_runtime_lock_v2":
+        raise ConfigError("formal runtime lock schema is not V2")
+    if data.get("status") != "verified_from_real_service_run_manifest":
+        raise ConfigError("formal runtime lock is not verified from a real-service run")
+    source = data.get("source_manifest")
+    if not isinstance(source, dict):
+        raise ConfigError("formal runtime lock source manifest evidence is missing")
+    source_path = Path(str(source.get("path", ""))).resolve()
+    if not source_path.is_file():
+        raise ConfigError(f"formal runtime lock source manifest is missing: {source_path}")
+    expected_hash = str(source.get("sha256", ""))
+    if not _is_sha256(expected_hash) or _sha256(source_path) != expected_hash:
+        raise ConfigError("formal runtime lock source manifest hash mismatch")
+    rebuilt = build_formal_runtime_lock_from_manifest(source_path)
+    if rebuilt != data:
+        raise ConfigError("formal runtime lock differs from source manifest rebuild")
+    leaf_manifest_paths = {
+        (Path(str(item.get("run_dir", ""))) / "manifest.json").resolve()
+        for key in ("campaign_p_leaf_evidence", "campaign_e_leaf_evidence")
+        for item in proposal.get(key, [])
+        if isinstance(item, dict)
+    }
+    if source_path not in leaf_manifest_paths:
+        raise ConfigError(
+            "formal runtime lock source is not a completed P/E Pilot leaf manifest"
+        )
+    source_identity = validate_runtime_homogeneity(
+        [_read_json(source_path)]
+    ).get("identity")
+    if not isinstance(source_identity, dict):
+        raise ConfigError("formal runtime lock source identity cannot be reconstructed")
+    source_non_code = {
+        key: value for key, value in source_identity.items() if key != "code"
+    }
+    for key in (
+        "campaign_p_aggregate_evidence",
+        "campaign_e_aggregate_evidence",
+    ):
+        aggregate = _read_json(_evidence_file(proposal, key))
+        identity = dict(aggregate.get("runtime_homogeneity", {})).get("identity")
+        if not isinstance(identity, dict):
+            raise ConfigError(f"Pilot aggregate runtime identity is missing: {key}")
+        non_code = {
+            name: value for name, value in identity.items() if name != "code"
+        }
+        if _json_sha256(non_code) != _json_sha256(source_non_code):
+            raise ConfigError(
+                "formal runtime lock source identity differs from P/E Pilot runtime"
+            )
     candidate = data.get("formal_runtime_lock", data)
     if not isinstance(candidate, dict):
         raise ConfigError("runtime lock must be a JSON object")
     lock: dict[str, str] = {}
-    for field in RUNTIME_LOCK_FIELDS:
+    for field in FORMAL_RUNTIME_LOCK_FIELDS:
         value = candidate.get(field)
         if value is None or not str(value).strip():
             raise ConfigError(f"runtime lock field is required: {field}")
@@ -335,6 +462,17 @@ def _build_formal_config(
     )
     config["experiment"] = experiment
     config["agent"] = agent
+    configured_identity = configured_runtime_identity(config)
+    mismatches = [
+        field
+        for field in CONFIG_BOUND_RUNTIME_LOCK_FIELDS
+        if configured_identity.get(field) != runtime_lock.get(field)
+    ]
+    if mismatches:
+        raise ConfigError(
+            "formal template identity differs from runtime lock: "
+            f"{sorted(mismatches)}"
+        )
     validate_config(config)
     return config
 
@@ -426,6 +564,21 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _json_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value)
+    return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
 
 
 def _write_new_text(path: Path, content: str) -> None:

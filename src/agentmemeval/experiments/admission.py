@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from agentmemeval.core.errors import ConfigError
+from agentmemeval.evaluation.runtime_lock import (
+    FORMAL_RUNTIME_LOCK_FIELDS,
+    runtime_identity_from_metadata,
+)
 from agentmemeval.storage.artifacts import collect_runtime_metadata
 
 RUN_MODES = {"smoke", "pilot", "formal"}
@@ -174,19 +178,13 @@ def _runtime_lock_blockers(
     lock = experiment.get("formal_runtime_lock")
     if not isinstance(lock, dict):
         return ["experiment.formal_runtime_lock is required"]
-    devices = dict(runtime.get("gpu", {})).get("devices", [])
-    observed_gpu = devices[0] if isinstance(devices, list) and devices else {}
     service_runtime = dict(runtime.get("model_service_runtime", {}))
     blockers: list[str] = []
     if service_runtime.get("status") != "verified":
         blockers.append("model service runtime probe must be verified")
-    observed = {
-        "gpu_name": observed_gpu.get("name"),
-        "gpu_driver": observed_gpu.get("driver"),
-        "service_torch_cuda_version": service_runtime.get("torch_cuda_version"),
-        "vllm_version": service_runtime.get("vllm_version"),
-    }
-    for field, actual in observed.items():
+    observed = runtime_identity_from_metadata(runtime)
+    for field in FORMAL_RUNTIME_LOCK_FIELDS:
+        actual = observed.get(field)
         expected = lock.get(field)
         if expected in {None, ""}:
             blockers.append(f"experiment.formal_runtime_lock.{field} is required")
