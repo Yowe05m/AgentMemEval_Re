@@ -173,7 +173,12 @@ python -m agentmemeval campaign-aggregate --input outputs/campaigns/<campaign_id
 
 长跑进度使用协议感知的只读工具；它从 resolved config 重建 train +
 checkpoint×evaluation-target 的预算，区分 training、checkpoint generalization、
-finalizing 和 complete，并检查 complete leaf 的八项标准工件。该输出不评估论文资格：
+finalizing 和 complete，并检查 complete leaf 的八项标准工件。V2 按
+`(condition_id, seed)` 选择最大 attempt 的最后状态与 run 工件：较低 failed
+attempt 可由更高 attempt 合法恢复；非正 attempt、同 attempt failed→complete
+状态复活、多个 completed attempts 和未知矩阵身份会使输出变为 `inconsistent`。
+`state_audit` 同时给出 failed、superseded failed 和 latest failed 计数。该输出始终
+保留 `paper_eligibility_not_assessed=true`，不能代替 Gate、功效或论文资格审计：
 
 ```powershell
 python tools/task4/campaign_progress.py `
