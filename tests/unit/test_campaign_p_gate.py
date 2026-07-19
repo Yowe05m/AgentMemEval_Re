@@ -300,6 +300,75 @@ def test_campaign_p_gate_rejects_multiple_completed_attempts(
     )
 
 
+def test_campaign_p_gate_rejects_nonpositive_attempt(tmp_path: Path) -> None:
+    campaign, aggregate = _campaign(tmp_path)
+    state = campaign / "state.tsv"
+    state.write_text(
+        state.read_text(encoding="utf-8").replace(
+            "\t1\tcomplete\t",
+            "\t0\tcomplete\t",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    audit = _gate_module().build_gate(
+        campaign,
+        aggregate_path=aggregate,
+        expected_code_sha="expected-sha",
+        expected_max_model_len=16384,
+        expected_prompts={
+            "decision_version": "version",
+            "decision_system_sha256": "decision-hash",
+            "experience_update_sha256": "experience-hash",
+        },
+    )
+
+    assert audit["status"] == "no_go"
+    assert any("malformed state rows: 1" in item for item in audit["blockers"])
+
+
+def test_campaign_p_gate_rejects_failed_then_complete_same_attempt(
+    tmp_path: Path,
+) -> None:
+    campaign, aggregate = _campaign(tmp_path)
+    state = campaign / "state.tsv"
+    complete = (
+        f"t\tmixed\tmixed\t1\t1\tcomplete\tmixed__s1__a01\t"
+        f"{campaign / 'runs' / 'mixed__s1__a01'}\t\t\n"
+    )
+    failed_then_complete = (
+        f"t0\tmixed\tmixed\t1\t1\tfailed\tmixed__s1__a01\t"
+        f"{campaign / 'runs' / 'mixed__s1__a01'}\tinfrastructure\tfailed\n"
+        f"{complete}"
+    )
+    state.write_text(
+        state.read_text(encoding="utf-8").replace(
+            complete,
+            failed_then_complete,
+        ),
+        encoding="utf-8",
+    )
+
+    audit = _gate_module().build_gate(
+        campaign,
+        aggregate_path=aggregate,
+        expected_code_sha="expected-sha",
+        expected_max_model_len=16384,
+        expected_prompts={
+            "decision_version": "version",
+            "decision_system_sha256": "decision-hash",
+            "experience_update_sha256": "experience-hash",
+        },
+    )
+
+    assert audit["status"] == "no_go"
+    assert any(
+        "failed state precedes completion within latest attempt" in item
+        for item in audit["blockers"]
+    )
+
+
 def test_campaign_p_gate_rejects_dirty_or_revision_fallback_evidence(
     tmp_path: Path,
 ) -> None:

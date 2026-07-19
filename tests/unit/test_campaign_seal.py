@@ -128,6 +128,62 @@ def test_multiple_completed_attempts_are_not_ready_to_seal(tmp_path: Path) -> No
     assert any("multiple completed attempts" in item for item in result["blockers"])
 
 
+def test_failed_then_complete_same_attempt_is_not_ready_to_seal(
+    tmp_path: Path,
+) -> None:
+    campaign = _campaign(tmp_path, status="failed")
+    run_dir = campaign / "runs" / "mixed_table__s11__a01"
+    _append_state(
+        campaign / "state.tsv",
+        run_dir,
+        attempt=1,
+        status="complete",
+    )
+    old = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+    for path in campaign.rglob("*"):
+        if path.is_file():
+            os.utime(path, (old, old))
+
+    result = audit_campaign_seal_readiness(
+        campaign,
+        minimum_quiet_seconds=120,
+        now_utc=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "not_ready_to_seal"
+    assert any(
+        "failed state precedes completion within latest attempt" in item
+        for item in result["blockers"]
+    )
+
+
+def test_nonpositive_attempt_is_malformed_and_not_ready_to_seal(
+    tmp_path: Path,
+) -> None:
+    campaign = _campaign(tmp_path, status="complete")
+    state = campaign / "state.tsv"
+    state.write_text(
+        state.read_text(encoding="utf-8").replace(
+            "\t1\tcomplete\t",
+            "\t0\tcomplete\t",
+        ),
+        encoding="utf-8",
+    )
+    old = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+    for path in campaign.rglob("*"):
+        if path.is_file():
+            os.utime(path, (old, old))
+
+    result = audit_campaign_seal_readiness(
+        campaign,
+        minimum_quiet_seconds=120,
+        now_utc=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "not_ready_to_seal"
+    assert any("malformed state rows: 1" in item for item in result["blockers"])
+
+
 def test_campaign_symlink_is_not_ready_to_seal(tmp_path: Path) -> None:
     campaign = _campaign(tmp_path, status="complete")
     target = campaign / "target.txt"

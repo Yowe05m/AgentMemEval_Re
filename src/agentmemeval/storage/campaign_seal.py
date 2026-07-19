@@ -88,8 +88,11 @@ def audit_campaign_seal_readiness(
     malformed_state_rows = 0
     for row in states:
         try:
-            identity = (str(row.get("condition_id", "")), int(row.get("seed", "")))
-            int(row.get("attempt", ""))
+            condition_id = str(row.get("condition_id", "")).strip()
+            identity = (condition_id, int(row.get("seed", "")))
+            attempt = int(row.get("attempt", ""))
+            if not condition_id or attempt < 1:
+                raise ValueError
         except (TypeError, ValueError):
             malformed_state_rows += 1
             continue
@@ -106,9 +109,10 @@ def audit_campaign_seal_readiness(
     latest_rows: dict[tuple[str, int], dict[str, str]] = {}
     for identity, rows in grouped.items():
         max_attempt = max(int(row["attempt"]) for row in rows)
-        latest_rows[identity] = [
+        latest_attempt_rows = [
             row for row in rows if int(row["attempt"]) == max_attempt
-        ][-1]
+        ]
+        latest_rows[identity] = latest_attempt_rows[-1]
         completed_attempts = {
             int(row["attempt"]) for row in rows if row.get("status") == "complete"
         }
@@ -116,6 +120,14 @@ def audit_campaign_seal_readiness(
             blockers.append(
                 f"multiple completed attempts for {identity}: "
                 f"{sorted(completed_attempts)}"
+            )
+        if (
+            any(row.get("status") == "failed" for row in latest_attempt_rows)
+            and latest_rows[identity].get("status") == "complete"
+        ):
+            blockers.append(
+                f"failed state precedes completion within latest attempt for "
+                f"{identity}"
             )
     incomplete = sorted(
         (identity, row.get("status", ""))

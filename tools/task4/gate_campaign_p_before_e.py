@@ -109,8 +109,11 @@ def build_gate(
     malformed_state_rows = 0
     for row in rows:
         try:
-            identity = (str(row.get("condition_id", "")), int(row.get("seed", "")))
-            int(row.get("attempt", ""))
+            condition_id = str(row.get("condition_id", "")).strip()
+            identity = (condition_id, int(row.get("seed", "")))
+            attempt = int(row.get("attempt", ""))
+            if not condition_id or attempt < 1:
+                raise ValueError
         except (TypeError, ValueError):
             malformed_state_rows += 1
             continue
