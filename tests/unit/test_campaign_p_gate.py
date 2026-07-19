@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 from types import ModuleType
 
@@ -204,7 +205,7 @@ def test_campaign_p_gate_accepts_complete_clean_homogeneous_evidence(
         },
     )
     assert audit["status"] == "ready_to_start_campaign_e"
-    assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v6"
+    assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v7"
     assert audit["blockers"] == []
     assert audit["behavior_freeze_preview"]["status"] == "frozen"
     assert (
@@ -228,6 +229,74 @@ def test_campaign_p_gate_accepts_complete_clean_homogeneous_evidence(
     assert (
         audit["observed_runtime_homogeneity_sha256"]
         == audit["rebuilt_runtime_homogeneity_sha256"]
+    )
+
+
+def test_campaign_p_gate_accepts_failed_attempt_followed_by_complete_retry(
+    tmp_path: Path,
+) -> None:
+    campaign, aggregate = _campaign(tmp_path)
+    retry = _copy_attempt(campaign, seed=1, attempt=2)
+    state_path = campaign / "state.tsv"
+    state = state_path.read_text(encoding="utf-8")
+    first_complete = (
+        f"t\tmixed\tmixed\t1\t1\tcomplete\tmixed__s1__a01\t"
+        f"{campaign / 'runs' / 'mixed__s1__a01'}\t\t\n"
+    )
+    failed_then_retry = (
+        f"t\tmixed\tmixed\t1\t1\tfailed\tmixed__s1__a01\t"
+        f"{campaign / 'runs' / 'mixed__s1__a01'}\tinfrastructure\tfailed\n"
+        f"t2\tmixed\tmixed\t1\t2\tcomplete\t{retry.name}\t{retry}\t\t\n"
+    )
+    state_path.write_text(
+        state.replace(first_complete, failed_then_retry),
+        encoding="utf-8",
+    )
+
+    audit = _gate_module().build_gate(
+        campaign,
+        aggregate_path=aggregate,
+        expected_code_sha="expected-sha",
+        expected_max_model_len=16384,
+        expected_prompts={
+            "decision_version": "version",
+            "decision_system_sha256": "decision-hash",
+            "experience_update_sha256": "experience-hash",
+        },
+    )
+
+    assert audit["status"] == "ready_to_start_campaign_e"
+    assert audit["failed_state_rows"] == 1
+    assert audit["superseded_failed_state_rows"] == 1
+    assert audit["latest_failed_matrix_units"] == 0
+    assert any(item["run_id"] == retry.name for item in audit["leaf_evidence"])
+
+
+def test_campaign_p_gate_rejects_multiple_completed_attempts(
+    tmp_path: Path,
+) -> None:
+    campaign, aggregate = _campaign(tmp_path)
+    retry = _copy_attempt(campaign, seed=1, attempt=2)
+    with (campaign / "state.tsv").open("a", encoding="utf-8") as handle:
+        handle.write(
+            f"t2\tmixed\tmixed\t1\t2\tcomplete\t{retry.name}\t{retry}\t\t\n"
+        )
+
+    audit = _gate_module().build_gate(
+        campaign,
+        aggregate_path=aggregate,
+        expected_code_sha="expected-sha",
+        expected_max_model_len=16384,
+        expected_prompts={
+            "decision_version": "version",
+            "decision_system_sha256": "decision-hash",
+            "experience_update_sha256": "experience-hash",
+        },
+    )
+
+    assert audit["status"] == "no_go"
+    assert any(
+        "multiple completed attempts" in item for item in audit["blockers"]
     )
 
 
@@ -416,3 +485,24 @@ def test_campaign_p_gate_rejects_external_or_mismatched_leaf_identity(
         "resolved config campaign_id mismatch" in item
         for item in audit["blockers"]
     )
+
+
+def _copy_attempt(campaign: Path, *, seed: int, attempt: int) -> Path:
+    source = campaign / "runs" / f"mixed__s{seed}__a01"
+    run_id = f"mixed__s{seed}__a{attempt:02d}"
+    destination = campaign / "runs" / run_id
+    shutil.copytree(source, destination)
+    manifest_path = destination / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["run_id"] = run_id
+    manifest["output_dir"] = str(destination)
+    manifest["config_snapshot_path"] = str(destination / "resolved_config.yaml")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    config_path = destination / "resolved_config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["experiment"]["run_id"] = run_id
+    config_path.write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
+    return destination

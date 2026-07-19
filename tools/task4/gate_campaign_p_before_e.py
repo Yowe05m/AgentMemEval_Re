@@ -98,16 +98,76 @@ def build_gate(
     expected = len(conditions) * len(seeds)
     with state_path.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
-    completed = [row for row in rows if row.get("status") == "complete"]
-    failed = [row for row in rows if row.get("status") == "failed"]
-    identities = [
-        (str(row.get("condition_id", "")), int(row.get("seed", 0)))
-        for row in completed
-    ]
-    duplicates = sorted(
-        identity for identity in set(identities) if identities.count(identity) > 1
-    )
     blockers: list[str] = []
+    expected_identities = {
+        (str(condition.get("condition_id", "")), int(seed))
+        for condition in conditions
+        if isinstance(condition, dict)
+        for seed in seeds
+    }
+    grouped: dict[tuple[str, int], list[dict[str, str]]] = {}
+    malformed_state_rows = 0
+    for row in rows:
+        try:
+            identity = (str(row.get("condition_id", "")), int(row.get("seed", "")))
+            int(row.get("attempt", ""))
+        except (TypeError, ValueError):
+            malformed_state_rows += 1
+            continue
+        grouped.setdefault(identity, []).append(row)
+    if malformed_state_rows:
+        blockers.append(f"malformed state rows: {malformed_state_rows}")
+    extras = sorted(set(grouped) - expected_identities)
+    missing = sorted(expected_identities - set(grouped))
+    if extras:
+        blockers.append(f"unexpected matrix identities: {extras}")
+    if missing:
+        blockers.append(f"missing matrix identities: {missing}")
+
+    completed: list[dict[str, str]] = []
+    latest_failed_matrix_units = 0
+    superseded_failed_state_rows = 0
+    for identity in sorted(expected_identities):
+        identity_rows = grouped.get(identity, [])
+        if not identity_rows:
+            continue
+        maximum_attempt = max(int(row["attempt"]) for row in identity_rows)
+        latest_attempt_rows = [
+            row for row in identity_rows if int(row["attempt"]) == maximum_attempt
+        ]
+        latest = latest_attempt_rows[-1]
+        completed_attempts = {
+            int(row["attempt"])
+            for row in identity_rows
+            if row.get("status") == "complete"
+        }
+        if len(completed_attempts) > 1:
+            blockers.append(
+                f"multiple completed attempts for {identity}: "
+                f"{sorted(completed_attempts)}"
+            )
+        failed_in_latest_attempt = sum(
+            row.get("status") == "failed" for row in latest_attempt_rows
+        )
+        if failed_in_latest_attempt and latest.get("status") == "complete":
+            blockers.append(
+                f"failed state precedes completion within latest attempt for "
+                f"{identity}"
+            )
+        superseded_failed_state_rows += sum(
+            row.get("status") == "failed"
+            and int(row["attempt"]) < maximum_attempt
+            for row in identity_rows
+        )
+        if latest.get("status") == "complete":
+            completed.append(latest)
+        else:
+            if latest.get("status") == "failed":
+                latest_failed_matrix_units += 1
+            blockers.append(
+                f"latest attempt is not complete for {identity}: "
+                f"attempt={maximum_attempt}, status={latest.get('status')}"
+            )
     if manifest.get("schema_version") != "agentmemeval_campaign_v1":
         blockers.append(
             f"campaign manifest schema mismatch: {manifest.get('schema_version')}"
@@ -123,10 +183,6 @@ def build_gate(
         )
     if len(completed) != expected:
         blockers.append(f"complete matrix mismatch: {len(completed)}/{expected}")
-    if failed:
-        blockers.append(f"failed state rows present: {len(failed)}")
-    if duplicates:
-        blockers.append(f"duplicate complete matrix units: {duplicates}")
     power_diagnostic = _campaign_p_power_diagnostic(
         aggregate,
         expected_run_count=expected,
@@ -300,12 +356,16 @@ def build_gate(
         )
 
     return {
-        "schema_version": "task4_campaign_p_before_e_gate_v6",
+        "schema_version": "task4_campaign_p_before_e_gate_v7",
         "campaign_dir": str(campaign_dir),
         "campaign_id": campaign.get("campaign_id"),
         "expected_matrix_units": expected,
         "completed_matrix_units": len(completed),
-        "failed_state_rows": len(failed),
+        "failed_state_rows": sum(
+            row.get("status") == "failed" for row in rows
+        ),
+        "superseded_failed_state_rows": superseded_failed_state_rows,
+        "latest_failed_matrix_units": latest_failed_matrix_units,
         "ignored_noncomplete_state_rows": len(rows) - len(completed),
         "expected_code_sha": expected_code_sha,
         "expected_max_model_len": expected_max_model_len,

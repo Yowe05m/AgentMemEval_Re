@@ -306,6 +306,7 @@ def test_campaign_e_start_requires_verified_campaign_p_archive_handoff() -> None
     assert 'test -f "$p_seal_readiness"' in script
     assert 'test -f "$p_snapshot_receipt"' in script
     assert 'test ! -e "$archive_handoff_audit"' in script
+    assert 'task4_campaign_p_before_e_gate_v7' in script
     audit_index = script.index("tools/task4/audit_campaign_archive_handoff.py")
     campaign_index = script.index("campaign \\\n")
     assert audit_index < campaign_index

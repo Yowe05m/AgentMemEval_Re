@@ -130,6 +130,12 @@ python tools/task4/gate_memory_debias_smoke.py `
 python -m agentmemeval campaign --config configs/campaigns/task4_campaign_e_pilot.yaml --resume
 ```
 
+P→E gate 与 seal-readiness 均按每个 condition/seed 的最大 attempt 最后一行判断；
+较早基础设施失败若被更高 attempt 完整取代会保留并计入
+`superseded_failed_state_rows`，不会使 Campaign 永久 NO-GO。任何 latest attempt
+未完成、同一 latest attempt 先 failed 后又 complete，或多个 attempt 都标记 complete
+仍会 fail-closed，防止把有效结果重跑替换。
+
 如果 Campaign P/E Pilot 因审计与后处理提交使用不同 commit，启动 E 前先生成 immutable
 changed-path 审计；它只证明差异文件均在精确非执行白名单，不提前授予运行时等价或
 formal 同质性。唯一的执行邻近例外是 E 的 `seed_major` matrix scheduler；审计会要求
@@ -146,7 +152,7 @@ python tools/task4/audit_pilot_prelaunch_code_paths.py \
 
 bash tools/task4/start_campaign_e_v7_pilot.sh \
   <e-full-sha> \
-  <campaign-p-v7-gate-v6.json> \
+  <campaign-p-v7-gate-v7.json> \
   <new-prelaunch-code-audit.json> \
   <campaign-p-seal-readiness.json> \
   <campaign-p-snapshot-build-receipt.json> \
