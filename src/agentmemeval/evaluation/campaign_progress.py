@@ -45,17 +45,55 @@ def build_campaign_progress(campaign_dir: str | Path) -> dict[str, Any]:
         for seed in seeds
     ]
     state_rows = _read_state(state_path)
+    grouped_state_rows: dict[tuple[str, int], list[dict[str, str]]] = {}
     latest_by_identity: dict[tuple[str, int], dict[str, str]] = {}
     state_anomalies: list[str] = []
     for row in state_rows:
         try:
-            identity = (str(row["condition_id"]), int(row["seed"]))
+            condition_id = str(row["condition_id"]).strip()
+            identity = (condition_id, int(row["seed"]))
+            attempt = int(row["attempt"])
+            if not condition_id or attempt < 1:
+                raise ValueError
         except (KeyError, TypeError, ValueError):
             state_anomalies.append(f"malformed state row: {row}")
             continue
-        latest_by_identity[identity] = row
-        if identity not in expected_identities:
-            state_anomalies.append(f"unexpected state identity: {identity}")
+        grouped_state_rows.setdefault(identity, []).append(row)
+    superseded_failed_state_rows = 0
+    for identity, identity_rows in grouped_state_rows.items():
+        maximum_attempt = max(int(row["attempt"]) for row in identity_rows)
+        latest_attempt_rows = [
+            row
+            for row in identity_rows
+            if int(row["attempt"]) == maximum_attempt
+        ]
+        latest = latest_attempt_rows[-1]
+        latest_by_identity[identity] = latest
+        completed_attempts = {
+            int(row["attempt"])
+            for row in identity_rows
+            if row.get("status") == "complete"
+        }
+        if len(completed_attempts) > 1:
+            state_anomalies.append(
+                f"multiple completed attempts for {identity}: "
+                f"{sorted(completed_attempts)}"
+            )
+        if (
+            any(row.get("status") == "failed" for row in latest_attempt_rows)
+            and latest.get("status") == "complete"
+        ):
+            state_anomalies.append(
+                f"failed state precedes completion within latest attempt for "
+                f"{identity}"
+            )
+        superseded_failed_state_rows += sum(
+            row.get("status") == "failed"
+            and int(row["attempt"]) < maximum_attempt
+            for row in identity_rows
+        )
+    for identity in sorted(set(grouped_state_rows) - set(expected_identities)):
+        state_anomalies.append(f"unexpected state identity: {identity}")
 
     default_budget = _budget_from_config(base_config)
     units: list[dict[str, Any]] = []
@@ -121,6 +159,7 @@ def build_campaign_progress(campaign_dir: str | Path) -> dict[str, Any]:
             {
                 "condition_id": condition_id,
                 "seed": seed,
+                "attempt": int(row["attempt"]) if row else None,
                 "status": status,
                 "run_id": run_id or None,
                 "observed_hand_summaries": observed_hands,
@@ -147,7 +186,7 @@ def build_campaign_progress(campaign_dir: str | Path) -> dict[str, Any]:
         ],
     ]
     return {
-        "schema_version": "agentmemeval_campaign_progress_v1",
+        "schema_version": "agentmemeval_campaign_progress_v2",
         "campaign_id": campaign.get("campaign_id"),
         "campaign_dir": str(root),
         "design": campaign.get("design"),
@@ -165,6 +204,18 @@ def build_campaign_progress(campaign_dir: str | Path) -> dict[str, Any]:
             6,
         ),
         "default_budget": default_budget,
+        "state_audit": {
+            "state_row_count": len(state_rows),
+            "latest_attempt_matrix_units": len(latest_by_identity),
+            "failed_state_rows": sum(
+                row.get("status") == "failed" for row in state_rows
+            ),
+            "superseded_failed_state_rows": superseded_failed_state_rows,
+            "latest_failed_matrix_units": sum(
+                row.get("status") == "failed"
+                for row in latest_by_identity.values()
+            ),
+        },
         "units": units,
         "anomalies": anomalies,
         "status": "consistent" if not anomalies else "inconsistent",
