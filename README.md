@@ -210,6 +210,9 @@ python tools/task4/build_study_report.py `
 异构 GPU、缺失归档 receipt 对、receipt schema/嵌套验证/hash/文件数不一致或
 未验证协议证据都会生成
 `interim_or_blocked_no_paper_conclusion`，不会把阶段性结果标记为论文结论。
+构建报告时还会重新读取 extraction receipt 指向的本地 archive、checksum、manifest
+和 extracted root，重新执行 archive checksum 与逐文件 manifest V2 验证；因此生成
+receipt 后发生的文件缺失、symlink 替换或内容漂移同样 fail-closed。
 输出包含中文总报告、P/E 效应总表、证据 SHA-256 索引和
 verified/blocked 状态表；输出目录必须不存在，避免覆盖旧报告。
 

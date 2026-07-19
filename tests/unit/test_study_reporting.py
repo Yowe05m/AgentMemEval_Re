@@ -9,6 +9,10 @@ from agentmemeval.evaluation.study_reporting import (
     _archive_pair_status,
     build_task4_study_report,
 )
+from agentmemeval.storage.snapshot_archive import (
+    build_snapshot_archive,
+    extract_snapshot_archive,
+)
 
 
 def test_study_report_is_ready_only_when_all_evidence_is_verified(
@@ -150,6 +154,19 @@ def test_archive_pair_rejects_cross_receipt_hash_mismatch(tmp_path: Path) -> Non
     assert (
         _archive_pair_status(build, extraction)
         == "blocked_pair_expected_archive_hash_mismatch"
+    )
+
+
+def test_archive_pair_rechecks_current_extracted_files(tmp_path: Path) -> None:
+    build_path, extraction_path = _archive_receipts(tmp_path, "campaign_p")
+    build = json.loads(build_path.read_text(encoding="utf-8"))
+    extraction = json.loads(extraction_path.read_text(encoding="utf-8"))
+    extracted_file = Path(extraction["extracted_root"]) / "evidence.json"
+    extracted_file.write_text('{"tampered": true}', encoding="utf-8")
+
+    assert (
+        _archive_pair_status(build, extraction)
+        == "blocked_current_local_extracted_manifest"
     )
 
 
@@ -330,71 +347,30 @@ def _seal(path: Path, *, ready: bool = True) -> Path:
 
 
 def _archive_receipts(root: Path, campaign: str) -> tuple[Path, Path]:
-    archive_sha256 = hashlib.sha256(f"{campaign}:archive".encode()).hexdigest()
-    manifest_sha256 = hashlib.sha256(f"{campaign}:manifest".encode()).hexdigest()
-    file_count = 20
-    source_verification = {
-        "schema_version": "task4_file_manifest_verification_v2",
-        "manifest_sha256": manifest_sha256,
-        "expected_file_count": file_count,
-        "verified_file_count": file_count,
-        "verified": True,
-        "status": "verified",
-    }
-    archive_verification = {
-        "schema_version": "task4_snapshot_archive_member_verification_v1",
-        "expected_file_count": file_count,
-        "verified_file_count": file_count,
-        "verified": True,
-        "status": "verified",
-    }
-    checksum_verification = {
-        "schema_version": "task4_snapshot_archive_checksum_verification_v1",
-        "archive_is_symlink": False,
-        "checksum_is_symlink": False,
-        "expected_sha256": archive_sha256,
-        "observed_sha256": archive_sha256,
-        "format_errors": [],
-        "hash_matches": True,
-        "verified": True,
-        "status": "verified",
-    }
     campaign_root = root / campaign
-    build = _json(
-        root / f"{campaign}_build_receipt.json",
-        {
-            "schema_version": "task4_snapshot_archive_receipt_v1",
-            "status": "verified",
-            "root": str(campaign_root),
-            "archive": str(root / f"{campaign}.tar.gz"),
-            "archive_size_bytes": 500,
-            "archive_sha256": archive_sha256,
-            "manifest": str(root / f"{campaign}.files.tsv"),
-            "manifest_sha256": manifest_sha256,
-            "file_count": file_count,
-            "total_uncompressed_size_bytes": 1000,
-            "checksum": str(root / f"{campaign}.sha256"),
-            "source_verification": source_verification,
-            "archive_verification": archive_verification,
-            "checksum_verification": checksum_verification,
-        },
+    campaign_root.mkdir()
+    (campaign_root / "evidence.json").write_text(
+        json.dumps({"campaign": campaign}),
+        encoding="utf-8",
     )
-    extraction = _json(
-        root / f"{campaign}_extraction_receipt.json",
-        {
-            "schema_version": "task4_snapshot_extraction_receipt_v1",
-            "status": "verified",
-            "archive": str(root / f"{campaign}.tar.gz"),
-            "checksum": str(root / f"{campaign}.sha256"),
-            "manifest": str(root / f"{campaign}.files.tsv"),
-            "manifest_sha256": manifest_sha256,
-            "output_dir": str(root / f"{campaign}_extracted"),
-            "extracted_root": str(root / f"{campaign}_extracted" / campaign),
-            "root_name": campaign,
-            "checksum_verification": checksum_verification,
-            "archive_verification": archive_verification,
-            "extracted_verification": source_verification,
-        },
+    archive = root / f"{campaign}.tar.gz"
+    manifest = root / f"{campaign}.files.tsv"
+    checksum = root / f"{campaign}.tar.gz.sha256"
+    build = root / f"{campaign}_build_receipt.json"
+    extraction = root / f"{campaign}_extraction_receipt.json"
+    build_snapshot_archive(
+        campaign_root,
+        archive,
+        manifest,
+        checksum,
+        build,
+    )
+    extract_snapshot_archive(
+        archive,
+        checksum,
+        manifest,
+        root / f"{campaign}_extracted",
+        extraction,
     )
     return build, extraction
 

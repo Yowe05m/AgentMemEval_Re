@@ -9,6 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from agentmemeval.storage.archive import verify_file_manifest
+from agentmemeval.storage.snapshot_archive import verify_archive_checksum
+
 ANALYSIS_SCHEMA = "task4_campaign_analysis_bundle_v3"
 STUDY_SPEC_SCHEMA = "task4_study_report_spec_v1"
 STUDY_BUNDLE_SCHEMA = "task4_study_report_bundle_v1"
@@ -568,7 +571,52 @@ def _archive_pair_status(
         return "blocked_pair_file_count_mismatch"
     if Path(str(build_receipt["root"])).name != extraction_receipt.get("root_name"):
         return "blocked_pair_root_name_mismatch"
+    local_status = _local_archive_material_status(
+        build_receipt,
+        extraction_receipt,
+    )
+    if local_status != "verified_current_local_archive_material":
+        return local_status
     return "verified_archive_build_extract_pair"
+
+
+def _local_archive_material_status(
+    build_receipt: dict[str, Any],
+    extraction_receipt: dict[str, Any],
+) -> str:
+    archive_path = Path(str(extraction_receipt.get("archive", "")))
+    checksum_path = Path(str(extraction_receipt.get("checksum", "")))
+    manifest_path = Path(str(extraction_receipt.get("manifest", "")))
+    extracted_root = Path(str(extraction_receipt.get("extracted_root", "")))
+    if not archive_path.is_file() or archive_path.is_symlink():
+        return "blocked_local_archive_missing_or_symlink"
+    if not checksum_path.is_file() or checksum_path.is_symlink():
+        return "blocked_local_checksum_missing_or_symlink"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        return "blocked_local_manifest_missing_or_symlink"
+    if not extracted_root.is_dir() or extracted_root.is_symlink():
+        return "blocked_local_extracted_root_missing_or_symlink"
+    try:
+        checksum = verify_archive_checksum(archive_path, checksum_path)
+        extracted = verify_file_manifest(extracted_root, manifest_path)
+        manifest_sha256 = _sha256(manifest_path)
+    except (OSError, UnicodeError, ValueError):
+        return "blocked_local_archive_material_unreadable"
+    if checksum.get("verified") is not True:
+        return "blocked_current_local_archive_checksum"
+    if checksum.get("observed_sha256") != build_receipt.get("archive_sha256"):
+        return "blocked_current_local_archive_hash_mismatch"
+    if manifest_sha256 != build_receipt.get("manifest_sha256"):
+        return "blocked_current_local_manifest_hash_mismatch"
+    if extracted.get("verified") is not True:
+        return "blocked_current_local_extracted_manifest"
+    if extracted.get("manifest_sha256") != build_receipt.get("manifest_sha256"):
+        return "blocked_current_local_extracted_manifest_hash_mismatch"
+    if extracted.get("expected_file_count") != build_receipt.get("file_count"):
+        return "blocked_current_local_expected_file_count_mismatch"
+    if extracted.get("verified_file_count") != build_receipt.get("file_count"):
+        return "blocked_current_local_verified_file_count_mismatch"
+    return "verified_current_local_archive_material"
 
 
 def _gpu_homogeneity(
