@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -32,10 +33,40 @@ BEHAVIOR_FREEZE_POLICY = {
         "max_structural_signature_share": 0.95,
     },
 }
+PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
+    "configs/campaigns/task4_campaign_e_pilot_parallel_v7_counterfactual_calibrated.yaml",
+    "src/agentmemeval/cli/main.py",
+    "src/agentmemeval/evaluation/pilot.py",
+    "tests/unit/test_campaign_p_gate.py",
+    "tests/unit/test_config_validation.py",
+    "tests/unit/test_pilot_power_plan.py",
+    "tools/task4/audit_pilot_runtime_equivalence.py",
+    "tools/task4/gate_campaign_p_before_e.py",
+    "tools/task4/start_campaign_e_v7_pilot.sh",
+}
+EXECUTION_ZERO_FIELDS = (
+    "fallback_count",
+    "memory_revision_fallback_count",
+    "reward_conservation_violation_count",
+    "stack_conservation_violation_count",
+)
+EXPECTED_P_MECHANISMS = {
+    "expr",
+    "fact_expr_async",
+    "fact_expr_sync",
+}
+EXPECTED_E_CONDITIONS = {
+    "fact_target",
+    "expr_target",
+    "sync_target",
+    "async_target",
+}
 
 
 def build_pilot_power_plan(
-    campaign_p: dict[str, Any], campaign_e: dict[str, Any]
+    campaign_p: dict[str, Any],
+    campaign_e: dict[str, Any],
+    runtime_equivalence_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the pre-registered P/E seed plan from complete pilot aggregates."""
 
@@ -46,31 +77,78 @@ def build_pilot_power_plan(
     e_runtime = campaign_e.get("runtime_homogeneity", {})
     p_identity = p_runtime.get("identity") if isinstance(p_runtime, dict) else None
     e_identity = e_runtime.get("identity") if isinstance(e_runtime, dict) else None
+    runtime_identity_mode = "missing_or_invalid"
     if not isinstance(p_identity, dict) or not isinstance(e_identity, dict):
         blockers.append("campaign P/E runtime identities are missing")
     elif p_identity != e_identity:
-        blockers.append("campaign P/E runtime identities differ")
+        runtime_blockers = _runtime_equivalence_blockers(
+            p_identity,
+            e_identity,
+            runtime_equivalence_audit,
+        )
+        blockers.extend(runtime_blockers)
+        runtime_identity_mode = (
+            "pilot_only_verified_execution_equivalence"
+            if not runtime_blockers
+            else "mismatch_unverified"
+        )
+    else:
+        runtime_identity_mode = "exact_identity"
     contrasts: dict[str, list[float]] = {}
-
-    p_estimand = (
+    p_estimand_container = (
         campaign_p.get("aggregate_metrics", {})
         .get("paired_estimand_descriptive", {})
-        .get("effects_by_mechanism", {})
+    )
+    p_estimand = (
+        p_estimand_container.get("effects_by_mechanism", {})
+        if isinstance(p_estimand_container, dict)
+        else {}
+    )
+    e_comparisons = campaign_e.get("paired_comparisons", {})
+    endpoint = str(campaign_e.get("primary_endpoint", "final_test_bb_per_100"))
+    p_seeds = _validate_power_contracts(
+        campaign_p,
+        campaign_e,
+        p_estimand_container,
+        p_estimand,
+        e_comparisons,
+        endpoint,
+        blockers,
     )
     if isinstance(p_estimand, dict):
         for mechanism, effects in sorted(p_estimand.items()):
-            contrasts[f"campaign_p:{mechanism}_vs_fact"] = _float_list(effects)
+            parsed_effects = _float_list(effects)
+            if len(parsed_effects) != len(p_seeds):
+                blockers.append(
+                    f"campaign_p:{mechanism}_vs_fact effect count mismatch: "
+                    f"{len(parsed_effects)}/{len(p_seeds)}"
+                )
+            contrasts[f"campaign_p:{mechanism}_vs_fact"] = parsed_effects
 
-    e_comparisons = campaign_e.get("paired_comparisons", {})
-    endpoint = str(campaign_e.get("primary_endpoint", "final_test_bb_per_100"))
     if isinstance(e_comparisons, dict):
         for condition, comparison in sorted(e_comparisons.items()):
-            effects = (
-                comparison.get("metrics", {}).get(endpoint, {}).get("effects", [])
+            metric = (
+                comparison.get("metrics", {}).get(endpoint, {})
                 if isinstance(comparison, dict)
-                else []
+                else {}
             )
-            contrasts[f"campaign_e:{condition}_vs_no_memory"] = _float_list(effects)
+            effects = _float_list(
+                metric.get("effects", {}) if isinstance(metric, dict) else {}
+            )
+            matched_seeds = _int_list(
+                metric.get("matched_seeds", {}) if isinstance(metric, dict) else {}
+            )
+            if matched_seeds != p_seeds:
+                blockers.append(
+                    f"campaign_e:{condition}_vs_no_memory matched seeds mismatch: "
+                    f"{matched_seeds}/{p_seeds}"
+                )
+            if len(effects) != len(p_seeds):
+                blockers.append(
+                    f"campaign_e:{condition}_vs_no_memory effect count mismatch: "
+                    f"{len(effects)}/{len(p_seeds)}"
+                )
+            contrasts[f"campaign_e:{condition}_vs_no_memory"] = effects
 
     if not contrasts:
         blockers.append("pilot aggregates contain no paired primary-endpoint contrasts")
@@ -114,6 +192,16 @@ def build_pilot_power_plan(
         ),
         "planning_method": "paired_normal_approximation_for_planning_only",
         "no_silent_resource_cap": True,
+        "runtime_identity_mode": runtime_identity_mode,
+        "runtime_equivalence_audit_schema_version": (
+            runtime_equivalence_audit.get("schema_version")
+            if runtime_identity_mode == "pilot_only_verified_execution_equivalence"
+            and runtime_equivalence_audit is not None
+            else None
+        ),
+        "formal_homogeneity_not_granted": (
+            runtime_identity_mode == "pilot_only_verified_execution_equivalence"
+        ),
     }
 
 
@@ -125,23 +213,56 @@ def build_pilot_freeze_proposal(
     campaign_e_metrics: list[dict[str, Any]],
     campaign_e_protocol_audits: list[dict[str, Any]],
     retrieval_review_audit: dict[str, Any],
+    runtime_equivalence_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Combine power, behavior, execution, and retrieval freeze gates."""
 
-    power_plan = build_pilot_power_plan(campaign_p, campaign_e)
-    behavior = calibrate_behavior_thresholds(
-        campaign_p_metrics,
-        _evaluation_target_ids_by_run(campaign_p_protocol_audits),
+    power_plan = build_pilot_power_plan(
+        campaign_p,
+        campaign_e,
+        runtime_equivalence_audit,
     )
-    execution_blockers = [
-        f"campaign_p run {index} execution health is not valid"
-        for index, audit in enumerate(campaign_p_protocol_audits)
-        if dict(audit.get("execution_health", {})).get("valid") is not True
-    ]
+    p_targets, p_target_blockers = _evaluation_target_ids_by_run(
+        campaign_p_protocol_audits,
+        "campaign_p",
+    )
+    e_targets, e_target_blockers = _evaluation_target_ids_by_run(
+        campaign_e_protocol_audits,
+        "campaign_e",
+    )
+    target_blockers = [*p_target_blockers, *e_target_blockers]
+    behavior = (
+        calibrate_behavior_thresholds(
+            [*campaign_p_metrics, *campaign_e_metrics],
+            [*p_targets, *e_targets],
+            [
+                *[
+                    f"campaign_p run {index}"
+                    for index in range(len(campaign_p_metrics))
+                ],
+                *[
+                    f"campaign_e run {index}"
+                    for index in range(len(campaign_e_metrics))
+                ],
+            ],
+        )
+        if not target_blockers
+        else {
+            "status": "blocked_missing_evaluation_targets",
+            "blockers": target_blockers,
+            "policy": BEHAVIOR_FREEZE_POLICY,
+            "thresholds": {},
+        }
+    )
+    execution_blockers = _execution_health_blockers(
+        campaign_p_protocol_audits,
+        "campaign_p",
+    )
     execution_blockers.extend(
-        f"campaign_e run {index} execution health is not valid"
-        for index, audit in enumerate(campaign_e_protocol_audits)
-        if dict(audit.get("execution_health", {})).get("valid") is not True
+        _execution_health_blockers(
+            campaign_e_protocol_audits,
+            "campaign_e",
+        )
     )
     retrieval_blockers = [
         str(item) for item in retrieval_review_audit.get("blockers", [])
@@ -223,6 +344,7 @@ def build_pilot_freeze_proposal_from_paths(
     campaign_p_dir: str | Path,
     campaign_e_dir: str | Path,
     retrieval_review_audit_path: str | Path,
+    runtime_equivalence_audit_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Load only completed P/E leaf evidence and build the immutable proposal."""
 
@@ -241,6 +363,11 @@ def build_pilot_freeze_proposal_from_paths(
     ]
     e_metrics = [_read_json(Path(row["run_dir"]) / "metrics.json") for row in e_completed]
     retrieval_review = _read_json(Path(retrieval_review_audit_path))
+    runtime_equivalence = (
+        _read_json(Path(runtime_equivalence_audit_path))
+        if runtime_equivalence_audit_path is not None
+        else None
+    )
     proposal = build_pilot_freeze_proposal(
         p_aggregate,
         e_aggregate,
@@ -249,14 +376,96 @@ def build_pilot_freeze_proposal_from_paths(
         e_metrics,
         e_audits,
         retrieval_review,
+        runtime_equivalence,
     )
     proposal["campaign_p_evidence"] = p_evidence
     proposal["campaign_e_evidence"] = e_evidence
+    proposal["campaign_p_aggregate_evidence"] = {
+        "path": str(Path(campaign_p_aggregate_path).resolve()),
+        "sha256": _sha256_file(Path(campaign_p_aggregate_path)),
+        "schema_version": p_aggregate.get("schema_version"),
+    }
+    proposal["campaign_e_aggregate_evidence"] = {
+        "path": str(Path(campaign_e_aggregate_path).resolve()),
+        "sha256": _sha256_file(Path(campaign_e_aggregate_path)),
+        "schema_version": e_aggregate.get("schema_version"),
+    }
+    proposal["campaign_p_leaf_evidence"] = _leaf_evidence(p_completed)
+    proposal["campaign_e_leaf_evidence"] = _leaf_evidence(e_completed)
     proposal["retrieval_review_evidence"] = {
         "path": str(Path(retrieval_review_audit_path).resolve()),
+        "sha256": _sha256_file(Path(retrieval_review_audit_path)),
         "schema_version": retrieval_review.get("schema_version"),
     }
+    proposal["runtime_equivalence_evidence"] = (
+        {
+            "path": str(Path(runtime_equivalence_audit_path).resolve()),
+            "sha256": _sha256_file(Path(runtime_equivalence_audit_path)),
+            "schema_version": runtime_equivalence.get("schema_version"),
+        }
+        if runtime_equivalence_audit_path is not None
+        and runtime_equivalence is not None
+        else None
+    )
     return proposal
+
+
+def build_pilot_runtime_equivalence_audit(
+    campaign_p: dict[str, Any],
+    campaign_e: dict[str, Any],
+    changed_paths: list[str],
+) -> dict[str, Any]:
+    """Prove Pilot execution equivalence across orchestration-only commits."""
+
+    blockers: list[str] = []
+    p_identity = dict(campaign_p.get("runtime_homogeneity", {})).get("identity")
+    e_identity = dict(campaign_e.get("runtime_homogeneity", {})).get("identity")
+    if not isinstance(p_identity, dict) or not isinstance(e_identity, dict):
+        blockers.append("campaign P/E runtime identities are missing")
+        p_identity = {}
+        e_identity = {}
+    p_code = _pairs_to_dict(p_identity.get("code", {}))
+    e_code = _pairs_to_dict(e_identity.get("code", {}))
+    p_commit = str(p_code.get("commit", ""))
+    e_commit = str(e_code.get("commit", ""))
+    if not p_commit or not e_commit:
+        blockers.append("campaign P/E code commits are missing")
+    if p_code.get("dirty") is not False or e_code.get("dirty") is not False:
+        blockers.append("campaign P/E runtime identity includes a dirty worktree")
+    p_non_code = _without_code_identity(p_identity)
+    e_non_code = _without_code_identity(e_identity)
+    if p_non_code != e_non_code:
+        blockers.append("campaign P/E non-code runtime identities differ")
+    normalized_paths = sorted(
+        {str(path).replace("\\", "/").lstrip("./") for path in changed_paths}
+    )
+    disallowed = sorted(
+        set(normalized_paths) - PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS
+    )
+    if disallowed:
+        blockers.append(f"execution-relevant or unregistered paths changed: {disallowed}")
+    return {
+        "schema_version": "task4_pilot_runtime_equivalence_audit_v1",
+        "campaign_p_code_sha": p_commit,
+        "campaign_e_code_sha": e_commit,
+        "campaign_p_runtime_identity_sha256": _json_sha256(p_identity),
+        "campaign_e_runtime_identity_sha256": _json_sha256(e_identity),
+        "non_code_runtime_identity_sha256": (
+            _json_sha256(p_non_code) if p_non_code == e_non_code else None
+        ),
+        "changed_paths": normalized_paths,
+        "allowed_changed_paths_policy": sorted(
+            PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS
+        ),
+        "disallowed_changed_paths": disallowed,
+        "formal_homogeneity_not_granted": True,
+        "blockers": blockers,
+        "status": (
+            "verified_execution_runtime_equivalent_for_pilot_power_only"
+            if not blockers
+            else "no_go_runtime_equivalence_unverified"
+        ),
+    }
 
 
 def _completed_state_rows(
@@ -294,6 +503,7 @@ def _completed_state_rows(
 def calibrate_behavior_thresholds(
     metrics_list: list[dict[str, Any]],
     agent_ids_by_run: list[list[str]] | None = None,
+    run_labels: list[str] | None = None,
 ) -> dict[str, Any]:
     """Apply the outcome-independent quantile-plus-domain-cap freeze policy."""
 
@@ -301,6 +511,11 @@ def calibrate_behavior_thresholds(
         raise ValueError(
             "agent_ids_by_run length must match metrics_list length: "
             f"{len(agent_ids_by_run)} != {len(metrics_list)}"
+        )
+    if run_labels is not None and len(run_labels) != len(metrics_list):
+        raise ValueError(
+            "run_labels length must match metrics_list length: "
+            f"{len(run_labels)} != {len(metrics_list)}"
         )
     samples: dict[str, list[float]] = {
         "vpip": [],
@@ -437,7 +652,14 @@ def calibrate_behavior_thresholds(
         ]
     ]
     failed = [index for index, audit in enumerate(audits) if audit.get("status") != "passed"]
-    freeze_blockers = [f"campaign_p run {index} fails frozen behavior gates" for index in failed]
+    freeze_blockers = [
+        (
+            f"{run_labels[index]} fails frozen behavior gates"
+            if run_labels is not None
+            else f"run {index} fails frozen behavior gates"
+        )
+        for index in failed
+    ]
     return {
         "status": "frozen" if not freeze_blockers else "blocked_pilot_behavior_degenerate",
         "blockers": freeze_blockers,
@@ -446,22 +668,56 @@ def calibrate_behavior_thresholds(
         "pilot_domain_gate_thresholds": domain_thresholds,
         "sample_counts": {name: len(values) for name, values in samples.items()},
         "evaluated_agent_ids_by_run": evaluated_ids_by_run,
+        "run_labels": (
+            list(run_labels)
+            if run_labels is not None
+            else [f"run {index}" for index in range(len(metrics_list))]
+        ),
         "failed_run_indexes": failed,
     }
 
 
 def _evaluation_target_ids_by_run(
     protocol_audits: list[dict[str, Any]],
-) -> list[list[str]]:
+    label: str,
+) -> tuple[list[list[str]], list[str]]:
     targets_by_run: list[list[str]] = []
+    blockers: list[str] = []
     for index, audit in enumerate(protocol_audits):
         targets = audit.get("evaluation_target_ids", [])
         if not isinstance(targets, list) or not targets:
-            raise ValueError(
-                f"campaign_p protocol audit {index} lacks evaluation_target_ids"
+            blockers.append(
+                f"{label} protocol audit {index} lacks evaluation_target_ids"
             )
-        targets_by_run.append([str(value) for value in targets])
-    return targets_by_run
+            targets_by_run.append([])
+        else:
+            targets_by_run.append([str(value) for value in targets])
+    return targets_by_run, blockers
+
+
+def _execution_health_blockers(
+    protocol_audits: list[dict[str, Any]],
+    label: str,
+) -> list[str]:
+    blockers: list[str] = []
+    for index, audit in enumerate(protocol_audits):
+        execution = audit.get("execution_health", {})
+        if not isinstance(execution, dict) or execution.get("valid") is not True:
+            blockers.append(f"{label} run {index} execution health is not valid")
+            continue
+        if execution.get("status") != "passed":
+            blockers.append(
+                f"{label} run {index} execution health status is "
+                f"{execution.get('status')}"
+            )
+        for key in EXECUTION_ZERO_FIELDS:
+            value = _safe_int(execution.get(key))
+            if value != 0:
+                blockers.append(
+                    f"{label} run {index} execution {key}: "
+                    f"{execution.get(key)}"
+                )
+    return blockers
 
 
 def _quantile(values: list[float], probability: float) -> float:
@@ -485,9 +741,9 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _validate_pilot_aggregate(
     aggregate: dict[str, Any], label: str, blockers: list[str]
 ) -> None:
-    completed = int(aggregate.get("completed_run_count", 0))
-    expected = int(aggregate.get("expected_run_count", 0))
-    if expected < 1 or completed != expected:
+    completed = _safe_int(aggregate.get("completed_run_count"))
+    expected = _safe_int(aggregate.get("expected_run_count"))
+    if expected is None or expected < 1 or completed != expected:
         blockers.append(f"{label} matrix is incomplete: {completed}/{expected}")
     homogeneity = aggregate.get("runtime_homogeneity", {})
     if not isinstance(homogeneity, dict) or homogeneity.get("homogeneous") is not True:
@@ -496,7 +752,206 @@ def _validate_pilot_aggregate(
         blockers.append(f"{label} must be a complete descriptive-only pilot")
 
 
+def _validate_power_contracts(
+    campaign_p: dict[str, Any],
+    campaign_e: dict[str, Any],
+    p_estimand_container: Any,
+    p_estimand: Any,
+    e_comparisons: Any,
+    endpoint: str,
+    blockers: list[str],
+) -> list[int]:
+    p_contract = {
+        "design": "mixed_table",
+    }
+    e_contract = {
+        "design": "target_vs_seven_no_memory",
+        "estimand": "same_seed_cross_condition_target_effect_vs_no_memory",
+        "baseline_condition_id": "no_memory_target",
+        "primary_endpoint": "final_test_bb_per_100",
+        "multiple_comparison_method": "holm",
+    }
+    for key, expected in p_contract.items():
+        if campaign_p.get(key) != expected:
+            blockers.append(f"campaign_p {key} mismatch: {campaign_p.get(key)}")
+    for key, expected in e_contract.items():
+        if campaign_e.get(key) != expected:
+            blockers.append(f"campaign_e {key} mismatch: {campaign_e.get(key)}")
+    if endpoint != "final_test_bb_per_100":
+        blockers.append(f"campaign_e primary endpoint mismatch: {endpoint}")
+    if not isinstance(p_estimand_container, dict):
+        blockers.append("campaign_p paired estimand is missing")
+        return []
+    paired_contract = {
+        "status": "descriptive_only",
+        "design": "A7-R_same_seed_table_run_paired_mechanism_effect",
+        "endpoint": "final_test_bb_per_100",
+        "baseline_mechanism": "fact",
+        "multiple_comparison_method": "holm",
+    }
+    for key, expected in paired_contract.items():
+        if p_estimand_container.get(key) != expected:
+            blockers.append(
+                f"campaign_p paired estimand {key} mismatch: "
+                f"{p_estimand_container.get(key)}"
+            )
+    p_seeds = _int_list(p_estimand_container.get("matched_seeds"))
+    if not p_seeds:
+        blockers.append("campaign_p paired estimand matched_seeds is missing")
+    if _safe_int(p_estimand_container.get("independent_seed_count")) != len(p_seeds):
+        blockers.append(
+            "campaign_p independent seed count does not match matched_seeds"
+        )
+    observed_p = set(p_estimand) if isinstance(p_estimand, dict) else set()
+    if observed_p != EXPECTED_P_MECHANISMS:
+        blockers.append(
+            "campaign_p contrasts mismatch: "
+            f"{sorted(str(value) for value in observed_p)}/"
+            f"{sorted(EXPECTED_P_MECHANISMS)}"
+        )
+    observed_e = set(e_comparisons) if isinstance(e_comparisons, dict) else set()
+    if observed_e != EXPECTED_E_CONDITIONS:
+        blockers.append(
+            "campaign_e contrasts mismatch: "
+            f"{sorted(str(value) for value in observed_e)}/"
+            f"{sorted(EXPECTED_E_CONDITIONS)}"
+        )
+    return p_seeds
+
+
 def _float_list(values: Any) -> list[float]:
     if not isinstance(values, list):
         return []
-    return [float(value) for value in values]
+    try:
+        result = [float(value) for value in values]
+    except (TypeError, ValueError):
+        return []
+    return result if all(math.isfinite(value) for value in result) else []
+
+
+def _leaf_evidence(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for row in rows:
+        run_dir = Path(row["run_dir"])
+        metrics_path = run_dir / "metrics.json"
+        protocol_path = run_dir / "protocol_audit.json"
+        evidence.append(
+            {
+                "condition_id": row.get("condition_id"),
+                "seed": _safe_int(row.get("seed")),
+                "attempt": _safe_int(row.get("attempt")),
+                "run_id": row.get("run_id"),
+                "run_dir": str(run_dir),
+                "metrics_sha256": _sha256_file(metrics_path),
+                "protocol_audit_sha256": _sha256_file(protocol_path),
+            }
+        )
+    return sorted(
+        evidence,
+        key=lambda item: (
+            str(item["condition_id"]),
+            int(item["seed"] or 0),
+            int(item["attempt"] or 0),
+        ),
+    )
+
+
+def _int_list(values: Any) -> list[int]:
+    if not isinstance(values, list):
+        return []
+    result = [_safe_int(value) for value in values]
+    return [int(value) for value in result if value is not None]
+
+
+def _runtime_equivalence_blockers(
+    p_identity: dict[str, Any],
+    e_identity: dict[str, Any],
+    audit: dict[str, Any] | None,
+) -> list[str]:
+    if audit is None:
+        return ["campaign P/E runtime identities differ"]
+    blockers: list[str] = []
+    if audit.get("schema_version") != "task4_pilot_runtime_equivalence_audit_v1":
+        blockers.append("pilot runtime-equivalence audit schema is invalid")
+    if (
+        audit.get("status")
+        != "verified_execution_runtime_equivalent_for_pilot_power_only"
+        or audit.get("blockers") != []
+    ):
+        blockers.append("pilot runtime-equivalence audit is not verified")
+    if audit.get("formal_homogeneity_not_granted") is not True:
+        blockers.append("pilot runtime-equivalence audit lacks formal-use prohibition")
+    p_code = _pairs_to_dict(p_identity.get("code", {}))
+    e_code = _pairs_to_dict(e_identity.get("code", {}))
+    expected = {
+        "campaign_p_code_sha": str(p_code.get("commit", "")),
+        "campaign_e_code_sha": str(e_code.get("commit", "")),
+        "campaign_p_runtime_identity_sha256": _json_sha256(p_identity),
+        "campaign_e_runtime_identity_sha256": _json_sha256(e_identity),
+    }
+    for key, value in expected.items():
+        if audit.get(key) != value:
+            blockers.append(f"pilot runtime-equivalence audit mismatch for {key}")
+    if _without_code_identity(p_identity) != _without_code_identity(e_identity):
+        blockers.append("campaign P/E non-code runtime identities differ")
+    if audit.get("disallowed_changed_paths") != []:
+        blockers.append("pilot runtime-equivalence audit has disallowed changed paths")
+    reported_changed_paths = audit.get("changed_paths")
+    if not isinstance(reported_changed_paths, list):
+        blockers.append("pilot runtime-equivalence audit lacks changed_paths")
+    else:
+        normalized = {
+            str(path).replace("\\", "/").lstrip("./")
+            for path in reported_changed_paths
+        }
+        if normalized - PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS:
+            blockers.append(
+                "pilot runtime-equivalence audit reports unregistered changed paths"
+            )
+    if audit.get("allowed_changed_paths_policy") != sorted(
+        PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS
+    ):
+        blockers.append("pilot runtime-equivalence audit policy is stale or altered")
+    return blockers
+
+
+def _without_code_identity(identity: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in identity.items() if key != "code"}
+
+
+def _pairs_to_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, list):
+        try:
+            return {str(key): item for key, item in value}
+        except (TypeError, ValueError):
+            return {}
+    return {}
+
+
+def _json_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _safe_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None

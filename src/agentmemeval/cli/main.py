@@ -95,6 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pilot_plan.add_argument("--campaign-p", required=True, help="Campaign P aggregate JSON")
     pilot_plan.add_argument("--campaign-e", required=True, help="Campaign E aggregate JSON")
+    pilot_plan.add_argument(
+        "--runtime-equivalence-audit",
+        help="仅当 P/E commit 不同时使用的 Pilot-only 执行等价审计 JSON",
+    )
     pilot_plan.add_argument("--output", required=True, help="新功效计划 JSON；拒绝覆盖")
     pilot_freeze = sub.add_parser(
         "pilot-freeze", help="从完整 Pilot 工件生成行为、功效、执行和检索冻结提案"
@@ -107,6 +111,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--retrieval-review-audit",
         required=True,
         help="独立人工相关性标签生成的检索阈值审计 JSON",
+    )
+    pilot_freeze.add_argument(
+        "--runtime-equivalence-audit",
+        help="仅当 P/E commit 不同时使用的 Pilot-only 执行等价审计 JSON",
     )
     pilot_freeze.add_argument("--output", required=True, help="新冻结提案 JSON；拒绝覆盖")
     formal_freeze = sub.add_parser(
@@ -196,13 +204,29 @@ def _pilot_plan(args: argparse.Namespace) -> int:
 
     campaign_p = json.loads(Path(args.campaign_p).read_text(encoding="utf-8"))
     campaign_e = json.loads(Path(args.campaign_e).read_text(encoding="utf-8"))
-    plan = build_pilot_power_plan(campaign_p, campaign_e)
+    runtime_equivalence = (
+        json.loads(
+            Path(args.runtime_equivalence_audit).read_text(encoding="utf-8")
+        )
+        if args.runtime_equivalence_audit
+        else None
+    )
+    plan = build_pilot_power_plan(
+        campaign_p,
+        campaign_e,
+        runtime_equivalence,
+    )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as handle:
         json.dump(plan, handle, ensure_ascii=False, indent=2)
     print(json.dumps({"output": str(output), **plan}, ensure_ascii=False, indent=2))
-    return 0
+    return (
+        0
+        if plan["status"]
+        == "power_plan_ready_requires_behavior_execution_and_runtime_freeze"
+        else 2
+    )
 
 
 def _pilot_freeze(args: argparse.Namespace) -> int:
@@ -214,13 +238,18 @@ def _pilot_freeze(args: argparse.Namespace) -> int:
         args.campaign_p_dir,
         args.campaign_e_dir,
         args.retrieval_review_audit,
+        args.runtime_equivalence_audit,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as handle:
         json.dump(proposal, handle, ensure_ascii=False, indent=2)
     print(json.dumps({"output": str(output), **proposal}, ensure_ascii=False, indent=2))
-    return 0
+    return (
+        0
+        if proposal["status"] == "ready_to_generate_immutable_formal_configs"
+        else 2
+    )
 
 
 def _formal_freeze(args: argparse.Namespace) -> int:

@@ -7,12 +7,14 @@ from agentmemeval.evaluation.pilot import (
     build_pilot_freeze_proposal,
     build_pilot_freeze_proposal_from_paths,
     build_pilot_power_plan,
+    build_pilot_runtime_equivalence_audit,
     calibrate_behavior_thresholds,
 )
 
 
 def _p() -> dict[str, object]:
     return {
+        "design": "mixed_table",
         "status": "descriptive_only",
         "completed_run_count": 3,
         "expected_run_count": 3,
@@ -22,8 +24,16 @@ def _p() -> dict[str, object]:
         },
         "aggregate_metrics": {
             "paired_estimand_descriptive": {
+                "status": "descriptive_only",
+                "independent_seed_count": 3,
+                "matched_seeds": [1, 2, 3],
+                "design": "A7-R_same_seed_table_run_paired_mechanism_effect",
+                "endpoint": "final_test_bb_per_100",
+                "baseline_mechanism": "fact",
+                "multiple_comparison_method": "holm",
                 "effects_by_mechanism": {
                     "expr": [1.0, 3.0, 5.0],
+                    "fact_expr_async": [3.0, 2.0, 1.0],
                     "fact_expr_sync": [2.0, 4.0, 6.0],
                 }
             }
@@ -33,9 +43,13 @@ def _p() -> dict[str, object]:
 
 def _e() -> dict[str, object]:
     return {
+        "design": "target_vs_seven_no_memory",
+        "estimand": "same_seed_cross_condition_target_effect_vs_no_memory",
+        "baseline_condition_id": "no_memory_target",
+        "multiple_comparison_method": "holm",
         "status": "descriptive_only",
-        "completed_run_count": 6,
-        "expected_run_count": 6,
+        "completed_run_count": 15,
+        "expected_run_count": 15,
         "runtime_homogeneity": {
             "homogeneous": True,
             "identity": {"code": [["commit", "same"], ["dirty", False]]},
@@ -44,9 +58,36 @@ def _e() -> dict[str, object]:
         "paired_comparisons": {
             "fact_target": {
                 "metrics": {
-                    "final_test_bb_per_100": {"effects": [2.0, 5.0, 8.0]}
+                    "final_test_bb_per_100": {
+                        "matched_seeds": [1, 2, 3],
+                        "effects": [2.0, 5.0, 8.0],
+                    }
                 }
-            }
+            },
+            "expr_target": {
+                "metrics": {
+                    "final_test_bb_per_100": {
+                        "matched_seeds": [1, 2, 3],
+                        "effects": [1.0, 4.0, 7.0],
+                    }
+                }
+            },
+            "sync_target": {
+                "metrics": {
+                    "final_test_bb_per_100": {
+                        "matched_seeds": [1, 2, 3],
+                        "effects": [3.0, 6.0, 9.0],
+                    }
+                }
+            },
+            "async_target": {
+                "metrics": {
+                    "final_test_bb_per_100": {
+                        "matched_seeds": [1, 2, 3],
+                        "effects": [4.0, 2.0, 5.0],
+                    }
+                }
+            },
         },
     }
 
@@ -66,15 +107,17 @@ def test_pilot_power_plan_uses_max_requirement_without_capping() -> None:
     ]
     assert plan["required_seed_pairs_primary_max_across_p_and_e"] == max(requirements)
     assert plan["no_silent_resource_cap"] is True
+    assert plan["runtime_identity_mode"] == "exact_identity"
+    assert plan["formal_homogeneity_not_granted"] is False
 
 
 def test_pilot_power_plan_blocks_incomplete_matrix() -> None:
     campaign_e = _e()
-    campaign_e["completed_run_count"] = 5
+    campaign_e["completed_run_count"] = 14
     plan = build_pilot_power_plan(_p(), campaign_e)
     assert plan["status"] == "blocked_invalid_or_incomplete_pilot"
     assert plan["required_seed_pairs_primary_max_across_p_and_e"] is None
-    assert "campaign_e matrix is incomplete: 5/6" in plan["blockers"]
+    assert "campaign_e matrix is incomplete: 14/15" in plan["blockers"]
 
 
 def test_pilot_power_plan_blocks_cross_campaign_runtime_mismatch() -> None:
@@ -85,6 +128,86 @@ def test_pilot_power_plan_blocks_cross_campaign_runtime_mismatch() -> None:
     plan = build_pilot_power_plan(_p(), campaign_e)
     assert plan["status"] == "blocked_invalid_or_incomplete_pilot"
     assert "campaign P/E runtime identities differ" in plan["blockers"]
+
+
+def test_pilot_power_plan_blocks_missing_contrast_or_seed_mismatch() -> None:
+    campaign_e = _e()
+    del campaign_e["paired_comparisons"]["async_target"]  # type: ignore[index]
+    campaign_e["paired_comparisons"]["fact_target"]["metrics"][  # type: ignore[index]
+        "final_test_bb_per_100"
+    ]["matched_seeds"] = [1, 3, 2]
+    plan = build_pilot_power_plan(_p(), campaign_e)
+    assert plan["status"] == "blocked_invalid_or_incomplete_pilot"
+    assert any("campaign_e contrasts mismatch" in item for item in plan["blockers"])
+    assert any("matched seeds mismatch" in item for item in plan["blockers"])
+
+
+def test_pilot_power_plan_accepts_verified_orchestration_only_equivalence() -> None:
+    campaign_e = _e()
+    campaign_e["runtime_homogeneity"]["identity"] = {  # type: ignore[index]
+        "code": [["commit", "later"], ["dirty", False]]
+    }
+    changed_paths = [
+        "tools/task4/gate_campaign_p_before_e.py",
+        "configs/campaigns/"
+        "task4_campaign_e_pilot_parallel_v7_counterfactual_calibrated.yaml",
+    ]
+    audit = build_pilot_runtime_equivalence_audit(
+        _p(),
+        campaign_e,
+        changed_paths,
+    )
+    assert audit["status"] == (
+        "verified_execution_runtime_equivalent_for_pilot_power_only"
+    )
+    assert audit["formal_homogeneity_not_granted"] is True
+    plan = build_pilot_power_plan(_p(), campaign_e, audit)
+    assert plan["status"] == (
+        "power_plan_ready_requires_behavior_execution_and_runtime_freeze"
+    )
+    assert plan["blockers"] == []
+    assert plan["runtime_identity_mode"] == (
+        "pilot_only_verified_execution_equivalence"
+    )
+    assert plan["formal_homogeneity_not_granted"] is True
+
+
+def test_pilot_runtime_equivalence_rejects_execution_relevant_change() -> None:
+    campaign_e = _e()
+    campaign_e["runtime_homogeneity"]["identity"] = {  # type: ignore[index]
+        "code": [["commit", "later"], ["dirty", False]]
+    }
+    audit = build_pilot_runtime_equivalence_audit(
+        _p(),
+        campaign_e,
+        ["src/agentmemeval/memory/mechanisms.py"],
+    )
+    assert audit["status"] == "no_go_runtime_equivalence_unverified"
+    assert audit["disallowed_changed_paths"] == [
+        "src/agentmemeval/memory/mechanisms.py"
+    ]
+    plan = build_pilot_power_plan(_p(), campaign_e, audit)
+    assert plan["status"] == "blocked_invalid_or_incomplete_pilot"
+    assert "pilot runtime-equivalence audit is not verified" in plan["blockers"]
+
+
+def test_pilot_power_plan_rejects_stale_runtime_equivalence_audit() -> None:
+    campaign_e = _e()
+    campaign_e["runtime_homogeneity"]["identity"] = {  # type: ignore[index]
+        "code": [["commit", "later"], ["dirty", False]]
+    }
+    audit = build_pilot_runtime_equivalence_audit(
+        _p(),
+        campaign_e,
+        ["tools/task4/gate_campaign_p_before_e.py"],
+    )
+    audit["campaign_e_code_sha"] = "stale"
+    plan = build_pilot_power_plan(_p(), campaign_e, audit)
+    assert plan["status"] == "blocked_invalid_or_incomplete_pilot"
+    assert (
+        "pilot runtime-equivalence audit mismatch for campaign_e_code_sha"
+        in plan["blockers"]
+    )
 
 
 def _metrics(
@@ -129,6 +252,19 @@ def _review() -> dict[str, object]:
     }
 
 
+def _execution_health(**overrides: object) -> dict[str, object]:
+    result: dict[str, object] = {
+        "valid": True,
+        "status": "passed",
+        "fallback_count": 0,
+        "memory_revision_fallback_count": 0,
+        "reward_conservation_violation_count": 0,
+        "stack_conservation_violation_count": 0,
+    }
+    result.update(overrides)
+    return result
+
+
 def test_behavior_freeze_uses_quantiles_and_domain_caps() -> None:
     freeze = calibrate_behavior_thresholds([_metrics(), _metrics(), _metrics()])
     assert freeze["status"] == "frozen"
@@ -170,13 +306,19 @@ def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
     p_audits = [
         {
             "evaluation_target_ids": ["fact_00"],
-            "execution_health": {"valid": True},
+            "execution_health": _execution_health(),
         }
         for _ in metrics
     ]
-    e_audits = [{"execution_health": {"valid": True}} for _ in range(6)]
+    e_audits = [
+        {
+            "evaluation_target_ids": ["fact_00"],
+            "execution_health": _execution_health(),
+        }
+        for _ in range(15)
+    ]
     proposal = build_pilot_freeze_proposal(
-        _p(), _e(), metrics, p_audits, metrics * 2, e_audits, _review()
+        _p(), _e(), metrics, p_audits, metrics * 5, e_audits, _review()
     )
     assert proposal["status"] == "ready_to_generate_immutable_formal_configs"
     assert proposal["retrieval_freeze"] == {
@@ -187,25 +329,42 @@ def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
     }
     p_audits[0] = {
         "evaluation_target_ids": ["fact_00"],
-        "execution_health": {"valid": False},
+        "execution_health": _execution_health(valid=False),
     }
     blocked = build_pilot_freeze_proposal(
-        _p(), _e(), metrics, p_audits, metrics * 2, e_audits, _review()
+        _p(), _e(), metrics, p_audits, metrics * 5, e_audits, _review()
     )
     assert blocked["status"] == "no_go_pilot_freeze_blocked"
     assert blocked["execution_blockers"]
     p_audits[0] = {
         "evaluation_target_ids": ["fact_00"],
-        "execution_health": {"valid": True},
+        "execution_health": _execution_health(),
     }
-    e_audits[0] = {"execution_health": {"valid": False}}
+    e_audits[0] = {
+        "evaluation_target_ids": ["fact_00"],
+        "execution_health": _execution_health(valid=False),
+    }
     blocked_e = build_pilot_freeze_proposal(
-        _p(), _e(), metrics, p_audits, metrics * 2, e_audits, _review()
+        _p(), _e(), metrics, p_audits, metrics * 5, e_audits, _review()
     )
     assert "campaign_e run 0 execution health is not valid" in blocked_e[
         "execution_blockers"
     ]
-    fallback_metrics = [_metrics() for _ in range(6)]
+    e_audits[0] = {
+        "evaluation_target_ids": ["fact_00"],
+        "execution_health": _execution_health(fallback_count=1),
+    }
+    explicit_fallback_blocked = build_pilot_freeze_proposal(
+        _p(), _e(), metrics, p_audits, metrics * 5, e_audits, _review()
+    )
+    assert "campaign_e run 0 execution fallback_count: 1" in (
+        explicit_fallback_blocked["execution_blockers"]
+    )
+    e_audits[0] = {
+        "evaluation_target_ids": ["fact_00"],
+        "execution_health": _execution_health(),
+    }
+    fallback_metrics = [_metrics() for _ in range(15)]
     fallback_metrics[0]["primary_metrics"]["stage_per_agent"]["train"]["fact_00"][  # type: ignore[index]
         "memory"
     ]["revision_fallback_count"] = 1
@@ -215,6 +374,42 @@ def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
     assert (
         "campaign_e run 0 used deterministic experience revision fallback"
         in revision_blocked["execution_blockers"]
+    )
+
+
+def test_freeze_proposal_blocks_campaign_e_target_behavior_degeneracy() -> None:
+    p_metrics = [_metrics(), _metrics(), _metrics()]
+    e_metrics = [_metrics(fold_rate=1.0) for _ in range(15)]
+    p_audits = [
+        {
+            "evaluation_target_ids": ["fact_00"],
+            "execution_health": _execution_health(),
+        }
+        for _ in p_metrics
+    ]
+    e_audits = [
+        {
+            "evaluation_target_ids": ["fact_00"],
+            "execution_health": _execution_health(),
+        }
+        for _ in e_metrics
+    ]
+    proposal = build_pilot_freeze_proposal(
+        _p(),
+        _e(),
+        p_metrics,
+        p_audits,
+        e_metrics,
+        e_audits,
+        _review(),
+    )
+    assert proposal["status"] == "no_go_pilot_freeze_blocked"
+    assert proposal["behavior_freeze"]["status"] == (
+        "blocked_pilot_behavior_degenerate"
+    )
+    assert any(
+        "campaign_e run" in blocker
+        for blocker in proposal["behavior_freeze"]["blockers"]
     )
 
 
@@ -243,7 +438,7 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
             json.dumps(
                 {
                     "evaluation_target_ids": ["fact_00"],
-                    "execution_health": {"valid": True},
+                    "execution_health": _execution_health(),
                 }
             ),
             encoding="utf-8",
@@ -259,11 +454,17 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
         "\n".join(state_lines) + "\n", encoding="utf-8"
     )
     e_state_lines = [state_lines[0]]
-    for index in range(6):
+    for index in range(15):
         run_dir = tmp_path / f"e-run-{index}"
         run_dir.mkdir()
         (run_dir / "protocol_audit.json").write_text(
-            json.dumps({"execution_health": {"valid": True}}), encoding="utf-8"
+            json.dumps(
+                {
+                    "evaluation_target_ids": ["fact_00"],
+                    "execution_health": _execution_health(),
+                }
+            ),
+            encoding="utf-8",
         )
         (run_dir / "metrics.json").write_text(
             json.dumps(_metrics()), encoding="utf-8"
@@ -281,7 +482,12 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
     assert proposal["status"] == "ready_to_generate_immutable_formal_configs"
     assert proposal["campaign_p_evidence"]["completed_state_rows"] == 3
     assert proposal["campaign_p_evidence"]["ignored_noncomplete_state_rows"] == 1
-    assert proposal["campaign_e_evidence"]["completed_state_rows"] == 6
+    assert proposal["campaign_e_evidence"]["completed_state_rows"] == 15
+    assert len(proposal["campaign_p_leaf_evidence"]) == 3
+    assert len(proposal["campaign_e_leaf_evidence"]) == 15
+    assert proposal["campaign_p_aggregate_evidence"]["sha256"]
+    assert proposal["campaign_e_aggregate_evidence"]["sha256"]
+    assert proposal["retrieval_review_evidence"]["sha256"]
 
 
 def test_freeze_path_loader_prefers_relocated_campaign_leaf(tmp_path: Path) -> None:
@@ -293,7 +499,7 @@ def test_freeze_path_loader_prefers_relocated_campaign_leaf(tmp_path: Path) -> N
         "event_utc\tcondition_id\ttarget_mechanism\tseed\tattempt\tstatus\t"
         "run_id\trun_dir\tfailure_class\tmessage\n"
     )
-    for campaign_dir, prefix, count in ((p_dir, "p", 3), (e_dir, "e", 6)):
+    for campaign_dir, prefix, count in ((p_dir, "p", 3), (e_dir, "e", 15)):
         rows = [header.rstrip("\n")]
         for index in range(count):
             run_id = f"{prefix}{index}"
@@ -306,7 +512,7 @@ def test_freeze_path_loader_prefers_relocated_campaign_leaf(tmp_path: Path) -> N
                 json.dumps(
                     {
                         "evaluation_target_ids": ["fact_00"],
-                        "execution_health": {"valid": True},
+                        "execution_health": _execution_health(),
                     }
                 ),
                 encoding="utf-8",
