@@ -110,6 +110,30 @@ def test_task4_target_scoped_pilot_campaigns_are_valid_and_seed_paired() -> None
     assert len(seed_sets[0]) == 8
 
 
+def test_task4_counterfactual_v7_pilot_campaigns_are_valid_and_seed_paired() -> None:
+    root = Path(__file__).resolve().parents[2]
+    campaign_paths = [
+        root
+        / "configs/campaigns/"
+        "task4_campaign_p_pilot_parallel_v7_counterfactual_calibrated.yaml",
+        root
+        / "configs/campaigns/"
+        "task4_campaign_e_pilot_parallel_v7_counterfactual_calibrated.yaml",
+    ]
+    seed_sets: list[list[int]] = []
+    for path in campaign_paths:
+        raw = _read_campaign_yaml(path)
+        spec = raw["campaign"]
+        base_path = (path.parent / str(spec["base_experiment_config"])).resolve()
+        _validate_campaign_spec(spec, load_config(base_path))
+        seed_sets.append([int(seed) for seed in spec["seeds"]])
+        assert spec["max_parallel_runs"] == 4
+        assert "counterfactual_calibrated" in spec["protocol_label"]
+        assert "not_for_main_table" in spec["protocol_label"]
+    assert seed_sets[0] == seed_sets[1]
+    assert seed_sets[0] == list(range(2026072301, 2026072309))
+
+
 def test_task4_memory_debias_smoke_is_real_roster_and_not_for_paper() -> None:
     config = load_config(
         "configs/experiments/task4_campaign_p_memory_debias_smoke.yaml"
