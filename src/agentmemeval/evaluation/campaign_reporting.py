@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 TABLE_FIELDS = (
+    "campaign_status",
+    "paper_inference_eligible",
+    "analysis_classification",
     "design",
     "contrast",
     "endpoint",
@@ -39,6 +42,16 @@ def build_campaign_analysis(
     rows, paired = _extract_rows(aggregate)
     if not rows:
         raise ValueError("campaign aggregate contains no paired contrast rows")
+    campaign_status = str(aggregate.get("status", ""))
+    analysis_classification = _analysis_classification(campaign_status)
+    paper_inference_eligible = campaign_status == "ready"
+    common = {
+        "campaign_status": campaign_status,
+        "paper_inference_eligible": paper_inference_eligible,
+        "analysis_classification": analysis_classification,
+    }
+    for row in [*rows, *paired]:
+        row.update(common)
     table_path = output / "main_table.csv"
     paired_path = output / "paired_effects.csv"
     plot_data_path = output / "primary_effects_plot_data.csv"
@@ -47,12 +60,24 @@ def build_campaign_analysis(
     _write_csv(table_path, TABLE_FIELDS, rows)
     _write_csv(
         paired_path,
-        ("design", "contrast", "endpoint", "seed", "effect"),
+        (
+            "campaign_status",
+            "paper_inference_eligible",
+            "analysis_classification",
+            "design",
+            "contrast",
+            "endpoint",
+            "seed",
+            "effect",
+        ),
         paired,
     )
     _write_csv(
         plot_data_path,
         (
+            "campaign_status",
+            "paper_inference_eligible",
+            "analysis_classification",
             "contrast",
             "n_seed_pairs",
             "mean_effect",
@@ -61,18 +86,26 @@ def build_campaign_analysis(
         ),
         rows,
     )
-    _plot_primary_effects(rows, plot_path, plot_data_path)
+    _plot_primary_effects(
+        rows,
+        plot_path,
+        plot_data_path,
+        analysis_classification=analysis_classification,
+    )
     report_path.write_text(
         _report_text(aggregate, source, rows, paired, plot_data_path), encoding="utf-8"
     )
     outputs = [table_path, paired_path, plot_data_path, plot_path, report_path]
     manifest = {
-        "schema_version": "task4_campaign_analysis_bundle_v1",
+        "schema_version": "task4_campaign_analysis_bundle_v2",
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "source_aggregate": str(source),
         "source_aggregate_sha256": _sha256(source),
         "campaign_status": aggregate.get("status"),
         "analysis_is_descriptive_only": aggregate.get("status") == "descriptive_only",
+        "analysis_classification": analysis_classification,
+        "paper_inference_eligible": paper_inference_eligible,
+        "paper_conclusion_prohibited": not paper_inference_eligible,
         "table_row_count": len(rows),
         "paired_effect_row_count": len(paired),
         "outputs": {
@@ -177,7 +210,11 @@ def _table_row(
 
 
 def _plot_primary_effects(
-    rows: list[dict[str, Any]], path: Path, data_path: Path
+    rows: list[dict[str, Any]],
+    path: Path,
+    data_path: Path,
+    *,
+    analysis_classification: str,
 ) -> None:
     import matplotlib
 
@@ -205,7 +242,12 @@ def _plot_primary_effects(
     ax.set_xticks(positions, labels)
     ax.set_ylabel("Paired effect (BB/100)")
     ax.set_xlabel("Preregistered contrast and independent seed-pair count")
-    ax.set_title("AgentMemEval primary paired effects")
+    label = {
+        "pilot_descriptive_only": "PILOT DESCRIPTIVE — NOT FOR PAPER INFERENCE",
+        "formal_inference_ready": "FORMAL INFERENCE READY",
+        "blocked_or_underpowered": "BLOCKED/UNDERPOWERED — NO PAPER CONCLUSION",
+    }[analysis_classification]
+    ax.set_title(f"AgentMemEval primary paired effects\n{label}")
     ax.legend()
     ax.grid(axis="y", alpha=0.25)
     fig.tight_layout()
@@ -238,10 +280,17 @@ def _report_text(
         "## 解释边界",
         "",
     ]
-    if aggregate.get("status") == "descriptive_only":
+    status = str(aggregate.get("status", ""))
+    classification = _analysis_classification(status)
+    if classification == "pilot_descriptive_only":
         lines.append("该 Campaign 是独立 Pilot，只用于描述、阈值与功效规划，不进入 formal 推断。")
+    elif classification == "formal_inference_ready":
+        lines.append("该 aggregate 已满足冻结统计计划和预注册 seed 数的 formal 推断状态。")
     else:
-        lines.append("推断资格以 aggregate status、冻结统计计划和运行同质性审计为准。")
+        lines.append(
+            f"该 aggregate 状态为 `{status}`，属于 blocked/underpowered；"
+            "表格和图仅供诊断，禁止形成论文推断结论。"
+        )
     lines.extend(
         [
             "手牌、checkpoint 或同桌 Agent 未被当成独立样本；p 值仅在聚合器准入时报告。",
@@ -263,6 +312,14 @@ def _report_text(
         )
     lines.append("")
     return "\n".join(lines)
+
+
+def _analysis_classification(status: str) -> str:
+    if status == "descriptive_only":
+        return "pilot_descriptive_only"
+    if status == "ready":
+        return "formal_inference_ready"
+    return "blocked_or_underpowered"
 
 
 def _write_csv(path: Path, fields: tuple[str, ...], rows: list[dict[str, Any]]) -> None:

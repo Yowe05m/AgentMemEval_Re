@@ -33,6 +33,9 @@ def test_build_mixed_campaign_analysis_bundle(tmp_path: Path) -> None:
     output = tmp_path / "analysis"
     result = build_campaign_analysis(source, output)
     assert result["analysis_is_descriptive_only"] is True
+    assert result["paper_inference_eligible"] is False
+    assert result["paper_conclusion_prohibited"] is True
+    assert result["analysis_classification"] == "pilot_descriptive_only"
     assert result["paired_effect_row_count"] == 3
     assert (output / "primary_effects_plot.png").stat().st_size > 0
     with (output / "main_table.csv").open(
@@ -41,6 +44,7 @@ def test_build_mixed_campaign_analysis_bundle(tmp_path: Path) -> None:
         rows = list(csv.DictReader(handle))
     assert rows[0]["contrast"] == "expr_vs_fact"
     assert rows[0]["n_seed_pairs"] == "3"
+    assert rows[0]["paper_inference_eligible"] == "False"
     with pytest.raises(FileExistsError):
         build_campaign_analysis(source, output)
 
@@ -74,6 +78,9 @@ def test_build_campaign_e_analysis_uses_matched_seed_effects(tmp_path: Path) -> 
     output = tmp_path / "analysis-e"
     result = build_campaign_analysis(source, output)
     assert result["analysis_is_descriptive_only"] is False
+    assert result["paper_inference_eligible"] is True
+    assert result["paper_conclusion_prohibited"] is False
+    assert result["analysis_classification"] == "formal_inference_ready"
     with (output / "paired_effects.csv").open(
         "r", encoding="utf-8-sig", newline=""
     ) as handle:
@@ -82,3 +89,47 @@ def test_build_campaign_e_analysis_uses_matched_seed_effects(tmp_path: Path) -> 
         ("21", "2.0"),
         ("22", "-1.0"),
     ]
+    assert all(row["paper_inference_eligible"] == "True" for row in rows)
+
+
+def test_blocked_campaign_analysis_is_explicitly_not_paper_inference(
+    tmp_path: Path,
+) -> None:
+    effects = [2.0, -1.0]
+    summary = summarize_values(effects, bootstrap_samples=100)
+    aggregate = {
+        "design": "mixed_table",
+        "status": "insufficient_preregistered_seed_pairs",
+        "completed_run_count": 2,
+        "expected_run_count": 2,
+        "aggregate_metrics": {
+            "main_table": {
+                "endpoint": "final_test_bb_per_100",
+                "baseline_mechanism": "fact",
+                "matched_seeds": [31, 32],
+                "effects_by_mechanism": {"expr": effects},
+                "metrics": {"expr": summary},
+            }
+        },
+    }
+    source = tmp_path / "aggregate-blocked.json"
+    source.write_text(json.dumps(aggregate), encoding="utf-8")
+    output = tmp_path / "analysis-blocked"
+
+    result = build_campaign_analysis(source, output)
+
+    assert result["paper_inference_eligible"] is False
+    assert result["paper_conclusion_prohibited"] is True
+    assert result["analysis_classification"] == "blocked_or_underpowered"
+    report = (output / "campaign_analysis_report.md").read_text(
+        encoding="utf-8"
+    )
+    assert "禁止形成论文推断结论" in report
+    with (output / "primary_effects_plot_data.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["campaign_status"] == (
+        "insufficient_preregistered_seed_pairs"
+    )
+    assert rows[0]["paper_inference_eligible"] == "False"

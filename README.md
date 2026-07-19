@@ -149,7 +149,10 @@ python -m agentmemeval pilot-plan `
 
 任一 versioned campaign aggregate 都可一键重建不覆盖旧产物的统计包，包含
 `main_table.csv`、seed 级 `paired_effects.csv`、带 n 和 bootstrap 95% CI 的主终点图、
-中文分析报告及逐文件 SHA-256 manifest：
+中文分析报告及逐文件 SHA-256 manifest。V2 会把资格三态写入 manifest、全部 CSV、
+报告和图标题：`pilot_descriptive_only`、`formal_inference_ready`、
+`blocked_or_underpowered`；只有 aggregate status 为 `ready` 时
+`paper_inference_eligible=true`，其余状态显式禁止论文推断：
 
 ```powershell
 python tools/task4/build_campaign_analysis.py `
