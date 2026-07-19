@@ -1,3 +1,5 @@
+import json
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -190,6 +192,21 @@ def test_campaign_e_runs_append_only_matrix_and_resumes(tmp_path: Path) -> None:
             "async_target",
         )
     ]
+    events = [
+        json.loads(line)
+        for line in (campaign_dir / "campaign_events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    latest_finish_utc = None
+    rolling_start_count = 0
+    for event in events:
+        if event["event"] == "run_finished":
+            latest_finish_utc = datetime.fromisoformat(event["event_utc"])
+        elif event["event"] == "run_started" and latest_finish_utc is not None:
+            assert datetime.fromisoformat(event["event_utc"]) >= latest_finish_utc
+            rolling_start_count += 1
+    assert rolling_start_count == 8
     aggregate = yaml.safe_load(Path(first["aggregate_path"]).read_text(encoding="utf-8"))
     assert aggregate["estimand"] == (
         "same_seed_cross_condition_target_effect_vs_no_memory"

@@ -133,15 +133,6 @@ def run_campaign(path: str | Path, *, resume: bool = False) -> dict[str, Any]:
             campaign_dir=campaign_dir,
         )
         run_dir = (campaign_dir / "runs" / run_id).resolve()
-        running = _state_record(
-            condition_id,
-            mechanism,
-            seed,
-            attempt,
-            "running",
-            run_id,
-            run_dir,
-        )
         pending.append(
             {
                 "condition_id": condition_id,
@@ -151,12 +142,19 @@ def run_campaign(path: str | Path, *, resume: bool = False) -> dict[str, Any]:
                 "run_id": run_id,
                 "run_dir": run_dir,
                 "run_config": run_config,
-                "running": running,
             }
         )
 
     def start_unit(unit: dict[str, Any]) -> None:
-        running = unit["running"]
+        running = _state_record(
+            unit["condition_id"],
+            unit["mechanism"],
+            unit["seed"],
+            unit["attempt"],
+            "running",
+            unit["run_id"],
+            unit["run_dir"],
+        )
         _append_state(state_path, running)
         _append_jsonl(events_path, {"event": "run_started", **running})
         state_rows.append(running)
