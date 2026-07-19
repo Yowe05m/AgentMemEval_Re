@@ -7,7 +7,10 @@ from types import ModuleType
 
 import yaml
 
-from agentmemeval.evaluation.aggregation import aggregate_metrics
+from agentmemeval.evaluation.aggregation import (
+    aggregate_metrics,
+    validate_runtime_homogeneity,
+)
 
 
 def _gate_module() -> ModuleType:
@@ -72,6 +75,7 @@ def _campaign(
     campaign = tmp_path / "campaign"
     campaign.mkdir()
     campaign_manifest = {
+        "schema_version": "agentmemeval_campaign_v1",
         "campaign": {
             "campaign_id": "p-gate-test",
             "seeds": [1, 2],
@@ -92,6 +96,7 @@ def _campaign(
         ),
         encoding="utf-8",
     )
+    run_manifests: list[dict[str, object]] = []
     for seed in (1, 2):
         run_dir = campaign / "runs" / f"mixed__s{seed}__a01"
         run_dir.mkdir(parents=True)
@@ -125,6 +130,7 @@ def _campaign(
                 },
             }
         }
+        run_manifests.append(runtime)
         json_files = {
             "manifest.json": runtime,
             "metrics.json": _metrics(seed, revision_fallback),
@@ -164,20 +170,13 @@ def _campaign(
     aggregate_path.write_text(
         json.dumps(
             {
+                "schema_version": "agentmemeval_campaign_aggregate_v1",
                 "status": "descriptive_only",
                 "completed_run_count": 2,
                 "expected_run_count": 2,
-                "runtime_homogeneity": {
-                    "homogeneous": True,
-                    "identity": {
-                        "code": [["commit", "expected-sha"], ["dirty", False]],
-                        "prompts": [
-                            ["decision_version", "version"],
-                            ["decision_system_sha256", "decision-hash"],
-                            ["experience_update_sha256", "experience-hash"],
-                        ],
-                    },
-                },
+                "runtime_homogeneity": validate_runtime_homogeneity(
+                    run_manifests
+                ),
                 "design": "mixed_table",
                 "aggregate_metrics": aggregate_metrics(
                     [_metrics(1), _metrics(2)]
@@ -205,7 +204,7 @@ def test_campaign_p_gate_accepts_complete_clean_homogeneous_evidence(
         },
     )
     assert audit["status"] == "ready_to_start_campaign_e"
-    assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v5"
+    assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v6"
     assert audit["blockers"] == []
     assert audit["behavior_freeze_preview"]["status"] == "frozen"
     assert (
@@ -222,6 +221,13 @@ def test_campaign_p_gate_accepts_complete_clean_homogeneous_evidence(
     assert (
         audit["observed_aggregate_metrics_sha256"]
         == audit["rebuilt_aggregate_metrics_sha256"]
+    )
+    assert (
+        audit["runtime_homogeneity_match_canonical_leaf_rebuild"] is True
+    )
+    assert (
+        audit["observed_runtime_homogeneity_sha256"]
+        == audit["rebuilt_runtime_homogeneity_sha256"]
     )
 
 
@@ -280,6 +286,10 @@ def test_campaign_p_gate_rejects_explicit_execution_prompt_and_aggregate_mismatc
     assert any("execution fallback_count" in item for item in audit["blockers"])
     assert any("prompt identity mismatch" in item for item in audit["blockers"])
     assert any("aggregate code SHA mismatch" in item for item in audit["blockers"])
+    assert any(
+        "runtime homogeneity does not match" in item
+        for item in audit["blockers"]
+    )
 
 
 def test_campaign_p_gate_rejects_cross_campaign_or_malformed_aggregate(
@@ -293,6 +303,7 @@ def test_campaign_p_gate_rejects_cross_campaign_or_malformed_aggregate(
         aggregate.read_text(encoding="utf-8"), encoding="utf-8"
     )
     data = json.loads(external_aggregate.read_text(encoding="utf-8"))
+    data["schema_version"] = "wrong-schema"
     data["completed_run_count"] = "not-an-integer"
     data["aggregate_metrics"]["paired_estimand_descriptive"][
         "effects_by_mechanism"
@@ -314,6 +325,7 @@ def test_campaign_p_gate_rejects_cross_campaign_or_malformed_aggregate(
     assert audit["status"] == "no_go"
     assert any("directly inside campaign_dir" in item for item in audit["blockers"])
     assert any("aggregate matrix mismatch" in item for item in audit["blockers"])
+    assert any("aggregate schema mismatch" in item for item in audit["blockers"])
     assert any("non-finite values" in item for item in audit["blockers"])
 
 

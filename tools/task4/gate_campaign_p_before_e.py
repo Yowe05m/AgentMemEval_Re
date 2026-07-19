@@ -12,7 +12,10 @@ from typing import Any
 
 import yaml
 
-from agentmemeval.evaluation.aggregation import aggregate_metrics
+from agentmemeval.evaluation.aggregation import (
+    aggregate_metrics,
+    validate_runtime_homogeneity,
+)
 from agentmemeval.evaluation.pilot import (
     PRIMARY_MDE_BB_PER_100,
     SENSITIVITY_MDES_BB_PER_100,
@@ -105,6 +108,10 @@ def build_gate(
         identity for identity in set(identities) if identities.count(identity) > 1
     )
     blockers: list[str] = []
+    if manifest.get("schema_version") != "agentmemeval_campaign_v1":
+        blockers.append(
+            f"campaign manifest schema mismatch: {manifest.get('schema_version')}"
+        )
     if (
         aggregate_path.parent != campaign_dir
         or not aggregate_path.name.startswith("campaign_aggregate_")
@@ -133,6 +140,7 @@ def build_gate(
     evaluation_target_ids_by_run: list[list[str]] = []
     leaf_evidence: list[dict[str, Any]] = []
     runtime_identities: list[dict[str, Any]] = []
+    run_manifests: list[dict[str, Any]] = []
     runs_root = (campaign_dir / "runs").resolve()
     for row in completed:
         run_id = str(row.get("run_id", ""))
@@ -160,6 +168,7 @@ def build_gate(
         metrics = _read_json(run_dir / "metrics.json")
         protocol = _read_json(run_dir / "protocol_audit.json")
         run_manifest = _read_json(run_dir / "manifest.json")
+        run_manifests.append(run_manifest)
         resolved_config = _read_yaml(run_dir / "resolved_config.yaml")
         _audit_leaf_identity(
             blockers,
@@ -263,14 +272,35 @@ def build_gate(
             blockers.append(f"behavior gate status is {behavior.get('status')}")
     rebuilt_aggregate_metrics = aggregate_metrics(metrics_list)
     observed_aggregate_metrics = aggregate.get("aggregate_metrics")
-    aggregate_metrics_match = observed_aggregate_metrics == rebuilt_aggregate_metrics
+    observed_aggregate_metrics_sha256 = _json_sha256(observed_aggregate_metrics)
+    rebuilt_aggregate_metrics_sha256 = _json_sha256(rebuilt_aggregate_metrics)
+    aggregate_metrics_match = (
+        observed_aggregate_metrics_sha256 == rebuilt_aggregate_metrics_sha256
+    )
     if not aggregate_metrics_match:
         blockers.append(
             "aggregate metrics do not match a canonical rebuild from campaign leaves"
         )
+    rebuilt_runtime_homogeneity = validate_runtime_homogeneity(run_manifests)
+    observed_runtime_homogeneity = aggregate.get("runtime_homogeneity")
+    observed_runtime_homogeneity_sha256 = _json_sha256(
+        observed_runtime_homogeneity
+    )
+    rebuilt_runtime_homogeneity_sha256 = _json_sha256(
+        rebuilt_runtime_homogeneity
+    )
+    runtime_homogeneity_match = (
+        observed_runtime_homogeneity_sha256
+        == rebuilt_runtime_homogeneity_sha256
+    )
+    if not runtime_homogeneity_match:
+        blockers.append(
+            "aggregate runtime homogeneity does not match a canonical rebuild "
+            "from campaign leaf manifests"
+        )
 
     return {
-        "schema_version": "task4_campaign_p_before_e_gate_v5",
+        "schema_version": "task4_campaign_p_before_e_gate_v6",
         "campaign_dir": str(campaign_dir),
         "campaign_id": campaign.get("campaign_id"),
         "expected_matrix_units": expected,
@@ -288,11 +318,16 @@ def build_gate(
         "aggregate_path": str(aggregate_path),
         "aggregate_sha256": _sha256(aggregate_path),
         "aggregate_metrics_match_canonical_leaf_rebuild": aggregate_metrics_match,
-        "observed_aggregate_metrics_sha256": _json_sha256(
-            observed_aggregate_metrics
+        "observed_aggregate_metrics_sha256": observed_aggregate_metrics_sha256,
+        "rebuilt_aggregate_metrics_sha256": rebuilt_aggregate_metrics_sha256,
+        "runtime_homogeneity_match_canonical_leaf_rebuild": (
+            runtime_homogeneity_match
         ),
-        "rebuilt_aggregate_metrics_sha256": _json_sha256(
-            rebuilt_aggregate_metrics
+        "observed_runtime_homogeneity_sha256": (
+            observed_runtime_homogeneity_sha256
+        ),
+        "rebuilt_runtime_homogeneity_sha256": (
+            rebuilt_runtime_homogeneity_sha256
         ),
         "leaf_evidence": sorted(
             leaf_evidence, key=lambda item: (item["condition_id"], item["seed"])
@@ -313,6 +348,10 @@ def _campaign_p_power_diagnostic(
     """Audit P-side paired variance without claiming a joint P/E formal freeze."""
 
     blockers: list[str] = []
+    if aggregate.get("schema_version") != "agentmemeval_campaign_aggregate_v1":
+        blockers.append(
+            f"aggregate schema mismatch: {aggregate.get('schema_version')}"
+        )
     completed = _safe_int(aggregate.get("completed_run_count"))
     expected = _safe_int(aggregate.get("expected_run_count"))
     if completed != expected_run_count or expected != expected_run_count:
