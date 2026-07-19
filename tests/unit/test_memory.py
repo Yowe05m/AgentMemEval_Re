@@ -18,7 +18,10 @@ from agentmemeval.core.domain import (
     PlayerPublicState,
 )
 from agentmemeval.llm.mock import MockLLMClient
-from agentmemeval.memory.experiential import ExperientialMemory
+from agentmemeval.memory.experiential import (
+    EXPERIENCE_PROMPT_VERSION,
+    ExperientialMemory,
+)
 from agentmemeval.memory.fact_expr_async import FactExprAsyncMemory
 from agentmemeval.memory.fact_expr_sync import FactExprSyncMemory
 from agentmemeval.memory.factual import FactualMemory
@@ -187,6 +190,32 @@ def test_llm_experience_revision_is_schema_and_prompt_audited() -> None:
     assert revision["old_md"]
     assert revision["new_md"]
     assert revision["fallback_used"] is False
+    assert EXPERIENCE_PROMPT_VERSION == "2026-07-19-v3-counterfactual-calibrated"
+
+
+def test_llm_experience_revision_prompt_rejects_single_action_counterfactuals() -> None:
+    class RecordingMockLLMClient(MockLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requests = []
+
+        def generate_structured(self, request, schema):  # type: ignore[no-untyped-def]
+            self.requests.append(request)
+            return super().generate_structured(request, schema)
+
+    client = RecordingMockLLMClient()
+    memory = ExperientialMemory(
+        "agent_00",
+        revision_strategy="llm",
+        llm_client=client,
+        model="mock-deterministic-v1",
+    )
+    memory.on_hand_finished(make_trajectory(action_type="fold"))
+
+    request = client.requests[0]
+    assert "单手或单一动作覆盖不足时必须 keep=true" in request.system_prompt
+    assert "不包含未选择动作的反事实结果" in request.user_prompt
+    assert "不得把“没有观察到反例”写成支持证据" in request.user_prompt
 
 
 def test_fallback_trajectory_is_audited_but_not_learned() -> None:

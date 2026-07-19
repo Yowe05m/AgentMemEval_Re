@@ -72,6 +72,8 @@ def test_system_prompt_states_ev_and_raise_total_semantics() -> None:
     assert "机械映射成固定动作" in BASE_SYSTEM_PROMPT
     assert "不证明旧动作最优" in BASE_SYSTEM_PROMPT
     assert "不得把一次历史动作" in BASE_SYSTEM_PROMPT
+    assert "不含未选择动作的反事实结果" in BASE_SYSTEM_PROMPT
+    assert "不得机械复制" in BASE_SYSTEM_PROMPT
 
 
 def test_prompt_includes_authoritative_river_hand_and_call_cost() -> None:

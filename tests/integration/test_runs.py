@@ -102,7 +102,7 @@ def test_fixed_table_run_and_report() -> None:
     ]
     action_event = next(event for event in events if event.get("event") == "action")
     assert action_event["prompt"]["template_version"] == (
-        "2026-07-17-v5-nonnormative-memory"
+        "2026-07-19-v6-counterfactual-calibrated-memory"
     )
     assert len(action_event["prompt"]["user_sha256"]) == 64
     assert "call_cost" in action_event["call_risk"]

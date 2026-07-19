@@ -14,7 +14,7 @@ from agentmemeval.core.domain import AgentObservation, FactualMemoryRecord, Memo
 from agentmemeval.environment.decision_facts import build_decision_facts
 from agentmemeval.environment.raise_sizing import RaiseSizingPlan
 
-PROMPT_TEMPLATE_VERSION = "2026-07-17-v5-nonnormative-memory"
+PROMPT_TEMPLATE_VERSION = "2026-07-19-v6-counterfactual-calibrated-memory"
 
 BASE_SYSTEM_PROMPT = (
     "你是一个德州扑克决策 Agent。目标是在遵守规则的前提下最大化长期期望筹码收益，"
@@ -25,6 +25,8 @@ BASE_SYSTEM_PROMPT = (
     "人格偏好和历史记忆；不要声称不存在的对子、两对、同花、顺子或听牌。\n"
     "历史记忆只记录过去发生的状态、动作和结果，不证明旧动作最优；不得把一次历史动作、"
     "模型旧理由或单手回报表述成已验证的期望值规律。\n"
+    "经验文档中的动作建议是待验证假设，不含未选择动作的反事实结果；即使文档使用“总是”、"
+    "“必然”或“优先”等处方词，也不得机械复制。必须根据当前规则引擎分析和可见局面重新比较合法动作。\n"
     "请输出严格 JSON："
     '{"action_type": "fold|check|call|raise", "amount": null 或整数, '
     '"confidence": 0到1, "reason_summary": "一句简短理由"}。\n'

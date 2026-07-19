@@ -27,7 +27,7 @@ from agentmemeval.memory.base import trajectory_quality
 from agentmemeval.prompts.experience_update import EXPERIENCE_UPDATE_PROMPT
 
 EXPERIENCE_REVISION_SCHEMA_VERSION = "experience_revision_v1"
-EXPERIENCE_PROMPT_VERSION = "2026-07-17-v2-length-bounded"
+EXPERIENCE_PROMPT_VERSION = "2026-07-19-v3-counterfactual-calibrated"
 
 INITIAL_EXPERIENCE = """# 我的经验
 
@@ -323,6 +323,8 @@ class ExperientialMemory:
         ]
         system_prompt = (
             "你负责修订可迁移的德州扑克经验文档。只使用给定轨迹与事实证据，不写具体玩家身份，"
+            "轨迹只证明实际观察到的状态、动作与结果，不提供未选择动作的反事实；"
+            "单手或单一动作覆盖不足时必须 keep=true，不得强化该动作，也不得用缺少反例支持旧规则。"
             "输出 JSON 对象，必须包含 keep,new_md,calibration_note,self_check,"
             "supporting_fact_ids,contradicting_fact_ids,noise_fact_ids。"
             f"new_md 最多 {self.max_chars} 个字符；calibration_note 与 self_check "
