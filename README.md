@@ -181,7 +181,9 @@ python -m agentmemeval pilot-plan `
 中文分析报告及逐文件 SHA-256 manifest。V2 会把资格三态写入 manifest、全部 CSV、
 报告和图标题：`pilot_descriptive_only`、`formal_inference_ready`、
 `blocked_or_underpowered`；只有 aggregate status 为 `ready` 时
-`paper_inference_eligible=true`，其余状态显式禁止论文推断：
+`paper_inference_eligible=true`，其余状态显式禁止论文推断。V3 对 Campaign E
+同时导出 final test BB/100、final chip/hand、train BB/100、train chip/hand 和
+train-to-test generalization gap；p 值与主图仍只对应预注册主终点：
 
 ```powershell
 python tools/task4/build_campaign_analysis.py `

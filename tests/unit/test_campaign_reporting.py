@@ -52,6 +52,8 @@ def test_build_mixed_campaign_analysis_bundle(tmp_path: Path) -> None:
 def test_build_campaign_e_analysis_uses_matched_seed_effects(tmp_path: Path) -> None:
     effects = [2.0, -1.0]
     summary = summarize_values(effects, bootstrap_samples=100)
+    train_effects = [4.0, 2.0]
+    train_summary = summarize_values(train_effects, bootstrap_samples=100)
     aggregate = {
         "design": "target_vs_seven_no_memory",
         "status": "ready",
@@ -66,7 +68,12 @@ def test_build_campaign_e_analysis_uses_matched_seed_effects(tmp_path: Path) -> 
                         "matched_seeds": [21, 22],
                         "effects": effects,
                         "summary": summary,
-                    }
+                    },
+                    "train_bb_per_100": {
+                        "matched_seeds": [21, 22],
+                        "effects": train_effects,
+                        "summary": train_summary,
+                    },
                 },
                 "primary_raw_p_value": 0.5,
                 "primary_holm_adjusted_p_value": 1.0,
@@ -81,15 +88,32 @@ def test_build_campaign_e_analysis_uses_matched_seed_effects(tmp_path: Path) -> 
     assert result["paper_inference_eligible"] is True
     assert result["paper_conclusion_prohibited"] is False
     assert result["analysis_classification"] == "formal_inference_ready"
+    assert result["table_row_count"] == 2
+    assert result["primary_table_row_count"] == 1
+    assert result["schema_version"] == "task4_campaign_analysis_bundle_v3"
     with (output / "paired_effects.csv").open(
         "r", encoding="utf-8-sig", newline=""
     ) as handle:
         rows = list(csv.DictReader(handle))
-    assert [(row["seed"], row["effect"]) for row in rows] == [
-        ("21", "2.0"),
-        ("22", "-1.0"),
+    assert [
+        (row["endpoint"], row["seed"], row["effect"]) for row in rows
+    ] == [
+        ("final_test_bb_per_100", "21", "2.0"),
+        ("final_test_bb_per_100", "22", "-1.0"),
+        ("train_bb_per_100", "21", "4.0"),
+        ("train_bb_per_100", "22", "2.0"),
     ]
     assert all(row["paper_inference_eligible"] == "True" for row in rows)
+    with (output / "primary_effects_plot_data.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as handle:
+        plot_rows = list(csv.DictReader(handle))
+    assert len(plot_rows) == 1
+    report = (output / "campaign_analysis_report.md").read_text(
+        encoding="utf-8"
+    )
+    assert "训练、泛化与 Gap 次要指标" in report
+    assert "train_bb_per_100" in report
 
 
 def test_blocked_campaign_analysis_is_explicitly_not_paper_inference(

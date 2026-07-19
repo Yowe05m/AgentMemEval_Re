@@ -42,6 +42,15 @@ def build_campaign_analysis(
     rows, paired = _extract_rows(aggregate)
     if not rows:
         raise ValueError("campaign aggregate contains no paired contrast rows")
+    primary_endpoint = _primary_endpoint(aggregate)
+    primary_rows = [
+        row for row in rows if row["endpoint"] == primary_endpoint
+    ]
+    if not primary_rows:
+        raise ValueError(
+            f"campaign aggregate contains no primary endpoint rows: "
+            f"{primary_endpoint}"
+        )
     campaign_status = str(aggregate.get("status", ""))
     analysis_classification = _analysis_classification(campaign_status)
     paper_inference_eligible = campaign_status == "ready"
@@ -84,20 +93,28 @@ def build_campaign_analysis(
             "bootstrap_ci95_low",
             "bootstrap_ci95_high",
         ),
-        rows,
+        primary_rows,
     )
     _plot_primary_effects(
-        rows,
+        primary_rows,
         plot_path,
         plot_data_path,
         analysis_classification=analysis_classification,
     )
     report_path.write_text(
-        _report_text(aggregate, source, rows, paired, plot_data_path), encoding="utf-8"
+        _report_text(
+            aggregate,
+            source,
+            rows,
+            paired,
+            plot_data_path,
+            primary_endpoint=primary_endpoint,
+        ),
+        encoding="utf-8",
     )
     outputs = [table_path, paired_path, plot_data_path, plot_path, report_path]
     manifest = {
-        "schema_version": "task4_campaign_analysis_bundle_v2",
+        "schema_version": "task4_campaign_analysis_bundle_v3",
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "source_aggregate": str(source),
         "source_aggregate_sha256": _sha256(source),
@@ -107,6 +124,7 @@ def build_campaign_analysis(
         "paper_inference_eligible": paper_inference_eligible,
         "paper_conclusion_prohibited": not paper_inference_eligible,
         "table_row_count": len(rows),
+        "primary_table_row_count": len(primary_rows),
         "paired_effect_row_count": len(paired),
         "outputs": {
             path.name: {"path": str(path), "sha256": _sha256(path)}
@@ -160,27 +178,45 @@ def _extract_rows(
         for condition, comparison in sorted(
             dict(aggregate.get("paired_comparisons", {})).items()
         ):
-            primary = dict(dict(comparison.get("metrics", {})).get(endpoint, {}))
-            summary = dict(primary.get("summary", {}))
-            summary["raw_p_value"] = comparison.get("primary_raw_p_value")
-            summary["adjusted_p_value"] = comparison.get(
-                "primary_holm_adjusted_p_value"
-            )
-            rows.append(_table_row(design, condition, endpoint, baseline, summary))
-            paired.extend(
-                {
-                    "design": design,
-                    "contrast": condition,
-                    "endpoint": endpoint,
-                    "seed": int(seed),
-                    "effect": float(effect),
-                }
-                for seed, effect in zip(
-                    primary.get("matched_seeds", []),
-                    primary.get("effects", []),
-                    strict=True,
+            metrics = comparison.get("metrics", {})
+            if not isinstance(metrics, dict):
+                continue
+            for metric_name, raw_metric in sorted(metrics.items()):
+                metric = dict(raw_metric) if isinstance(raw_metric, dict) else {}
+                summary = dict(metric.get("summary", {}))
+                if metric_name == endpoint:
+                    summary["raw_p_value"] = comparison.get(
+                        "primary_raw_p_value"
+                    )
+                    summary["adjusted_p_value"] = comparison.get(
+                        "primary_holm_adjusted_p_value"
+                    )
+                else:
+                    summary["raw_p_value"] = None
+                    summary["adjusted_p_value"] = None
+                rows.append(
+                    _table_row(
+                        design,
+                        condition,
+                        str(metric_name),
+                        baseline,
+                        summary,
+                    )
                 )
-            )
+                paired.extend(
+                    {
+                        "design": design,
+                        "contrast": condition,
+                        "endpoint": str(metric_name),
+                        "seed": int(seed),
+                        "effect": float(effect),
+                    }
+                    for seed, effect in zip(
+                        metric.get("matched_seeds", []),
+                        metric.get("effects", []),
+                        strict=True,
+                    )
+                )
     return rows, paired
 
 
@@ -263,6 +299,8 @@ def _report_text(
     rows: list[dict[str, Any]],
     paired: list[dict[str, Any]],
     plot_data_path: Path,
+    *,
+    primary_endpoint: str,
 ) -> str:
     lines = [
         "# Campaign 统计分析报告",
@@ -297,11 +335,16 @@ def _report_text(
             "",
             "## 主终点配对结果",
             "",
-            "| 对比 | n | 均值 BB/100 | bootstrap 95% CI | Holm p |",
+            f"- 主终点：`{primary_endpoint}`",
+            "",
+            "| 对比 | n | 均值效应 | bootstrap 95% CI | Holm p |",
             "|---|---:|---:|---:|---:|",
         ]
     )
-    for row in rows:
+    primary_rows = [
+        row for row in rows if row["endpoint"] == primary_endpoint
+    ]
+    for row in primary_rows:
         adjusted = row["holm_adjusted_p_value"]
         p_text = "NA" if adjusted is None else f"{float(adjusted):.6g}"
         lines.append(
@@ -310,8 +353,50 @@ def _report_text(
             f"[{float(row['bootstrap_ci95_low']):.6f}, "
             f"{float(row['bootstrap_ci95_high']):.6f}] | {p_text} |"
         )
+    secondary_rows = [
+        row for row in rows if row["endpoint"] != primary_endpoint
+    ]
+    if secondary_rows:
+        lines.extend(
+            [
+                "",
+                "## 训练、泛化与 Gap 次要指标",
+                "",
+                "次要指标不复用主终点 p 值；用于效应方向、尺度和泛化差异描述。",
+                "",
+                "| 对比 | 指标 | n | 均值效应 | bootstrap 95% CI |",
+                "|---|---|---:|---:|---:|",
+            ]
+        )
+        for row in secondary_rows:
+            lines.append(
+                f"| {row['contrast']} | {row['endpoint']} | "
+                f"{row['n_seed_pairs']} | {float(row['mean_effect']):.6f} | "
+                f"[{float(row['bootstrap_ci95_low']):.6f}, "
+                f"{float(row['bootstrap_ci95_high']):.6f}] |"
+            )
     lines.append("")
     return "\n".join(lines)
+
+
+def _primary_endpoint(aggregate: dict[str, Any]) -> str:
+    if aggregate.get("design") == "target_vs_seven_no_memory":
+        return str(
+            aggregate.get("primary_endpoint", "final_test_bb_per_100")
+        )
+    metrics = aggregate.get("aggregate_metrics", {})
+    if not isinstance(metrics, dict):
+        return "final_test_bb_per_100"
+    family = (
+        metrics.get("main_table")
+        if aggregate.get("status") != "descriptive_only"
+        else metrics.get("paired_estimand_descriptive")
+    )
+    return (
+        str(family.get("endpoint", "final_test_bb_per_100"))
+        if isinstance(family, dict)
+        else "final_test_bb_per_100"
+    )
 
 
 def _analysis_classification(status: str) -> str:
