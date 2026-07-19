@@ -191,6 +191,22 @@ python tools/task4/build_campaign_analysis.py `
   --output-dir outputs/campaigns/<campaign>/analysis_<utc>
 ```
 
+两侧 formal 分析完成并回收到已校验的本地证据库后，使用 study spec 将
+Campaign P/E 的 V3 分析 manifest、formal run map、资源审计、runtime lock、
+archive receipt 与协议证据绑定为中文论文级总报告：
+
+```powershell
+python tools/task4/build_study_report.py `
+  --study-spec <task4_study_report_spec_v1.json> `
+  --output-dir <new_study_report_bundle_dir>
+```
+
+该入口为 fail-closed：Pilot/underpowered aggregate、非正式 run、fallback、
+异构 GPU、缺失归档 receipt 或未验证协议证据都会生成
+`interim_or_blocked_no_paper_conclusion`，不会把阶段性结果标记为论文结论。
+输出包含中文总报告、P/E 效应总表、证据 SHA-256 索引和
+verified/blocked 状态表；输出目录必须不存在，避免覆盖旧报告。
+
 服务器打包前和本地解压后使用同一文件级 SHA-256 manifest 工具。manifest 必须放在
 被归档根目录之外；默认同时拒绝 header/行格式错误、缺失、大小/哈希不符、危险或重复
 相对路径、root/manifest symlink、目录内任意 symlink 和额外文件。失败以结构化 V2
