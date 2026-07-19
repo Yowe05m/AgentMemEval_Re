@@ -733,28 +733,81 @@ def _completed_state_rows(
     state_path = directory / "state.tsv"
     with state_path.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
+    grouped: dict[tuple[str, int], list[dict[str, str]]] = {}
+    malformed_state_rows = 0
     for row in rows:
-        local_run = directory / "runs" / str(row.get("run_id", ""))
+        try:
+            condition_id = str(row.get("condition_id", "")).strip()
+            seed = int(row.get("seed", ""))
+            attempt = int(row.get("attempt", ""))
+            if not condition_id or attempt < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            malformed_state_rows += 1
+            continue
+        grouped.setdefault((condition_id, seed), []).append(row)
+    if malformed_state_rows:
+        raise ValueError(f"{label} has malformed state rows: {malformed_state_rows}")
+
+    completed: list[dict[str, str]] = []
+    superseded_failed_state_rows = 0
+    latest_failed_matrix_units = 0
+    for identity in sorted(grouped):
+        identity_rows = grouped[identity]
+        maximum_attempt = max(int(row["attempt"]) for row in identity_rows)
+        latest_attempt_rows = [
+            row for row in identity_rows if int(row["attempt"]) == maximum_attempt
+        ]
+        latest = latest_attempt_rows[-1]
+        completed_attempts = {
+            int(row["attempt"])
+            for row in identity_rows
+            if row.get("status") == "complete"
+        }
+        if len(completed_attempts) > 1:
+            raise ValueError(
+                f"{label} has multiple completed attempts for {identity}: "
+                f"{sorted(completed_attempts)}"
+            )
+        failed_in_latest_attempt = sum(
+            row.get("status") == "failed" for row in latest_attempt_rows
+        )
+        if failed_in_latest_attempt and latest.get("status") == "complete":
+            raise ValueError(
+                f"{label} has failed state preceding completion within latest "
+                f"attempt for {identity}"
+            )
+        superseded_failed_state_rows += sum(
+            row.get("status") == "failed"
+            and int(row["attempt"]) < maximum_attempt
+            for row in identity_rows
+        )
+        if latest.get("status") != "complete":
+            if latest.get("status") == "failed":
+                latest_failed_matrix_units += 1
+            raise ValueError(
+                f"{label} latest attempt is not complete for {identity}: "
+                f"attempt={maximum_attempt}, status={latest.get('status')}"
+            )
+        selected = dict(latest)
+        local_run = directory / "runs" / str(selected.get("run_id", ""))
         if local_run.is_dir():
-            row["run_dir"] = str(local_run.resolve())
-    completed = [row for row in rows if row.get("status") == "complete"]
-    identities = [
-        (str(row.get("condition_id", "")), str(row.get("seed", "")))
-        for row in completed
-    ]
-    duplicate_identities = sorted(
-        identity for identity in set(identities) if identities.count(identity) > 1
-    )
-    if duplicate_identities:
-        raise ValueError(f"{label} has duplicate completed matrix units: {duplicate_identities}")
+            selected["run_dir"] = str(local_run.resolve())
+        completed.append(selected)
+
     return completed, {
         "campaign_dir": str(directory),
+        "total_state_rows": len(rows),
+        "latest_attempt_matrix_units": len(grouped),
         "completed_state_rows": len(completed),
-        "unique_completed_matrix_units": len(set(identities)),
+        "unique_completed_matrix_units": len(completed),
         "completed_seeds": sorted(
             {int(row["seed"]) for row in completed if str(row.get("seed", "")).isdigit()}
         ),
         "ignored_noncomplete_state_rows": len(rows) - len(completed),
+        "failed_state_rows": sum(row.get("status") == "failed" for row in rows),
+        "superseded_failed_state_rows": superseded_failed_state_rows,
+        "latest_failed_matrix_units": latest_failed_matrix_units,
     }
 
 

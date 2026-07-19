@@ -4,8 +4,11 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from agentmemeval.evaluation.pilot import (
     PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256,
+    _completed_state_rows,
     build_pilot_freeze_proposal,
     build_pilot_freeze_proposal_from_paths,
     build_pilot_power_plan,
@@ -621,7 +624,7 @@ def test_freeze_proposal_blocks_campaign_e_target_behavior_degeneracy() -> None:
     )
 
 
-def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> None:
+def test_freeze_path_loader_accepts_superseded_failed_attempt(tmp_path: Path) -> None:
     p_path = tmp_path / "p.json"
     e_path = tmp_path / "e.json"
     p_dir = tmp_path / "campaign-p"
@@ -636,6 +639,10 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
         "event_utc\tcondition_id\ttarget_mechanism\tseed\tattempt\tstatus\t"
         "run_id\trun_dir\tfailure_class\tmessage"
     ]
+    state_lines.append(
+        f"t\tmixed\tmixed\t0\t1\tfailed\tpartial\t{tmp_path / 'partial'}"
+        "\tinfrastructure\tpartial"
+    )
     for index in range(3):
         run_dir = tmp_path / f"p-run-{index}"
         run_dir.mkdir()
@@ -651,13 +658,11 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
             ),
             encoding="utf-8",
         )
+        attempt = 2 if index == 0 else 1
         state_lines.append(
-            f"t\tmixed\tmixed\t{index}\t1\tcomplete\tr{index}\t{run_dir}\t\t"
+            f"t\tmixed\tmixed\t{index}\t{attempt}\tcomplete\tr{index}\t"
+            f"{run_dir}\t\t"
         )
-    state_lines.append(
-        f"t\tmixed\tmixed\t99\t1\tinterrupted\tpartial\t{tmp_path / 'partial'}"
-        "\tsuperseded\tpartial"
-    )
     (p_dir / "state.tsv").write_text(
         "\n".join(state_lines) + "\n", encoding="utf-8"
     )
@@ -690,12 +695,66 @@ def test_freeze_path_loader_ignores_noncomplete_state_rows(tmp_path: Path) -> No
     assert proposal["status"] == "ready_to_generate_immutable_formal_configs"
     assert proposal["campaign_p_evidence"]["completed_state_rows"] == 3
     assert proposal["campaign_p_evidence"]["ignored_noncomplete_state_rows"] == 1
+    assert proposal["campaign_p_evidence"]["failed_state_rows"] == 1
+    assert proposal["campaign_p_evidence"]["superseded_failed_state_rows"] == 1
+    assert proposal["campaign_p_evidence"]["latest_failed_matrix_units"] == 0
     assert proposal["campaign_e_evidence"]["completed_state_rows"] == 15
     assert len(proposal["campaign_p_leaf_evidence"]) == 3
     assert len(proposal["campaign_e_leaf_evidence"]) == 15
     assert proposal["campaign_p_aggregate_evidence"]["sha256"]
     assert proposal["campaign_e_aggregate_evidence"]["sha256"]
     assert proposal["retrieval_review_evidence"]["sha256"]
+
+
+def test_freeze_state_loader_rejects_stale_complete_after_failed_retry(
+    tmp_path: Path,
+) -> None:
+    campaign_dir = tmp_path / "campaign"
+    campaign_dir.mkdir()
+    (campaign_dir / "state.tsv").write_text(
+        "event_utc\tcondition_id\ttarget_mechanism\tseed\tattempt\tstatus\t"
+        "run_id\trun_dir\tfailure_class\tmessage\n"
+        "t\tmixed\tmixed\t7\t1\tcomplete\told\t/old\t\t\n"
+        "t\tmixed\tmixed\t7\t2\tfailed\tnew\t/new\tinfrastructure\tfailed\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="latest attempt is not complete"):
+        _completed_state_rows(campaign_dir, "campaign_p")
+
+
+def test_freeze_state_loader_rejects_failed_then_complete_same_attempt(
+    tmp_path: Path,
+) -> None:
+    campaign_dir = tmp_path / "campaign"
+    campaign_dir.mkdir()
+    (campaign_dir / "state.tsv").write_text(
+        "event_utc\tcondition_id\ttarget_mechanism\tseed\tattempt\tstatus\t"
+        "run_id\trun_dir\tfailure_class\tmessage\n"
+        "t\tmixed\tmixed\t7\t1\tfailed\trun\t/run\tinfrastructure\tfailed\n"
+        "t\tmixed\tmixed\t7\t1\tcomplete\trun\t/run\t\t\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="failed state preceding completion"):
+        _completed_state_rows(campaign_dir, "campaign_p")
+
+
+def test_freeze_state_loader_rejects_multiple_completed_attempts(
+    tmp_path: Path,
+) -> None:
+    campaign_dir = tmp_path / "campaign"
+    campaign_dir.mkdir()
+    (campaign_dir / "state.tsv").write_text(
+        "event_utc\tcondition_id\ttarget_mechanism\tseed\tattempt\tstatus\t"
+        "run_id\trun_dir\tfailure_class\tmessage\n"
+        "t\tmixed\tmixed\t7\t1\tcomplete\told\t/old\t\t\n"
+        "t\tmixed\tmixed\t7\t2\tcomplete\tnew\t/new\t\t\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="multiple completed attempts"):
+        _completed_state_rows(campaign_dir, "campaign_p")
 
 
 def test_freeze_path_loader_prefers_relocated_campaign_leaf(tmp_path: Path) -> None:
