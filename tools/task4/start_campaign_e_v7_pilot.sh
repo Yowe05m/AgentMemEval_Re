@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -eu
 
-if [ "$#" -ne 2 ]; then
-  echo "usage: $0 <expected-code-sha> <campaign-p-v7-gate-v3.json>" >&2
+if [ "$#" -ne 3 ]; then
+  echo "usage: $0 <expected-code-sha> <campaign-p-v7-gate-v4.json> <prelaunch-code-audit.json>" >&2
   exit 2
 fi
 
 expected_sha=$1
 gate=$2
+prelaunch_audit=$3
 repo=/root/autodl-tmp/agentmemeval_rebuild
 service=/root/autodl-tmp/services/task4_dual_20260716T175829Z
 campaign_id=task4_campaign_e_pilot_parallel_v7_counterfactual_calibrated
@@ -19,8 +20,18 @@ cd "$repo"
 test "$(git rev-parse HEAD)" = "$expected_sha"
 test -z "$(git status --porcelain)"
 test -f "$gate"
+test ! -e "$prelaunch_audit"
 test ! -e "$campaign_dir"
 test ! -e "$log"
+
+export PYTHONPATH="$repo/src"
+
+/root/autodl-tmp/envs/agentmemeval/bin/python \
+  tools/task4/audit_pilot_prelaunch_code_paths.py \
+  --repo "$repo" \
+  --campaign-p-code-sha d9cd9c6de54d093c7e0dc2333e7ab8e280c932b9 \
+  --campaign-e-code-sha "$expected_sha" \
+  --output "$prelaunch_audit"
 
 /root/autodl-tmp/envs/agentmemeval/bin/python -c \
   'import json, sys
@@ -53,7 +64,6 @@ assert power["joint_p_e_power_freeze_complete"] is False' \
 curl -fsS --max-time 5 http://127.0.0.1:8000/v1/models >/dev/null
 curl -fsS --max-time 5 http://127.0.0.1:8001/v1/models >/dev/null
 
-export PYTHONPATH="$repo/src"
 export LOCAL_LLM_BASE_URL=http://127.0.0.1:8000/v1
 export EMBEDDING_BASE_URL=http://127.0.0.1:8001/v1
 export HF_HUB_OFFLINE=1

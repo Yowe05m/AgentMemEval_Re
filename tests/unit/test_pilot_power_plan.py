@@ -8,6 +8,7 @@ from agentmemeval.evaluation.pilot import (
     build_pilot_freeze_proposal,
     build_pilot_freeze_proposal_from_paths,
     build_pilot_power_plan,
+    build_pilot_prelaunch_code_audit,
     build_pilot_runtime_equivalence_audit,
     calibrate_behavior_thresholds,
 )
@@ -183,23 +184,34 @@ def test_pilot_runtime_equivalence_accepts_registered_post_p_v7_changes() -> Non
         "README.md",
         "configs/campaigns/"
         "task4_campaign_e_pilot_parallel_v7_counterfactual_calibrated.yaml",
+        "configs/campaigns/task4_campaign_p_strict_model_substituted.yaml",
         "src/agentmemeval/cli/main.py",
+        "src/agentmemeval/evaluation/campaign_reporting.py",
         "src/agentmemeval/evaluation/formal_freeze.py",
         "src/agentmemeval/evaluation/pilot.py",
         "src/agentmemeval/evaluation/relevance_review.py",
         "src/agentmemeval/evaluation/runtime_lock.py",
         "src/agentmemeval/experiments/admission.py",
+        "src/agentmemeval/storage/archive.py",
+        "src/agentmemeval/storage/run_map.py",
+        "src/agentmemeval/storage/snapshot_archive.py",
+        "tests/unit/test_archive_manifest.py",
         "tests/unit/test_campaign_p_gate.py",
+        "tests/unit/test_campaign_reporting.py",
         "tests/unit/test_config_validation.py",
         "tests/unit/test_formal_freeze.py",
         "tests/unit/test_pilot_power_plan.py",
         "tests/unit/test_protocol_admission.py",
         "tests/unit/test_relevance_review.py",
+        "tests/unit/test_run_map.py",
         "tests/unit/test_runtime_lock.py",
+        "tests/unit/test_snapshot_archive.py",
+        "tools/task4/audit_pilot_prelaunch_code_paths.py",
         "tools/task4/audit_pilot_runtime_equivalence.py",
         "tools/task4/build_formal_runtime_lock.py",
         "tools/task4/gate_campaign_p_before_e.py",
         "tools/task4/retrieval_relevance_review.py",
+        "tools/task4/snapshot_archive.py",
         "tools/task4/start_campaign_e_v7_pilot.sh",
     ]
     audit = build_pilot_runtime_equivalence_audit(
@@ -212,6 +224,41 @@ def test_pilot_runtime_equivalence_accepts_registered_post_p_v7_changes() -> Non
     )
     assert audit["disallowed_changed_paths"] == []
     assert audit["changed_paths"] == sorted(changed_paths)
+
+
+def test_pilot_prelaunch_code_audit_is_narrow_and_does_not_grant_runtime_equivalence(
+) -> None:
+    safe = build_pilot_prelaunch_code_audit(
+        "a" * 40,
+        "b" * 40,
+        [
+            "src/agentmemeval/storage/snapshot_archive.py",
+            "tools/task4/start_campaign_e_v7_pilot.sh",
+        ],
+    )
+    assert safe["status"] == (
+        "verified_code_paths_safe_to_launch_campaign_e_pilot"
+    )
+    assert safe["runtime_equivalence_not_yet_granted"] is True
+    assert safe["formal_homogeneity_not_granted"] is True
+    assert safe["disallowed_changed_paths"] == []
+
+    blocked = build_pilot_prelaunch_code_audit(
+        "short",
+        "b" * 40,
+        [
+            "../src/agentmemeval/storage/snapshot_archive.py",
+            "src/agentmemeval/experiments/fixed_table.py",
+        ],
+    )
+    assert blocked["status"] == "no_go_code_paths_changed"
+    assert blocked["invalid_changed_paths"] == [
+        "../src/agentmemeval/storage/snapshot_archive.py"
+    ]
+    assert blocked["disallowed_changed_paths"] == [
+        "src/agentmemeval/experiments/fixed_table.py"
+    ]
+    assert any("full lowercase SHA-1" in item for item in blocked["blockers"])
 
 
 def test_pilot_runtime_equivalence_rejects_execution_relevant_change() -> None:

@@ -6,7 +6,8 @@ import csv
 import hashlib
 import json
 import math
-from pathlib import Path
+import re
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from agentmemeval.evaluation.degeneracy import (
@@ -39,7 +40,9 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     # in table play. Keep this list exact rather than allowing whole directories.
     "README.md",
     "configs/campaigns/task4_campaign_e_pilot_parallel_v7_counterfactual_calibrated.yaml",
+    "configs/campaigns/task4_campaign_p_strict_model_substituted.yaml",
     "src/agentmemeval/cli/main.py",
+    "src/agentmemeval/evaluation/campaign_reporting.py",
     "src/agentmemeval/evaluation/formal_freeze.py",
     "src/agentmemeval/evaluation/pilot.py",
     "src/agentmemeval/evaluation/relevance_review.py",
@@ -47,17 +50,26 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     # The admission change is confined to the formal/frozen-preflight branch;
     # ordinary Pilot admission returns before the V2 runtime-lock check.
     "src/agentmemeval/experiments/admission.py",
+    "src/agentmemeval/storage/archive.py",
+    "src/agentmemeval/storage/run_map.py",
+    "src/agentmemeval/storage/snapshot_archive.py",
+    "tests/unit/test_archive_manifest.py",
     "tests/unit/test_campaign_p_gate.py",
+    "tests/unit/test_campaign_reporting.py",
     "tests/unit/test_config_validation.py",
     "tests/unit/test_formal_freeze.py",
     "tests/unit/test_pilot_power_plan.py",
     "tests/unit/test_protocol_admission.py",
     "tests/unit/test_relevance_review.py",
+    "tests/unit/test_run_map.py",
     "tests/unit/test_runtime_lock.py",
+    "tests/unit/test_snapshot_archive.py",
+    "tools/task4/audit_pilot_prelaunch_code_paths.py",
     "tools/task4/audit_pilot_runtime_equivalence.py",
     "tools/task4/build_formal_runtime_lock.py",
     "tools/task4/gate_campaign_p_before_e.py",
     "tools/task4/retrieval_relevance_review.py",
+    "tools/task4/snapshot_archive.py",
     "tools/task4/start_campaign_e_v7_pilot.sh",
 }
 EXECUTION_ZERO_FIELDS = (
@@ -562,9 +574,24 @@ def build_pilot_runtime_equivalence_audit(
     e_non_code = _without_code_identity(e_identity)
     if p_non_code != e_non_code:
         blockers.append("campaign P/E non-code runtime identities differ")
-    normalized_paths = sorted(
-        {str(path).replace("\\", "/").lstrip("./") for path in changed_paths}
-    )
+    normalized_paths: list[str] = []
+    invalid_paths: list[str] = []
+    for path in changed_paths:
+        candidate = str(path).replace("\\", "/")
+        parts = PurePosixPath(candidate).parts
+        if (
+            not candidate
+            or candidate.startswith(("/", "./"))
+            or re.match(r"^[A-Za-z]:/", candidate)
+            or any(part in {".", ".."} for part in parts)
+        ):
+            invalid_paths.append(candidate)
+            continue
+        normalized_paths.append(candidate)
+    normalized_paths = sorted(set(normalized_paths))
+    invalid_paths = sorted(set(invalid_paths))
+    if invalid_paths:
+        blockers.append(f"invalid changed paths: {invalid_paths}")
     disallowed = sorted(
         set(normalized_paths) - PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS
     )
@@ -580,6 +607,7 @@ def build_pilot_runtime_equivalence_audit(
             _json_sha256(p_non_code) if p_non_code == e_non_code else None
         ),
         "changed_paths": normalized_paths,
+        "invalid_changed_paths": invalid_paths,
         "allowed_changed_paths_policy": sorted(
             PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS
         ),
@@ -590,6 +618,66 @@ def build_pilot_runtime_equivalence_audit(
             "verified_execution_runtime_equivalent_for_pilot_power_only"
             if not blockers
             else "no_go_runtime_equivalence_unverified"
+        ),
+    }
+
+
+def build_pilot_prelaunch_code_audit(
+    campaign_p_code_sha: str,
+    campaign_e_code_sha: str,
+    changed_paths: list[str],
+) -> dict[str, Any]:
+    """Fail closed on unregistered code changes before Campaign E starts."""
+
+    blockers: list[str] = []
+    sha_pattern = re.compile(r"[0-9a-f]{40}")
+    if sha_pattern.fullmatch(campaign_p_code_sha) is None:
+        blockers.append("campaign P code SHA must be a full lowercase SHA-1")
+    if sha_pattern.fullmatch(campaign_e_code_sha) is None:
+        blockers.append("campaign E code SHA must be a full lowercase SHA-1")
+    normalized_paths: list[str] = []
+    invalid_paths: list[str] = []
+    for path in changed_paths:
+        candidate = str(path).replace("\\", "/")
+        parts = PurePosixPath(candidate).parts
+        if (
+            not candidate
+            or candidate.startswith(("/", "./"))
+            or re.match(r"^[A-Za-z]:/", candidate)
+            or any(part in {".", ".."} for part in parts)
+        ):
+            invalid_paths.append(candidate)
+            continue
+        normalized_paths.append(candidate)
+    normalized_paths = sorted(set(normalized_paths))
+    invalid_paths = sorted(set(invalid_paths))
+    if invalid_paths:
+        blockers.append(f"invalid changed paths: {invalid_paths}")
+    disallowed = sorted(
+        set(normalized_paths) - PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS
+    )
+    if disallowed:
+        blockers.append(f"execution-relevant or unregistered paths changed: {disallowed}")
+    return {
+        "schema_version": "task4_pilot_prelaunch_code_path_audit_v1",
+        "campaign_p_code_sha": campaign_p_code_sha,
+        "campaign_e_code_sha": campaign_e_code_sha,
+        "changed_paths": normalized_paths,
+        "invalid_changed_paths": invalid_paths,
+        "allowed_changed_paths_policy": sorted(
+            PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS
+        ),
+        "allowed_changed_paths_policy_sha256": _json_sha256(
+            sorted(PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS)
+        ),
+        "disallowed_changed_paths": disallowed,
+        "runtime_equivalence_not_yet_granted": True,
+        "formal_homogeneity_not_granted": True,
+        "blockers": blockers,
+        "status": (
+            "verified_code_paths_safe_to_launch_campaign_e_pilot"
+            if not blockers
+            else "no_go_code_paths_changed"
         ),
     }
 

@@ -130,6 +130,23 @@ python tools/task4/gate_memory_debias_smoke.py `
 python -m agentmemeval campaign --config configs/campaigns/task4_campaign_e_pilot.yaml --resume
 ```
 
+如果 Campaign P/E Pilot 因审计与后处理提交使用不同 commit，启动 E 前先生成 immutable
+changed-path 审计；它只证明差异文件均在精确非执行白名单，不提前授予运行时等价或
+formal 同质性。E 完成后仍必须从两侧 aggregate 生成完整 runtime-equivalence audit：
+
+```bash
+python tools/task4/audit_pilot_prelaunch_code_paths.py \
+  --repo . \
+  --campaign-p-code-sha <p-full-sha> \
+  --campaign-e-code-sha <e-full-sha> \
+  --output outputs/campaigns/p_to_e_prelaunch_code_audit_<utc>.json
+
+bash tools/task4/start_campaign_e_v7_pilot.sh \
+  <e-full-sha> \
+  <campaign-p-v7-gate-v4.json> \
+  <new-prelaunch-code-audit.json>
+```
+
 只从 immutable manifest、append-only state 和 run 工件重建新的版本化聚合：
 
 ```powershell
