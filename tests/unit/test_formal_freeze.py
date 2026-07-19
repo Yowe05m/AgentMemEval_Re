@@ -202,6 +202,7 @@ def _generate(
     tmp_path: Path,
     proposal: dict[str, object] | None = None,
     runtime_artifact: dict[str, object] | None = None,
+    strict_p_template: Path | None = None,
 ) -> dict[str, object]:
     proposal_path = tmp_path / "proposal.json"
     runtime_path = tmp_path / "runtime.json"
@@ -219,6 +220,11 @@ def _generate(
         / "configs/experiments/task4_campaign_p_robust_formal_template.yaml",
         formal_e_template_path=root
         / "configs/experiments/task4_campaign_e_robust_formal_template.yaml",
+        strict_p_template_path=strict_p_template
+        or root
+        / "configs/experiments/task4_campaign_p_strict_model_substituted.yaml",
+        strict_p_campaign_template_path=root
+        / "configs/campaigns/task4_campaign_p_strict_model_substituted.yaml",
         output_dir=tmp_path / "bundle",
         freeze_id="pilot_20260717_v1",
         seed_start=2026071801,
@@ -231,7 +237,7 @@ def test_formal_freeze_generates_self_contained_valid_p_and_e_bundle(
 ) -> None:
     result = _generate(tmp_path)
     output = Path(str(result["output_dir"]))
-    assert result["schema_version"] == "agentmemeval_formal_freeze_bundle_v2"
+    assert result["schema_version"] == "agentmemeval_formal_freeze_bundle_v3"
     assert result["proposal_source_rebuild"]["verified"] is True
     assert result["required_seed_pairs"] == 3
     assert result["seeds"] == [2026071801, 2026071802, 2026071803]
@@ -275,6 +281,41 @@ def test_formal_freeze_generates_self_contained_valid_p_and_e_bundle(
         )["campaign"]
         assert campaign["seeds"] == [2026071799]
         assert campaign["protocol_label"] == "frozen_config_preflight_not_for_paper"
+    strict = load_config(output / result["files"]["strict_p_sensitivity"])
+    assert strict["experiment"]["run_mode"] == "pilot"
+    assert strict["experiment"]["protocol_variant"] == (
+        "strict_paper_replication_model_substituted"
+    )
+    assert strict["experiment"]["protocol_readiness"] == (
+        "frozen_model_substituted_sensitivity_not_for_main_table"
+    )
+    assert strict["experiment"]["required_seed_pairs"] == 3
+    assert strict["experiment"]["behavior_threshold_status"] == "frozen"
+    assert strict["experiment"]["strict_sensitivity_pairing"] == {
+        "paired_with": "paper_robust_formal",
+        "uses_identical_seed_list": True,
+        "paper_eligible": False,
+        "model_substituted": True,
+    }
+    assert strict["agent"]["minimum_retrieval_score"] is None
+    assert strict["agent"]["retrieval_threshold_status"] == "pending_pilot"
+    assert strict["agent"]["reject_zero_reward_preflop_fold"] is False
+    assert strict["agent"]["reject_single_preflop_fold"] is False
+    strict_campaign = yaml.safe_load(
+        (output / result["files"]["strict_campaign_p"]).read_text(encoding="utf-8")
+    )["campaign"]
+    assert strict_campaign["seeds"] == result["seeds"]
+    assert strict_campaign["base_experiment_config"] == result["files"][
+        "strict_p_sensitivity"
+    ]
+    assert strict_campaign["max_parallel_runs"] == 4
+    assert strict_campaign["protocol_label"] == (
+        "strict_paper_replication_model_substituted_sensitivity_"
+        "frozen_not_main_table"
+    )
+    assert result["strict_sensitivity_policy"]["main_table_inclusion"] == (
+        "prohibited"
+    )
 
 
 def test_formal_freeze_rejects_blocked_proposal_before_creating_output(
@@ -350,6 +391,33 @@ def test_formal_freeze_rejects_template_identity_different_from_runtime_lock(
     assert not (tmp_path / "bundle").exists()
 
 
+def test_formal_freeze_rejects_strict_template_identity_mismatch(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    strict_template = tmp_path / "strict_mismatch.yaml"
+    strict_template.write_text(
+        yaml.safe_dump(
+            {
+                "extends": str(
+                    root
+                    / "configs/experiments/"
+                    "task4_campaign_p_strict_model_substituted.yaml"
+                ),
+                "provider": {"model_revision": "different-revision"},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ConfigError,
+        match="strict sensitivity template identity differs",
+    ):
+        _generate(tmp_path, strict_p_template=strict_template)
+    assert not (tmp_path / "bundle").exists()
+
+
 def test_formal_freeze_rejects_legacy_four_field_runtime_lock(
     tmp_path: Path,
 ) -> None:
@@ -378,6 +446,10 @@ def test_formal_freeze_rejects_legacy_four_field_runtime_lock(
             / "configs/experiments/task4_campaign_p_robust_formal_template.yaml",
             formal_e_template_path=root
             / "configs/experiments/task4_campaign_e_robust_formal_template.yaml",
+            strict_p_template_path=root
+            / "configs/experiments/task4_campaign_p_strict_model_substituted.yaml",
+            strict_p_campaign_template_path=root
+            / "configs/campaigns/task4_campaign_p_strict_model_substituted.yaml",
             output_dir=tmp_path / "bundle",
             freeze_id="pilot_20260717_v1",
             preflight_seed=2026071799,
@@ -409,6 +481,10 @@ def test_formal_freeze_rejects_preflight_seed_overlap(tmp_path: Path) -> None:
             / "configs/experiments/task4_campaign_p_robust_formal_template.yaml",
             formal_e_template_path=root
             / "configs/experiments/task4_campaign_e_robust_formal_template.yaml",
+            strict_p_template_path=root
+            / "configs/experiments/task4_campaign_p_strict_model_substituted.yaml",
+            strict_p_campaign_template_path=root
+            / "configs/campaigns/task4_campaign_p_strict_model_substituted.yaml",
             output_dir=tmp_path / "bundle",
             freeze_id="pilot_20260717_v1",
             seed_start=2026071801,

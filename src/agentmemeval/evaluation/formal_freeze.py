@@ -31,12 +31,14 @@ def generate_formal_freeze_bundle(
     campaign_e_template_path: str | Path,
     formal_p_template_path: str | Path,
     formal_e_template_path: str | Path,
+    strict_p_template_path: str | Path,
+    strict_p_campaign_template_path: str | Path,
     output_dir: str | Path,
     freeze_id: str,
     preflight_seed: int,
     seed_start: int = 2026071801,
 ) -> dict[str, Any]:
-    """Create a new P/E formal bundle only after every frozen gate is valid."""
+    """Create frozen P/E plus paired strict sensitivity after every gate is valid."""
 
     inputs = {
         "proposal": Path(proposal_path).resolve(),
@@ -45,6 +47,10 @@ def generate_formal_freeze_bundle(
         "campaign_e_template": Path(campaign_e_template_path).resolve(),
         "formal_p_template": Path(formal_p_template_path).resolve(),
         "formal_e_template": Path(formal_e_template_path).resolve(),
+        "strict_p_template": Path(strict_p_template_path).resolve(),
+        "strict_p_campaign_template": Path(
+            strict_p_campaign_template_path
+        ).resolve(),
     }
     for label, path in inputs.items():
         if not path.is_file():
@@ -109,6 +115,15 @@ def generate_formal_freeze_bundle(
         label: _build_preflight_config(config, validated_preflight_seed)
         for label, config in formal_configs.items()
     }
+    strict_sensitivity_config = _build_strict_sensitivity_config(
+        inputs["strict_p_template"],
+        normalized_freeze_id,
+        required_seed_pairs,
+        behavior_thresholds,
+        runtime_lock,
+        seeds[0],
+        source_hashes,
+    )
     names = {
         "formal_p": f"task4_campaign_p_robust_formal_{normalized_freeze_id}.yaml",
         "formal_e": f"task4_campaign_e_robust_formal_{normalized_freeze_id}.yaml",
@@ -125,6 +140,14 @@ def generate_formal_freeze_bundle(
         ),
         "preflight_campaign_e": (
             f"task4_campaign_e_frozen_preflight_{normalized_freeze_id}_campaign.yaml"
+        ),
+        "strict_p_sensitivity": (
+            "task4_campaign_p_strict_model_substituted_sensitivity_"
+            f"{normalized_freeze_id}.yaml"
+        ),
+        "strict_campaign_p": (
+            "task4_campaign_p_strict_model_substituted_sensitivity_"
+            f"{normalized_freeze_id}_campaign.yaml"
         ),
         "manifest": f"formal_freeze_manifest_{normalized_freeze_id}.json",
     }
@@ -168,12 +191,28 @@ def generate_formal_freeze_bundle(
             minimum_seeds=1,
         ),
     }
+    strict_sensitivity_campaign = _build_campaign(
+        inputs["strict_p_campaign_template"],
+        expected_design="mixed_table",
+        freeze_id=normalized_freeze_id,
+        base_name=names["strict_p_sensitivity"],
+        seeds=seeds,
+        label="p_strict_sensitivity",
+        protocol_label=(
+            "strict_paper_replication_model_substituted_sensitivity_"
+            "frozen_not_main_table"
+        ),
+        campaign_id=(
+            "task4_campaign_p_strict_model_substituted_sensitivity_"
+            f"{normalized_freeze_id}"
+        ),
+    )
     destination = Path(output_dir).resolve()
     if destination.exists():
         raise FileExistsError(f"formal freeze output directory already exists: {destination}")
 
     manifest = {
-        "schema_version": "agentmemeval_formal_freeze_bundle_v2",
+        "schema_version": "agentmemeval_formal_freeze_bundle_v3",
         "freeze_id": normalized_freeze_id,
         "status": "immutable_formal_configs_generated",
         "required_seed_pairs": required_seed_pairs,
@@ -194,6 +233,14 @@ def generate_formal_freeze_bundle(
                 "experiment.run_mode",
                 "experiment.frozen_config_preflight",
             ],
+        },
+        "strict_sensitivity_policy": {
+            "paper_eligible": False,
+            "run_mode": "pilot",
+            "model_substituted": True,
+            "paired_with_robust_formal_seeds": True,
+            "retrieval_policy": "paper_exact_unthresholded",
+            "main_table_inclusion": "prohibited",
         },
         "runtime_lock": runtime_lock,
         "proposal_source_rebuild": {
@@ -221,6 +268,14 @@ def generate_formal_freeze_bundle(
     _write_new_text(
         destination / names["preflight_campaign_e"],
         dump_yaml(preflight_campaigns["e"]),
+    )
+    _write_new_text(
+        destination / names["strict_p_sensitivity"],
+        dump_yaml(strict_sensitivity_config),
+    )
+    _write_new_text(
+        destination / names["strict_campaign_p"],
+        dump_yaml(strict_sensitivity_campaign),
     )
     _write_new_text(
         destination / names["manifest"],
@@ -494,6 +549,62 @@ def _build_preflight_config(
     return config
 
 
+def _build_strict_sensitivity_config(
+    template_path: Path,
+    freeze_id: str,
+    required_seed_pairs: int,
+    behavior_thresholds: dict[str, Any],
+    runtime_lock: dict[str, str],
+    first_seed: int,
+    source_hashes: dict[str, str],
+) -> dict[str, Any]:
+    """Freeze a paired, model-substituted strict sensitivity without main-table status."""
+
+    config = _without_internal_keys(load_config(template_path))
+    experiment = dict(config["experiment"])
+    experiment.update(
+        {
+            "seed": first_seed,
+            "run_mode": "pilot",
+            "protocol_readiness": (
+                "frozen_model_substituted_sensitivity_not_for_main_table"
+            ),
+            "behavior_threshold_status": "frozen",
+            "behavior_thresholds": copy.deepcopy(behavior_thresholds),
+            "statistical_plan_status": "frozen",
+            "required_seed_pairs": required_seed_pairs,
+            "runtime_verification": {
+                "decision_service_smoke_passed": True,
+                "embedding_service_smoke_passed": True,
+                "uniform_hardware_verified": True,
+            },
+            "formal_runtime_lock": copy.deepcopy(runtime_lock),
+            "formal_freeze_id": freeze_id,
+            "formal_freeze_source_sha256": copy.deepcopy(source_hashes),
+            "strict_sensitivity_pairing": {
+                "paired_with": "paper_robust_formal",
+                "uses_identical_seed_list": True,
+                "paper_eligible": False,
+                "model_substituted": True,
+            },
+        }
+    )
+    config["experiment"] = experiment
+    configured_identity = configured_runtime_identity(config)
+    mismatches = [
+        field
+        for field in CONFIG_BOUND_RUNTIME_LOCK_FIELDS
+        if configured_identity.get(field) != runtime_lock.get(field)
+    ]
+    if mismatches:
+        raise ConfigError(
+            "strict sensitivity template identity differs from runtime lock: "
+            f"{sorted(mismatches)}"
+        )
+    validate_config(config)
+    return config
+
+
 def _build_campaign(
     template_path: Path,
     *,
@@ -504,6 +615,7 @@ def _build_campaign(
     label: str,
     protocol_label: str = "paper_robust_formal_frozen",
     minimum_seeds: int = 2,
+    campaign_id: str | None = None,
 ) -> dict[str, Any]:
     raw = yaml.safe_load(template_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or not isinstance(raw.get("campaign"), dict):
@@ -515,7 +627,8 @@ def _build_campaign(
         )
     campaign.update(
         {
-            "campaign_id": f"task4_campaign_{label}_robust_formal_{freeze_id}",
+            "campaign_id": campaign_id
+            or f"task4_campaign_{label}_robust_formal_{freeze_id}",
             "protocol_label": protocol_label,
             "base_experiment_config": base_name,
             "seeds": list(seeds),

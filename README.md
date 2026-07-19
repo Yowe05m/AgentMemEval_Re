@@ -254,6 +254,8 @@ python -m agentmemeval formal-freeze `
   --campaign-e-template configs/campaigns/task4_campaign_e_pilot_parallel_v7_counterfactual_calibrated.yaml `
   --formal-p-template configs/experiments/task4_campaign_p_robust_formal_template.yaml `
   --formal-e-template configs/experiments/task4_campaign_e_robust_formal_template.yaml `
+  --strict-p-template configs/experiments/task4_campaign_p_strict_model_substituted.yaml `
+  --strict-p-campaign-template configs/campaigns/task4_campaign_p_strict_model_substituted.yaml `
   --output-dir configs/frozen/task4_<freeze_id> `
   --freeze-id <freeze_id> `
   --seed-start <preregistered_formal_seed_start> `
@@ -263,7 +265,11 @@ python -m agentmemeval formal-freeze `
 `preflight-seed` 必须与 calibration Pilot 和 formal seeds 都不重叠。输出目录包含
 P/E 两份自包含 formal YAML、两份仅改变 seed、`run_mode` 与
 `frozen_config_preflight` 标记的 not-for-paper preflight YAML、对应四份完整 campaign
-YAML，以及带源文件 SHA-256、runtime lock、seed 规则的 freeze manifest。先完整运行
+YAML，以及一组与 robust formal 使用相同 seeds 的 strict paper-protocol/
+model-substituted sensitivity experiment+campaign。strict sensitivity 保持
+`run_mode=pilot`、paper-exact unthresholded retrieval 和 not-for-paper 标签，
+禁止进入 robust 主表。freeze manifest 会记录全部源文件 SHA-256、runtime lock、
+seed 规则和 strict 隔离策略。先完整运行
 两份 preflight campaign；它们复用 formal 的 protocol/runtime 准入检查，但永久不进入
 论文主表。目录已存在、提案未 ready、人工检索审计未冻结、seed 重叠、runtime lock
 缺字段或模板验证失败时，命令都会 fail-closed，不能原地修改模板绕过。

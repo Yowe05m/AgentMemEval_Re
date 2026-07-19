@@ -4,6 +4,7 @@ campaign:
   protocol_label: strict_paper_replication_model_substituted_not_main_table
   base_experiment_config: ../experiments/task4_campaign_p_strict_model_substituted.yaml
   output_root: outputs/campaigns
+  max_parallel_runs: 4
   seeds:
     - 2026071701
     - 2026071702

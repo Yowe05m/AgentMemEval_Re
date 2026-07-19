@@ -126,6 +126,16 @@ def build_parser() -> argparse.ArgumentParser:
     formal_freeze.add_argument("--campaign-e-template", required=True)
     formal_freeze.add_argument("--formal-p-template", required=True)
     formal_freeze.add_argument("--formal-e-template", required=True)
+    formal_freeze.add_argument(
+        "--strict-p-template",
+        required=True,
+        help="strict paper-protocol/model-substituted sensitivity experiment template",
+    )
+    formal_freeze.add_argument(
+        "--strict-p-campaign-template",
+        required=True,
+        help="strict sensitivity Campaign P template",
+    )
     formal_freeze.add_argument("--output-dir", required=True, help="全新输出目录；拒绝覆盖")
     formal_freeze.add_argument("--freeze-id", required=True, help="不可变冻结标识")
     formal_freeze.add_argument("--seed-start", type=int, default=2026071801)
@@ -262,6 +272,8 @@ def _formal_freeze(args: argparse.Namespace) -> int:
         campaign_e_template_path=args.campaign_e_template,
         formal_p_template_path=args.formal_p_template,
         formal_e_template_path=args.formal_e_template,
+        strict_p_template_path=args.strict_p_template,
+        strict_p_campaign_template_path=args.strict_p_campaign_template,
         output_dir=args.output_dir,
         freeze_id=args.freeze_id,
         seed_start=args.seed_start,
