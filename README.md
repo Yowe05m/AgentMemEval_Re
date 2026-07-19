@@ -143,7 +143,7 @@ python tools/task4/audit_pilot_prelaunch_code_paths.py \
 
 bash tools/task4/start_campaign_e_v7_pilot.sh \
   <e-full-sha> \
-  <campaign-p-v7-gate-v4.json> \
+  <campaign-p-v7-gate-v5.json> \
   <new-prelaunch-code-audit.json>
 ```
 

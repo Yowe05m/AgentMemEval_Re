@@ -7,6 +7,8 @@ from types import ModuleType
 
 import yaml
 
+from agentmemeval.evaluation.aggregation import aggregate_metrics
+
 
 def _gate_module() -> ModuleType:
     path = Path(__file__).resolve().parents[2] / "tools/task4/gate_campaign_p_before_e.py"
@@ -17,7 +19,10 @@ def _gate_module() -> ModuleType:
     return module
 
 
-def _metrics(revision_fallback_count: int = 0) -> dict[str, object]:
+def _metrics(
+    seed: int,
+    revision_fallback_count: int = 0,
+) -> dict[str, object]:
     values = {
         "vpip": 0.30,
         "fold_rate": 0.40,
@@ -31,12 +36,29 @@ def _metrics(revision_fallback_count: int = 0) -> dict[str, object]:
             "revision_fallback_count": revision_fallback_count,
         },
     }
+    effects = {
+        1: {"expr": 10.0, "fact_expr_async": 4.0, "fact_expr_sync": 8.0},
+        2: {"expr": -5.0, "fact_expr_async": -2.0, "fact_expr_sync": 1.0},
+    }[seed]
     return {
+        "run_validity": {"paper_eligible": False},
         "primary_metrics": {
+            "per_agent": {"expr_00": {"bb_per_100": 0.0, "chip_delta": 0.0}},
             "stage_per_agent": {
                 "train": {"expr_00": dict(values)},
                 "test": {"expr_00": dict(values)},
-            }
+            },
+            "table_run_estimand": {
+                "design": "A7-R_same_seed_table_run_paired_mechanism_effect",
+                "seed": seed,
+                "run_id": f"mixed__s{seed}__a01",
+                "endpoint": "final_test_bb_per_100",
+                "baseline_mechanism": "fact",
+                "effects_vs_baseline": effects,
+                "statistical_plan_status": "pending_pilot_power_calibration",
+                "multiple_comparison_method": "holm",
+                "required_seed_pairs": None,
+            },
         }
     }
 
@@ -105,7 +127,7 @@ def _campaign(
         }
         json_files = {
             "manifest.json": runtime,
-            "metrics.json": _metrics(revision_fallback),
+            "metrics.json": _metrics(seed, revision_fallback),
             "protocol_audit.json": {
                 "evaluation_target_ids": ["expr_00"],
                 "execution_health": {
@@ -157,22 +179,9 @@ def _campaign(
                     },
                 },
                 "design": "mixed_table",
-                "aggregate_metrics": {
-                    "paired_estimand_descriptive": {
-                        "status": "descriptive_only",
-                        "independent_seed_count": 2,
-                        "matched_seeds": [1, 2],
-                        "design": "A7-R_same_seed_table_run_paired_mechanism_effect",
-                        "endpoint": "final_test_bb_per_100",
-                        "baseline_mechanism": "fact",
-                        "multiple_comparison_method": "holm",
-                        "effects_by_mechanism": {
-                            "expr": [10.0, -5.0],
-                            "fact_expr_async": [4.0, -2.0],
-                            "fact_expr_sync": [8.0, 1.0],
-                        },
-                    }
-                },
+                "aggregate_metrics": aggregate_metrics(
+                    [_metrics(1), _metrics(2)]
+                ),
             }
         ),
         encoding="utf-8",
@@ -196,7 +205,7 @@ def test_campaign_p_gate_accepts_complete_clean_homogeneous_evidence(
         },
     )
     assert audit["status"] == "ready_to_start_campaign_e"
-    assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v4"
+    assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v5"
     assert audit["blockers"] == []
     assert audit["behavior_freeze_preview"]["status"] == "frozen"
     assert (
@@ -209,6 +218,11 @@ def test_campaign_p_gate_accepts_complete_clean_homogeneous_evidence(
     )
     assert len(audit["leaf_evidence"][0]["sha256"]) == 8
     assert len(audit["leaf_evidence"]) == 2
+    assert audit["aggregate_metrics_match_canonical_leaf_rebuild"] is True
+    assert (
+        audit["observed_aggregate_metrics_sha256"]
+        == audit["rebuilt_aggregate_metrics_sha256"]
+    )
 
 
 def test_campaign_p_gate_rejects_dirty_or_revision_fallback_evidence(
@@ -337,6 +351,9 @@ def test_campaign_p_gate_rejects_paired_contract_or_seed_mismatch(
     assert any(
         "aggregate prompt identity mismatch" in item
         for item in audit["blockers"]
+    )
+    assert any(
+        "aggregate metrics do not match" in item for item in audit["blockers"]
     )
 
 

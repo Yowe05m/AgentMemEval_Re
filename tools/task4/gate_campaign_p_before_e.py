@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from agentmemeval.evaluation.aggregation import aggregate_metrics
 from agentmemeval.evaluation.pilot import (
     PRIMARY_MDE_BB_PER_100,
     SENSITIVITY_MDES_BB_PER_100,
@@ -260,9 +261,16 @@ def build_gate(
         blockers.extend(str(item) for item in behavior.get("blockers", []))
         if not behavior.get("blockers"):
             blockers.append(f"behavior gate status is {behavior.get('status')}")
+    rebuilt_aggregate_metrics = aggregate_metrics(metrics_list)
+    observed_aggregate_metrics = aggregate.get("aggregate_metrics")
+    aggregate_metrics_match = observed_aggregate_metrics == rebuilt_aggregate_metrics
+    if not aggregate_metrics_match:
+        blockers.append(
+            "aggregate metrics do not match a canonical rebuild from campaign leaves"
+        )
 
     return {
-        "schema_version": "task4_campaign_p_before_e_gate_v4",
+        "schema_version": "task4_campaign_p_before_e_gate_v5",
         "campaign_dir": str(campaign_dir),
         "campaign_id": campaign.get("campaign_id"),
         "expected_matrix_units": expected,
@@ -279,6 +287,13 @@ def build_gate(
         "state_tsv_sha256": _sha256(state_path),
         "aggregate_path": str(aggregate_path),
         "aggregate_sha256": _sha256(aggregate_path),
+        "aggregate_metrics_match_canonical_leaf_rebuild": aggregate_metrics_match,
+        "observed_aggregate_metrics_sha256": _json_sha256(
+            observed_aggregate_metrics
+        ),
+        "rebuilt_aggregate_metrics_sha256": _json_sha256(
+            rebuilt_aggregate_metrics
+        ),
         "leaf_evidence": sorted(
             leaf_evidence, key=lambda item: (item["condition_id"], item["seed"])
         ),
@@ -566,6 +581,16 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _json_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 if __name__ == "__main__":

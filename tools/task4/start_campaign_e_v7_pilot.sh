@@ -2,7 +2,7 @@
 set -eu
 
 if [ "$#" -ne 3 ]; then
-  echo "usage: $0 <expected-code-sha> <campaign-p-v7-gate-v4.json> <prelaunch-code-audit.json>" >&2
+  echo "usage: $0 <expected-code-sha> <campaign-p-v7-gate-v5.json> <prelaunch-code-audit.json>" >&2
   exit 2
 fi
 
@@ -37,7 +37,7 @@ export PYTHONPATH="$repo/src"
   'import json, sys
 path = sys.argv[1]
 audit = json.load(open(path, encoding="utf-8"))
-assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v4"
+assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v5"
 assert audit["status"] == "ready_to_start_campaign_e"
 assert audit["blockers"] == []
 assert audit["campaign_id"] == (
