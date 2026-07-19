@@ -114,7 +114,8 @@ def test_campaign_e_runs_append_only_matrix_and_resumes(tmp_path: Path) -> None:
                     "base_experiment_config": "base.yaml",
                     "output_root": str(tmp_path / "campaigns"),
                     "max_parallel_runs": 2,
-                    "seeds": [101],
+                    "matrix_order": "seed_major",
+                    "seeds": [101, 102],
                     "baseline_condition_id": "no_memory_target",
                     "conditions": [
                         {
@@ -140,15 +141,15 @@ def test_campaign_e_runs_append_only_matrix_and_resumes(tmp_path: Path) -> None:
     )
 
     first = run_campaign(campaign_path)
-    assert first["completed_this_invocation"] == 5
+    assert first["completed_this_invocation"] == 10
     assert first["failed_this_invocation"] == 0
-    assert first["completed_matrix_units"] == 5
+    assert first["completed_matrix_units"] == 10
     assert first["aggregate_status"] == "descriptive_only"
     assert first["max_parallel_runs"] == 2
 
     campaign_dir = Path(first["campaign_dir"])
     run_dirs = sorted((campaign_dir / "runs").iterdir())
-    assert len(run_dirs) == 5
+    assert len(run_dirs) == 10
     cache_paths = []
     for run_dir in run_dirs:
         resolved = yaml.safe_load(
@@ -157,11 +158,27 @@ def test_campaign_e_runs_append_only_matrix_and_resumes(tmp_path: Path) -> None:
         cache_path = Path(resolved["agent"]["embedding_cache_path"])
         assert cache_path == run_dir / "embedding_cache" / "{agent_id}.json"
         cache_paths.append(cache_path)
-    assert len(set(cache_paths)) == 5
+    assert len(set(cache_paths)) == 10
     state_lines_before = (campaign_dir / "state.tsv").read_text(
         encoding="utf-8"
     ).splitlines()
-    assert len(state_lines_before) == 11
+    assert len(state_lines_before) == 21
+    running_units = [
+        (line.split("\t")[1], int(line.split("\t")[3]))
+        for line in state_lines_before[1:]
+        if line.split("\t")[5] == "running"
+    ]
+    assert running_units == [
+        (condition_id, seed)
+        for seed in (101, 102)
+        for condition_id in (
+            "no_memory_target",
+            "fact_target",
+            "expr_target",
+            "sync_target",
+            "async_target",
+        )
+    ]
     aggregate = yaml.safe_load(Path(first["aggregate_path"]).read_text(encoding="utf-8"))
     assert aggregate["estimand"] == (
         "same_seed_cross_condition_target_effect_vs_no_memory"
@@ -174,14 +191,14 @@ def test_campaign_e_runs_append_only_matrix_and_resumes(tmp_path: Path) -> None:
     }
     rebuilt = aggregate_campaign(campaign_dir)
     assert rebuilt["status"] == "descriptive_only"
-    assert rebuilt["completed_run_count"] == 5
+    assert rebuilt["completed_run_count"] == 10
     assert Path(rebuilt["aggregate_path"]).is_file()
 
     resumed = run_campaign(campaign_path, resume=True)
     assert resumed["completed_this_invocation"] == 0
     assert resumed["failed_this_invocation"] == 0
-    assert resumed["skipped_valid_completed"] == 5
-    assert len(sorted((campaign_dir / "runs").iterdir())) == 5
+    assert resumed["skipped_valid_completed"] == 10
+    assert len(sorted((campaign_dir / "runs").iterdir())) == 10
     assert (campaign_dir / "state.tsv").read_text(
         encoding="utf-8"
     ).splitlines() == state_lines_before

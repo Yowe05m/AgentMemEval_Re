@@ -5,6 +5,7 @@ campaign:
   base_experiment_config: ../experiments/task4_campaign_e_pilot.yaml
   output_root: outputs/campaigns
   max_parallel_runs: 4
+  matrix_order: seed_major
   seeds:
     - 2026072301
     - 2026072302

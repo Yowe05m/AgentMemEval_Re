@@ -104,50 +104,54 @@ def run_campaign(path: str | Path, *, resume: bool = False) -> dict[str, Any]:
     failed = 0
     skipped = 0
     pending: list[dict[str, Any]] = []
-    for condition in conditions:
+    matrix_order = str(spec.get("matrix_order", "condition_major"))
+    for condition, seed in _ordered_matrix_units(
+        conditions,
+        seeds,
+        matrix_order=matrix_order,
+    ):
         condition_id = str(condition["condition_id"])
         mechanism = str(condition.get("target_mechanism", "mixed"))
-        for seed in seeds:
-            valid_complete = _valid_completed_attempt(
-                state_rows, condition_id=condition_id, seed=seed
-            )
-            if valid_complete is not None:
-                skipped += 1
-                continue
-            attempt = _next_attempt(state_rows, condition_id, seed)
-            # campaign identity already lives in the immutable parent manifest.
-            # Keep the leaf short enough for Windows checkpoint/snapshot paths.
-            run_id = f"{_slug(condition_id)}__s{seed}__a{attempt:02d}"
-            run_config = _resolve_run_config(
-                base_config,
-                spec,
-                condition,
-                seed=seed,
-                run_id=run_id,
-                campaign_dir=campaign_dir,
-            )
-            run_dir = (campaign_dir / "runs" / run_id).resolve()
-            running = _state_record(
-                condition_id,
-                mechanism,
-                seed,
-                attempt,
-                "running",
-                run_id,
-                run_dir,
-            )
-            pending.append(
-                {
-                    "condition_id": condition_id,
-                    "mechanism": mechanism,
-                    "seed": seed,
-                    "attempt": attempt,
-                    "run_id": run_id,
-                    "run_dir": run_dir,
-                    "run_config": run_config,
-                    "running": running,
-                }
-            )
+        valid_complete = _valid_completed_attempt(
+            state_rows, condition_id=condition_id, seed=seed
+        )
+        if valid_complete is not None:
+            skipped += 1
+            continue
+        attempt = _next_attempt(state_rows, condition_id, seed)
+        # campaign identity already lives in the immutable parent manifest.
+        # Keep the leaf short enough for Windows checkpoint/snapshot paths.
+        run_id = f"{_slug(condition_id)}__s{seed}__a{attempt:02d}"
+        run_config = _resolve_run_config(
+            base_config,
+            spec,
+            condition,
+            seed=seed,
+            run_id=run_id,
+            campaign_dir=campaign_dir,
+        )
+        run_dir = (campaign_dir / "runs" / run_id).resolve()
+        running = _state_record(
+            condition_id,
+            mechanism,
+            seed,
+            attempt,
+            "running",
+            run_id,
+            run_dir,
+        )
+        pending.append(
+            {
+                "condition_id": condition_id,
+                "mechanism": mechanism,
+                "seed": seed,
+                "attempt": attempt,
+                "run_id": run_id,
+                "run_dir": run_dir,
+                "run_config": run_config,
+                "running": running,
+            }
+        )
 
     def start_unit(unit: dict[str, Any]) -> None:
         running = unit["running"]
@@ -319,6 +323,11 @@ def _validate_campaign_spec(spec: dict[str, Any], base: dict[str, Any]) -> None:
         raise ConfigError("campaign.max_parallel_runs 必须是正整数") from exc
     if max_parallel < 1 or max_parallel > 32:
         raise ConfigError("campaign.max_parallel_runs 必须在 1 到 32 之间")
+    matrix_order = str(spec.get("matrix_order", "condition_major"))
+    if matrix_order not in {"condition_major", "seed_major"}:
+        raise ConfigError(
+            "campaign.matrix_order 必须是 condition_major 或 seed_major"
+        )
     conditions = _conditions(spec)
     condition_ids = [str(item["condition_id"]) for item in conditions]
     if len(set(condition_ids)) != len(condition_ids):
@@ -351,6 +360,27 @@ def _conditions(spec: dict[str, Any]) -> list[dict[str, Any]]:
     if not all(isinstance(item, dict) and item.get("condition_id") for item in configured):
         raise ConfigError("每个 campaign condition 必须包含 condition_id")
     return [dict(item) for item in configured]
+
+
+def _ordered_matrix_units(
+    conditions: list[dict[str, Any]],
+    seeds: list[int],
+    *,
+    matrix_order: str,
+) -> list[tuple[dict[str, Any], int]]:
+    """Return a deterministic, preregistered campaign execution order."""
+
+    if matrix_order == "seed_major":
+        return [
+            (condition, seed)
+            for seed in seeds
+            for condition in conditions
+        ]
+    return [
+        (condition, seed)
+        for condition in conditions
+        for seed in seeds
+    ]
 
 
 def _resolve_run_config(
