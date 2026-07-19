@@ -195,7 +195,10 @@ python tools/task4/build_campaign_analysis.py `
 
 两侧 formal 分析完成并回收到已校验的本地证据库后，使用 study spec 将
 Campaign P/E 的 V3 分析 manifest、formal run map、资源审计、runtime lock、
-P/E seal-readiness、archive receipt 与协议证据绑定为中文论文级总报告：
+P/E seal-readiness、每个 Campaign 的 archive build/extraction receipt 对与协议证据
+绑定为中文论文级总报告。study spec 必须分别提供
+`campaign_{p,e}_archive_build_receipt` 和
+`campaign_{p,e}_archive_extraction_receipt`：
 
 ```powershell
 python tools/task4/build_study_report.py `
@@ -204,7 +207,8 @@ python tools/task4/build_study_report.py `
 ```
 
 该入口为 fail-closed：Pilot/underpowered aggregate、非正式 run、fallback、
-异构 GPU、缺失归档 receipt 或未验证协议证据都会生成
+异构 GPU、缺失归档 receipt 对、receipt schema/嵌套验证/hash/文件数不一致或
+未验证协议证据都会生成
 `interim_or_blocked_no_paper_conclusion`，不会把阶段性结果标记为论文结论。
 输出包含中文总报告、P/E 效应总表、证据 SHA-256 索引和
 verified/blocked 状态表；输出目录必须不存在，避免覆盖旧报告。

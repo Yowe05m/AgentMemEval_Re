@@ -5,7 +5,10 @@ import hashlib
 import json
 from pathlib import Path
 
-from agentmemeval.evaluation.study_reporting import build_task4_study_report
+from agentmemeval.evaluation.study_reporting import (
+    _archive_pair_status,
+    build_task4_study_report,
+)
 
 
 def test_study_report_is_ready_only_when_all_evidence_is_verified(
@@ -27,7 +30,8 @@ def test_study_report_is_ready_only_when_all_evidence_is_verified(
     )
     p_seal = _seal(tmp_path / "p_seal.json")
     e_seal = _seal(tmp_path / "e_seal.json")
-    receipt = _json(tmp_path / "receipt.json", {"status": "verified"})
+    p_build, p_extract = _archive_receipts(tmp_path, "campaign_p")
+    e_build, e_extract = _archive_receipts(tmp_path, "campaign_e")
     protocol = tmp_path / "protocol.md"
     protocol.write_text("# verified", encoding="utf-8")
     spec = _json(
@@ -43,7 +47,10 @@ def test_study_report_is_ready_only_when_all_evidence_is_verified(
             "formal_runtime_lock": str(runtime_lock),
             "campaign_p_seal_readiness": str(p_seal),
             "campaign_e_seal_readiness": str(e_seal),
-            "archive_receipts": [str(receipt)],
+            "campaign_p_archive_build_receipt": str(p_build),
+            "campaign_p_archive_extraction_receipt": str(p_extract),
+            "campaign_e_archive_build_receipt": str(e_build),
+            "campaign_e_archive_extraction_receipt": str(e_extract),
             "protocol_evidence": [
                 {"label": "protocol", "path": str(protocol), "status": "verified"}
             ],
@@ -89,7 +96,8 @@ def test_study_report_keeps_pilot_and_bad_run_map_out_of_paper(
     )
     p_seal = _seal(tmp_path / "p_seal.json", ready=False)
     e_seal = _seal(tmp_path / "e_seal.json")
-    receipt = _json(tmp_path / "receipt.json", {"status": "verified"})
+    p_build, p_extract = _archive_receipts(tmp_path, "campaign_p")
+    e_build, e_extract = _archive_receipts(tmp_path, "campaign_e")
     protocol = tmp_path / "protocol.md"
     protocol.write_text("# verified", encoding="utf-8")
     spec = _json(
@@ -105,7 +113,10 @@ def test_study_report_keeps_pilot_and_bad_run_map_out_of_paper(
             "formal_runtime_lock": str(runtime_lock),
             "campaign_p_seal_readiness": str(p_seal),
             "campaign_e_seal_readiness": str(e_seal),
-            "archive_receipts": [str(receipt)],
+            "campaign_p_archive_build_receipt": str(p_build),
+            "campaign_p_archive_extraction_receipt": str(p_extract),
+            "campaign_e_archive_build_receipt": str(e_build),
+            "campaign_e_archive_extraction_receipt": str(e_extract),
             "protocol_evidence": [
                 {"label": "protocol", "path": str(protocol), "status": "verified"}
             ],
@@ -127,6 +138,19 @@ def test_study_report_keeps_pilot_and_bad_run_map_out_of_paper(
         encoding="utf-8"
     )
     assert "当前禁止把结果写成正式论文结论" in report
+
+
+def test_archive_pair_rejects_cross_receipt_hash_mismatch(tmp_path: Path) -> None:
+    build_path, extraction_path = _archive_receipts(tmp_path, "campaign_p")
+    build = json.loads(build_path.read_text(encoding="utf-8"))
+    extraction = json.loads(extraction_path.read_text(encoding="utf-8"))
+    extraction["checksum_verification"]["expected_sha256"] = "f" * 64
+    extraction["checksum_verification"]["observed_sha256"] = "f" * 64
+
+    assert (
+        _archive_pair_status(build, extraction)
+        == "blocked_pair_expected_archive_hash_mismatch"
+    )
 
 
 def _analysis_bundle(root: Path, design: str, status: str) -> Path:
@@ -303,6 +327,76 @@ def _seal(path: Path, *, ready: bool = True) -> Path:
             "total_bytes": 1000,
         },
     )
+
+
+def _archive_receipts(root: Path, campaign: str) -> tuple[Path, Path]:
+    archive_sha256 = hashlib.sha256(f"{campaign}:archive".encode()).hexdigest()
+    manifest_sha256 = hashlib.sha256(f"{campaign}:manifest".encode()).hexdigest()
+    file_count = 20
+    source_verification = {
+        "schema_version": "task4_file_manifest_verification_v2",
+        "manifest_sha256": manifest_sha256,
+        "expected_file_count": file_count,
+        "verified_file_count": file_count,
+        "verified": True,
+        "status": "verified",
+    }
+    archive_verification = {
+        "schema_version": "task4_snapshot_archive_member_verification_v1",
+        "expected_file_count": file_count,
+        "verified_file_count": file_count,
+        "verified": True,
+        "status": "verified",
+    }
+    checksum_verification = {
+        "schema_version": "task4_snapshot_archive_checksum_verification_v1",
+        "archive_is_symlink": False,
+        "checksum_is_symlink": False,
+        "expected_sha256": archive_sha256,
+        "observed_sha256": archive_sha256,
+        "format_errors": [],
+        "hash_matches": True,
+        "verified": True,
+        "status": "verified",
+    }
+    campaign_root = root / campaign
+    build = _json(
+        root / f"{campaign}_build_receipt.json",
+        {
+            "schema_version": "task4_snapshot_archive_receipt_v1",
+            "status": "verified",
+            "root": str(campaign_root),
+            "archive": str(root / f"{campaign}.tar.gz"),
+            "archive_size_bytes": 500,
+            "archive_sha256": archive_sha256,
+            "manifest": str(root / f"{campaign}.files.tsv"),
+            "manifest_sha256": manifest_sha256,
+            "file_count": file_count,
+            "total_uncompressed_size_bytes": 1000,
+            "checksum": str(root / f"{campaign}.sha256"),
+            "source_verification": source_verification,
+            "archive_verification": archive_verification,
+            "checksum_verification": checksum_verification,
+        },
+    )
+    extraction = _json(
+        root / f"{campaign}_extraction_receipt.json",
+        {
+            "schema_version": "task4_snapshot_extraction_receipt_v1",
+            "status": "verified",
+            "archive": str(root / f"{campaign}.tar.gz"),
+            "checksum": str(root / f"{campaign}.sha256"),
+            "manifest": str(root / f"{campaign}.files.tsv"),
+            "manifest_sha256": manifest_sha256,
+            "output_dir": str(root / f"{campaign}_extracted"),
+            "extracted_root": str(root / f"{campaign}_extracted" / campaign),
+            "root_name": campaign,
+            "checksum_verification": checksum_verification,
+            "archive_verification": archive_verification,
+            "extracted_verification": source_verification,
+        },
+    )
+    return build, extraction
 
 
 def _json(path: Path, payload: dict[str, object]) -> Path:

@@ -106,21 +106,42 @@ def build_task4_study_report(
         if status != "verified_ready_to_seal":
             blockers.append(f"{campaign_key} seal-readiness audit is not verified")
 
-    receipt_paths = [
-        _resolve_input(spec_path, value)
-        for value in spec.get("archive_receipts", [])
-    ]
-    verified_receipt_count = 0
-    if not receipt_paths:
-        blockers.append("verified local archive receipts are missing")
-    for index, path in enumerate(receipt_paths, start=1):
-        receipt = _read_json(path)
-        status = str(receipt.get("status", ""))
-        evidence.append(_evidence(f"archive_receipt_{index}", path, status or "missing"))
-        if status != "verified":
-            blockers.append(f"archive receipt {index} is not verified")
-        else:
-            verified_receipt_count += 1
+    archive_pairs: dict[str, dict[str, Any]] = {}
+    for campaign_key in ("campaign_p", "campaign_e"):
+        build_raw = spec.get(f"{campaign_key}_archive_build_receipt")
+        extraction_raw = spec.get(f"{campaign_key}_archive_extraction_receipt")
+        if not build_raw:
+            blockers.append(f"{campaign_key} archive build receipt is missing")
+        if not extraction_raw:
+            blockers.append(f"{campaign_key} archive extraction receipt is missing")
+        if not build_raw or not extraction_raw:
+            continue
+        build_path = _resolve_input(spec_path, build_raw)
+        extraction_path = _resolve_input(spec_path, extraction_raw)
+        build_receipt = _read_json(build_path)
+        extraction_receipt = _read_json(extraction_path)
+        status = _archive_pair_status(build_receipt, extraction_receipt)
+        archive_pairs[campaign_key] = {
+            "status": status,
+            "build": build_receipt,
+            "extraction": extraction_receipt,
+        }
+        evidence.append(
+            _evidence(
+                campaign_key + "_archive_build_receipt",
+                build_path,
+                _archive_build_receipt_status(build_receipt),
+            )
+        )
+        evidence.append(
+            _evidence(
+                campaign_key + "_archive_extraction_receipt",
+                extraction_path,
+                _archive_extraction_receipt_status(extraction_receipt),
+            )
+        )
+        if status != "verified_archive_build_extract_pair":
+            blockers.append(f"{campaign_key} archive receipt pair is not verified")
 
     protocol_items = spec.get("protocol_evidence", [])
     if not isinstance(protocol_items, list) or not protocol_items:
@@ -170,7 +191,7 @@ def build_task4_study_report(
         run_maps=run_map_audits,
         resources=resources,
         seal_audits=seal_audits,
-        verified_receipt_count=verified_receipt_count,
+        archive_pairs=archive_pairs,
         gpu_status=gpu_status,
         blockers=blockers,
     )
@@ -188,7 +209,7 @@ def build_task4_study_report(
             resources=resources,
             runtime_lock=runtime_lock,
             seal_audits=seal_audits,
-            verified_receipt_count=verified_receipt_count,
+            archive_pairs=archive_pairs,
             gpu_status=gpu_status,
             gpu_identities=gpu_identities,
             blockers=blockers,
@@ -366,6 +387,190 @@ def _seal_status(audit: dict[str, Any]) -> str:
     return "verified_ready_to_seal"
 
 
+def _valid_sha256(value: Any) -> bool:
+    text = str(value)
+    return len(text) == 64 and all(
+        character in "0123456789abcdef" for character in text
+    )
+
+
+def _verified_nested(
+    payload: Any,
+    *,
+    schema_version: str,
+) -> bool:
+    return (
+        isinstance(payload, dict)
+        and payload.get("schema_version") == schema_version
+        and payload.get("verified") is True
+        and payload.get("status") == "verified"
+    )
+
+
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _archive_build_receipt_status(receipt: dict[str, Any]) -> str:
+    if receipt.get("schema_version") != "task4_snapshot_archive_receipt_v1":
+        return "blocked_wrong_build_schema"
+    if receipt.get("status") != "verified":
+        return "blocked_build_not_verified"
+    if not _valid_sha256(receipt.get("archive_sha256")):
+        return "blocked_invalid_archive_sha256"
+    if not _valid_sha256(receipt.get("manifest_sha256")):
+        return "blocked_invalid_manifest_sha256"
+    if not _positive_int(receipt.get("archive_size_bytes")):
+        return "blocked_invalid_archive_size"
+    file_count = receipt.get("file_count")
+    if not _positive_int(file_count):
+        return "blocked_invalid_file_count"
+    total_size = receipt.get("total_uncompressed_size_bytes")
+    if (
+        not isinstance(total_size, int)
+        or isinstance(total_size, bool)
+        or total_size < 0
+    ):
+        return "blocked_invalid_uncompressed_size"
+    if not all(
+        isinstance(receipt.get(field), str) and bool(receipt.get(field))
+        for field in ("root", "archive", "manifest", "checksum")
+    ):
+        return "blocked_missing_build_paths"
+
+    source = receipt.get("source_verification")
+    if not _verified_nested(
+        source,
+        schema_version="task4_file_manifest_verification_v2",
+    ):
+        return "blocked_source_verification"
+    archive = receipt.get("archive_verification")
+    if not _verified_nested(
+        archive,
+        schema_version="task4_snapshot_archive_member_verification_v1",
+    ):
+        return "blocked_archive_member_verification"
+    checksum = receipt.get("checksum_verification")
+    if not _verified_nested(
+        checksum,
+        schema_version="task4_snapshot_archive_checksum_verification_v1",
+    ):
+        return "blocked_checksum_verification"
+    if source.get("manifest_sha256") != receipt.get("manifest_sha256"):
+        return "blocked_source_manifest_hash_mismatch"
+    if source.get("expected_file_count") != file_count:
+        return "blocked_source_expected_file_count_mismatch"
+    if source.get("verified_file_count") != file_count:
+        return "blocked_source_verified_file_count_mismatch"
+    if archive.get("expected_file_count") != file_count:
+        return "blocked_archive_expected_file_count_mismatch"
+    if archive.get("verified_file_count") != file_count:
+        return "blocked_archive_verified_file_count_mismatch"
+    if checksum.get("expected_sha256") != receipt.get("archive_sha256"):
+        return "blocked_checksum_expected_hash_mismatch"
+    if checksum.get("observed_sha256") != receipt.get("archive_sha256"):
+        return "blocked_checksum_observed_hash_mismatch"
+    if checksum.get("hash_matches") is not True:
+        return "blocked_checksum_hash_mismatch"
+    if checksum.get("format_errors") != []:
+        return "blocked_checksum_format_errors"
+    if checksum.get("archive_is_symlink") is not False:
+        return "blocked_archive_symlink"
+    if checksum.get("checksum_is_symlink") is not False:
+        return "blocked_checksum_symlink"
+    return "verified_archive_build_receipt"
+
+
+def _archive_extraction_receipt_status(receipt: dict[str, Any]) -> str:
+    if receipt.get("schema_version") != "task4_snapshot_extraction_receipt_v1":
+        return "blocked_wrong_extraction_schema"
+    if receipt.get("status") != "verified":
+        return "blocked_extraction_not_verified"
+    if not _valid_sha256(receipt.get("manifest_sha256")):
+        return "blocked_invalid_extraction_manifest_sha256"
+    if not all(
+        isinstance(receipt.get(field), str) and bool(receipt.get(field))
+        for field in (
+            "archive",
+            "checksum",
+            "manifest",
+            "output_dir",
+            "extracted_root",
+            "root_name",
+        )
+    ):
+        return "blocked_missing_extraction_paths"
+    checksum = receipt.get("checksum_verification")
+    if not _verified_nested(
+        checksum,
+        schema_version="task4_snapshot_archive_checksum_verification_v1",
+    ):
+        return "blocked_extraction_checksum_verification"
+    archive = receipt.get("archive_verification")
+    if not _verified_nested(
+        archive,
+        schema_version="task4_snapshot_archive_member_verification_v1",
+    ):
+        return "blocked_extraction_archive_verification"
+    extracted = receipt.get("extracted_verification")
+    if not _verified_nested(
+        extracted,
+        schema_version="task4_file_manifest_verification_v2",
+    ):
+        return "blocked_extracted_manifest_verification"
+    if extracted.get("manifest_sha256") != receipt.get("manifest_sha256"):
+        return "blocked_extracted_manifest_hash_mismatch"
+    if checksum.get("hash_matches") is not True:
+        return "blocked_extraction_checksum_hash_mismatch"
+    if checksum.get("format_errors") != []:
+        return "blocked_extraction_checksum_format_errors"
+    counts = (
+        archive.get("expected_file_count"),
+        archive.get("verified_file_count"),
+        extracted.get("expected_file_count"),
+        extracted.get("verified_file_count"),
+    )
+    if not all(_positive_int(value) for value in counts):
+        return "blocked_invalid_extraction_file_counts"
+    if len(set(counts)) != 1:
+        return "blocked_extraction_file_count_mismatch"
+    return "verified_archive_extraction_receipt"
+
+
+def _archive_pair_status(
+    build_receipt: dict[str, Any],
+    extraction_receipt: dict[str, Any],
+) -> str:
+    build_status = _archive_build_receipt_status(build_receipt)
+    if build_status != "verified_archive_build_receipt":
+        return build_status
+    extraction_status = _archive_extraction_receipt_status(extraction_receipt)
+    if extraction_status != "verified_archive_extraction_receipt":
+        return extraction_status
+    checksum = extraction_receipt["checksum_verification"]
+    archive_sha256 = build_receipt["archive_sha256"]
+    if checksum.get("expected_sha256") != archive_sha256:
+        return "blocked_pair_expected_archive_hash_mismatch"
+    if checksum.get("observed_sha256") != archive_sha256:
+        return "blocked_pair_observed_archive_hash_mismatch"
+    if extraction_receipt.get("manifest_sha256") != build_receipt.get(
+        "manifest_sha256"
+    ):
+        return "blocked_pair_manifest_hash_mismatch"
+    file_counts = (
+        build_receipt["file_count"],
+        build_receipt["source_verification"]["expected_file_count"],
+        build_receipt["archive_verification"]["verified_file_count"],
+        extraction_receipt["archive_verification"]["expected_file_count"],
+        extraction_receipt["extracted_verification"]["verified_file_count"],
+    )
+    if len(set(file_counts)) != 1:
+        return "blocked_pair_file_count_mismatch"
+    if Path(str(build_receipt["root"])).name != extraction_receipt.get("root_name"):
+        return "blocked_pair_root_name_mismatch"
+    return "verified_archive_build_extract_pair"
+
+
 def _gpu_homogeneity(
     resources: dict[str, dict[str, Any]],
 ) -> tuple[str, list[dict[str, str]]]:
@@ -396,7 +601,7 @@ def _status_rows(
     run_maps: dict[str, dict[str, Any]],
     resources: dict[str, dict[str, Any]],
     seal_audits: dict[str, dict[str, Any]],
-    verified_receipt_count: int,
+    archive_pairs: dict[str, dict[str, Any]],
     gpu_status: str,
     blockers: list[str],
 ) -> list[dict[str, str]]:
@@ -453,6 +658,20 @@ def _status_rows(
                 "evidence": _seal_status(seal) if seal else "missing",
             }
         )
+        archive_pair = archive_pairs.get(campaign)
+        rows.append(
+            {
+                "item": campaign + "_local_archive",
+                "classification": (
+                    "verified"
+                    if archive_pair
+                    and archive_pair["status"]
+                    == "verified_archive_build_extract_pair"
+                    else "blocked"
+                ),
+                "evidence": archive_pair["status"] if archive_pair else "missing",
+            }
+        )
     rows.extend(
         [
             {
@@ -461,13 +680,6 @@ def _status_rows(
                     "verified" if gpu_status == "verified_uniform_gpu" else "blocked"
                 ),
                 "evidence": gpu_status,
-            },
-            {
-                "item": "local_archive",
-                "classification": (
-                    "verified" if verified_receipt_count else "blocked"
-                ),
-                "evidence": f"verified receipt count={verified_receipt_count}",
             },
             {
                 "item": "paper_conclusion",
@@ -488,7 +700,7 @@ def _render_report(
     resources: dict[str, dict[str, Any]],
     runtime_lock: dict[str, Any],
     seal_audits: dict[str, dict[str, Any]],
-    verified_receipt_count: int,
+    archive_pairs: dict[str, dict[str, Any]],
     gpu_status: str,
     gpu_identities: list[dict[str, str]],
     blockers: list[str],
@@ -586,7 +798,8 @@ def _render_report(
             "",
             "## 归档与可复现性",
             "",
-            f"- 已绑定 verified archive receipt 数：{verified_receipt_count}",
+            "- P/E 均要求服务器 build receipt 与本地 extraction receipt "
+            "按 archive hash、manifest hash、文件数和根目录名成对一致。",
             "- `evidence_index.csv` 记录全部输入路径、状态和 SHA-256。",
             "- `study_effects.csv` 是本报告效应表的数据源；"
             "`verification_status.csv` 保存 verified/blocked 判定。",
@@ -595,6 +808,8 @@ def _render_report(
     )
     for campaign in ("campaign_p", "campaign_e"):
         seal = seal_audits.get(campaign, {})
+        archive_pair = archive_pairs.get(campaign, {})
+        build_receipt = archive_pair.get("build", {})
         lines.append(
             f"- {campaign} seal：`{_seal_status(seal) if seal else 'missing'}`；"
             f"matrix={seal.get('complete_latest_attempt_count', 'NA')}/"
@@ -602,6 +817,14 @@ def _render_report(
             f"quiet={seal.get('observed_quiet_seconds', 'NA')} s；"
             f"files={seal.get('file_count', 'NA')}；"
             f"bytes={seal.get('total_bytes', 'NA')}。"
+        )
+        lines.append(
+            f"- {campaign} archive："
+            f"`{archive_pair.get('status', 'missing')}`；"
+            f"files={build_receipt.get('file_count', 'NA')}；"
+            f"bytes={build_receipt.get('total_uncompressed_size_bytes', 'NA')}；"
+            f"archive_sha256={build_receipt.get('archive_sha256', 'NA')}；"
+            f"manifest_sha256={build_receipt.get('manifest_sha256', 'NA')}。"
         )
     lines.extend(
         [
