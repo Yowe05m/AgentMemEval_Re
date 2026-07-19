@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from types import ModuleType
 
+import yaml
+
 
 def _gate_module() -> ModuleType:
     path = Path(__file__).resolve().parents[2] / "tools/task4/gate_campaign_p_before_e.py"
@@ -72,6 +74,10 @@ def _campaign(
         run_dir = campaign / "runs" / f"mixed__s{seed}__a01"
         run_dir.mkdir(parents=True)
         runtime = {
+            "run_id": f"mixed__s{seed}__a01",
+            "seed": seed,
+            "output_dir": str(run_dir),
+            "config_snapshot_path": str(run_dir / "resolved_config.yaml"),
             "metadata": {
                 "code": {"commit": "expected-sha", "dirty": dirty},
                 "gpu": {"devices": [{"name": "gpu", "driver": "driver"}]},
@@ -117,7 +123,18 @@ def _campaign(
         for name, data in json_files.items():
             (run_dir / name).write_text(json.dumps(data), encoding="utf-8")
         (run_dir / "resolved_config.yaml").write_text(
-            "experiment: {}\n", encoding="utf-8"
+            yaml.safe_dump(
+                {
+                    "experiment": {
+                        "campaign_id": "p-gate-test",
+                        "campaign_condition_id": "mixed",
+                        "seed": seed,
+                        "run_id": f"mixed__s{seed}__a01",
+                    }
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
         )
         (run_dir / "hand_summaries.jsonl").write_text("{}\n", encoding="utf-8")
         (run_dir / "report.md").write_text("complete\n", encoding="utf-8")
@@ -179,7 +196,7 @@ def test_campaign_p_gate_accepts_complete_clean_homogeneous_evidence(
         },
     )
     assert audit["status"] == "ready_to_start_campaign_e"
-    assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v3"
+    assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v4"
     assert audit["blockers"] == []
     assert audit["behavior_freeze_preview"]["status"] == "frozen"
     assert (
@@ -319,5 +336,54 @@ def test_campaign_p_gate_rejects_paired_contract_or_seed_mismatch(
     )
     assert any(
         "aggregate prompt identity mismatch" in item
+        for item in audit["blockers"]
+    )
+
+
+def test_campaign_p_gate_rejects_external_or_mismatched_leaf_identity(
+    tmp_path: Path,
+) -> None:
+    campaign, aggregate = _campaign(tmp_path)
+    state_path = campaign / "state.tsv"
+    state = state_path.read_text(encoding="utf-8")
+    external = tmp_path / "external" / "mixed__s1__a01"
+    external.parent.mkdir()
+    state_path.write_text(
+        state.replace(
+            str(campaign / "runs" / "mixed__s1__a01"),
+            str(external),
+        ),
+        encoding="utf-8",
+    )
+    run_two = campaign / "runs" / "mixed__s2__a01"
+    manifest_path = run_two / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["seed"] = 999
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    config_path = run_two / "resolved_config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["experiment"]["campaign_id"] = "other-campaign"
+    config_path.write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    audit = _gate_module().build_gate(
+        campaign,
+        aggregate_path=aggregate,
+        expected_code_sha="expected-sha",
+        expected_max_model_len=16384,
+        expected_prompts={
+            "decision_version": "version",
+            "decision_system_sha256": "decision-hash",
+            "experience_update_sha256": "experience-hash",
+        },
+    )
+
+    assert audit["status"] == "no_go"
+    assert any("canonical campaign leaf" in item for item in audit["blockers"])
+    assert any("manifest seed mismatch" in item for item in audit["blockers"])
+    assert any(
+        "resolved config campaign_id mismatch" in item
         for item in audit["blockers"]
     )

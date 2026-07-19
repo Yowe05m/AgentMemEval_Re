@@ -26,7 +26,7 @@ test ! -e "$log"
   'import json, sys
 path = sys.argv[1]
 audit = json.load(open(path, encoding="utf-8"))
-assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v3"
+assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v4"
 assert audit["status"] == "ready_to_start_campaign_e"
 assert audit["blockers"] == []
 assert audit["campaign_id"] == (

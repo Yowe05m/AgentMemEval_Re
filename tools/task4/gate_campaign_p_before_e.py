@@ -10,6 +10,8 @@ import math
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from agentmemeval.evaluation.pilot import (
     PRIMARY_MDE_BB_PER_100,
     SENSITIVITY_MDES_BB_PER_100,
@@ -130,8 +132,22 @@ def build_gate(
     evaluation_target_ids_by_run: list[list[str]] = []
     leaf_evidence: list[dict[str, Any]] = []
     runtime_identities: list[dict[str, Any]] = []
+    runs_root = (campaign_dir / "runs").resolve()
     for row in completed:
-        run_dir = Path(str(row["run_dir"]))
+        run_id = str(row.get("run_id", ""))
+        row_run_dir = Path(str(row.get("run_dir", ""))).resolve()
+        expected_run_dir = (campaign_dir / "runs" / run_id).resolve()
+        if (
+            not run_id
+            or not expected_run_dir.is_relative_to(runs_root)
+            or row_run_dir != expected_run_dir
+        ):
+            blockers.append(
+                f"{run_id or '<missing-run-id>'} run_dir is not the canonical "
+                f"campaign leaf: {row.get('run_dir')}"
+            )
+            continue
+        run_dir = expected_run_dir
         missing = [
             name
             for name in REQUIRED_ARTIFACTS
@@ -143,6 +159,15 @@ def build_gate(
         metrics = _read_json(run_dir / "metrics.json")
         protocol = _read_json(run_dir / "protocol_audit.json")
         run_manifest = _read_json(run_dir / "manifest.json")
+        resolved_config = _read_yaml(run_dir / "resolved_config.yaml")
+        _audit_leaf_identity(
+            blockers,
+            row=row,
+            campaign_id=str(campaign.get("campaign_id", "")),
+            run_dir=run_dir,
+            run_manifest=run_manifest,
+            resolved_config=resolved_config,
+        )
         metrics_list.append(metrics)
         evaluation_targets = protocol.get("evaluation_target_ids", [])
         if not isinstance(evaluation_targets, list) or not evaluation_targets:
@@ -237,7 +262,7 @@ def build_gate(
             blockers.append(f"behavior gate status is {behavior.get('status')}")
 
     return {
-        "schema_version": "task4_campaign_p_before_e_gate_v3",
+        "schema_version": "task4_campaign_p_before_e_gate_v4",
         "campaign_dir": str(campaign_dir),
         "campaign_id": campaign.get("campaign_id"),
         "expected_matrix_units": expected,
@@ -484,6 +509,55 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"expected JSON object: {path}")
     return data
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"expected YAML object: {path}")
+    return data
+
+
+def _audit_leaf_identity(
+    blockers: list[str],
+    *,
+    row: dict[str, str],
+    campaign_id: str,
+    run_dir: Path,
+    run_manifest: dict[str, Any],
+    resolved_config: dict[str, Any],
+) -> None:
+    run_id = str(row.get("run_id", ""))
+    seed = _safe_int(row.get("seed"))
+    manifest_contract = {
+        "run_id": run_id,
+        "seed": seed,
+        "output_dir": str(run_dir),
+        "config_snapshot_path": str(run_dir / "resolved_config.yaml"),
+    }
+    for key, expected in manifest_contract.items():
+        observed = run_manifest.get(key)
+        if observed != expected:
+            blockers.append(
+                f"{run_id} manifest {key} mismatch: {observed}/{expected}"
+            )
+
+    experiment = resolved_config.get("experiment")
+    if not isinstance(experiment, dict):
+        blockers.append(f"{run_id} resolved config lacks experiment object")
+        return
+    config_contract = {
+        "campaign_id": campaign_id,
+        "campaign_condition_id": str(row.get("condition_id", "")),
+        "seed": seed,
+        "run_id": run_id,
+    }
+    for key, expected in config_contract.items():
+        observed = experiment.get(key)
+        if observed != expected:
+            blockers.append(
+                f"{run_id} resolved config {key} mismatch: {observed}/{expected}"
+            )
 
 
 def _sha256(path: Path) -> str:
