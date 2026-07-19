@@ -13,6 +13,7 @@ from agentmemeval.evaluation.degeneracy import (
     evaluate_behavior_health,
     revision_fallback_count,
 )
+from agentmemeval.evaluation.relevance_review import REVIEW_POLICY
 from agentmemeval.evaluation.statistics import estimate_paired_seed_requirement
 
 PRIMARY_MDE_BB_PER_100 = 5.0
@@ -271,6 +272,105 @@ def build_pilot_freeze_proposal(
         retrieval_blockers.append("retrieval relevance review lacks verified human labels")
     if retrieval_review_audit.get("retrieval_threshold_status") != "frozen":
         retrieval_blockers.append("retrieval relevance threshold is not frozen")
+    if (
+        retrieval_review_audit.get("schema_version")
+        != "task4_retrieval_relevance_audit_v2"
+    ):
+        retrieval_blockers.append("retrieval relevance audit schema is not V2")
+    if set(retrieval_review_audit.get("source_designs", [])) != {
+        "mixed_table",
+        "target_vs_seven_no_memory",
+    }:
+        retrieval_blockers.append(
+            "retrieval relevance audit lacks complete P/E source designs"
+        )
+    if _safe_int(retrieval_review_audit.get("source_campaign_count")) != 2:
+        retrieval_blockers.append(
+            "retrieval relevance audit source campaign count is not 2"
+        )
+    source_evidence = retrieval_review_audit.get("source_evidence", [])
+    if (
+        not isinstance(source_evidence, list)
+        or len(source_evidence) != 2
+        or any(
+            not isinstance(source, dict)
+            or source.get("matrix_complete") is not True
+            or not str(source.get("campaign_dir", "")).strip()
+            or _safe_int(source.get("expected_state_rows")) is None
+            or _safe_int(source.get("expected_state_rows")) < 1
+            or _safe_int(source.get("completed_state_rows"))
+            != _safe_int(source.get("expected_state_rows"))
+            or not _is_sha256(source.get("campaign_manifest_sha256"))
+            or not _is_sha256(source.get("state_tsv_sha256"))
+            or not isinstance(source.get("event_sources"), list)
+            or len(source.get("event_sources", []))
+            != _safe_int(source.get("expected_state_rows"))
+            or any(
+                not isinstance(event, dict)
+                or not str(event.get("run_id", "")).strip()
+                or not _is_sha256(event.get("events_sha256"))
+                for event in source.get("event_sources", [])
+            )
+            for source in source_evidence
+        )
+    ):
+        retrieval_blockers.append(
+            "retrieval relevance audit source evidence is incomplete"
+        )
+    if retrieval_review_audit.get("source_rebuild_verified") is not True:
+        retrieval_blockers.append(
+            "retrieval relevance review pack was not verified by source rebuild"
+        )
+    if (
+        retrieval_review_audit.get("source_rebuild_content_sha256")
+        != retrieval_review_audit.get("review_pack_content_sha256")
+    ):
+        retrieval_blockers.append(
+            "retrieval relevance source-rebuild hash does not match review pack"
+        )
+    if retrieval_review_audit.get("review_policy_sha256") != _json_sha256(
+        REVIEW_POLICY
+    ):
+        retrieval_blockers.append(
+            "retrieval relevance audit review policy hash is invalid"
+        )
+    pack_hash = retrieval_review_audit.get("review_pack_content_sha256")
+    if not _is_sha256(pack_hash):
+        retrieval_blockers.append(
+            "retrieval relevance review-pack content hash is invalid"
+        )
+    evidence = retrieval_review_audit.get("input_evidence", {})
+    if not isinstance(evidence, dict):
+        retrieval_blockers.append("retrieval relevance input evidence is missing")
+    else:
+        for key in ("review_key_sha256", "labels_sha256"):
+            if not _is_sha256(evidence.get(key)):
+                retrieval_blockers.append(
+                    f"retrieval relevance input evidence {key} is invalid"
+                )
+        if _safe_int(evidence.get("label_row_count")) != _safe_int(
+            retrieval_review_audit.get("labeled_row_count")
+        ):
+            retrieval_blockers.append(
+                "retrieval relevance label-row evidence count mismatch"
+            )
+        if (_safe_int(evidence.get("human_reviewer_count")) or 0) < 1:
+            retrieval_blockers.append(
+                "retrieval relevance audit has no bound human reviewer"
+            )
+        reviewer_hashes = evidence.get("human_reviewer_ids_sha256", [])
+        if (
+            not isinstance(reviewer_hashes, list)
+            or len(reviewer_hashes)
+            != (_safe_int(evidence.get("human_reviewer_count")) or 0)
+            or any(
+                not _is_sha256(value)
+                for value in reviewer_hashes
+            )
+        ):
+            retrieval_blockers.append(
+                "retrieval relevance reviewer identity hashes are invalid"
+            )
     retrieval_score = retrieval_review_audit.get("minimum_retrieval_score")
     if retrieval_score is None:
         retrieval_blockers.append("retrieval relevance audit has no selected threshold")
@@ -322,6 +422,17 @@ def build_pilot_freeze_proposal(
             "reason": "independent outcome-blind human relevance review",
             "review_audit_schema_version": retrieval_review_audit.get(
                 "schema_version"
+            ),
+            "source_designs": retrieval_review_audit.get("source_designs"),
+            "review_key_sha256": (
+                evidence.get("review_key_sha256")
+                if isinstance(evidence, dict)
+                else None
+            ),
+            "labels_sha256": (
+                evidence.get("labels_sha256")
+                if isinstance(evidence, dict)
+                else None
             ),
         },
         "execution_blockers": execution_blockers,
@@ -955,3 +1066,8 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value)
+    return len(text) == 64 and all(char in "0123456789abcdef" for char in text)

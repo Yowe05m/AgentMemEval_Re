@@ -193,9 +193,12 @@ python tools/task4/build_resource_audit.py `
   --output outputs/campaigns/<campaign>/resource_audit_<utc>.json
 ```
 
-先从完整 P/E Pilot 的真实语义检索事件生成 240 条分层、结果盲化的人工审查表。
-`blind_review.jsonl` 不含检索分数或牌局收益；人工填写 `human_labels.tsv` 后，
-审计命令才会按预注册精度下界和空检索率约束冻结阈值。模型标签不能冒充人工标签：
+先从恰好一个完整 P Pilot 和一个完整 E Pilot 的真实语义检索事件生成 240 条分层、
+结果盲化的人工审查表。`blind_review.jsonl` 不含检索分数或牌局收益；review key
+会绑定两个 Campaign 的 manifest、state 和每个 leaf 的 events SHA-256。人工填写
+`human_labels.tsv` 后，审计命令才会按预注册精度下界和空检索率约束冻结阈值，并把
+review key、标签文件和匿名化 reviewer identity 哈希写入 V2 审计。模型标签不能
+冒充人工标签：
 
 ```powershell
 python tools/task4/retrieval_relevance_review.py build `

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 ALLOWED_LABELS = {"relevant", "irrelevant", "uncertain"}
+REQUIRED_SOURCE_DESIGNS = {"mixed_table", "target_vs_seven_no_memory"}
 REVIEW_POLICY = {
     "minimum_rows": 200,
     "minimum_decisive_selected_rows": 30,
@@ -37,17 +38,25 @@ def build_relevance_review_pack(
         state_path = campaign_dir / "state.tsv"
         manifest = _read_json(manifest_path)
         campaign_id = str(manifest.get("campaign_id") or campaign_dir.name)
+        campaign = manifest.get("campaign", {})
+        if not isinstance(campaign, dict):
+            raise ValueError(f"{campaign_id} manifest lacks campaign specification")
+        design = str(campaign.get("design", ""))
+        seeds = campaign.get("seeds", [])
+        conditions = campaign.get("conditions") or [
+            {"condition_id": "mixed_table", "target_mechanism": "mixed"}
+        ]
+        if not isinstance(seeds, list) or not isinstance(conditions, list):
+            raise ValueError(f"{campaign_id} manifest has invalid campaign matrix")
+        expected = len(seeds) * len(conditions)
         with state_path.open("r", encoding="utf-8", newline="") as handle:
             states = list(csv.DictReader(handle, delimiter="\t"))
         completed = [row for row in states if row.get("status") == "complete"]
-        sources.append(
-            {
-                "campaign_id": campaign_id,
-                "campaign_manifest_sha256": _sha256(manifest_path),
-                "state_tsv_sha256": _sha256(state_path),
-                "completed_state_rows": len(completed),
-            }
-        )
+        if expected < 1 or len(completed) != expected:
+            raise ValueError(
+                f"{campaign_id} matrix is incomplete: {len(completed)}/{expected}"
+            )
+        event_sources: list[dict[str, Any]] = []
         for state in completed:
             run_id = str(state["run_id"])
             run_dir = campaign_dir / "runs" / run_id
@@ -55,6 +64,15 @@ def build_relevance_review_pack(
                 run_dir = Path(str(state["run_dir"]))
             events_path = run_dir / "events.jsonl"
             event_hash = _sha256(events_path)
+            event_sources.append(
+                {
+                    "condition_id": str(state.get("condition_id", "")),
+                    "seed": int(state["seed"]),
+                    "attempt": int(state["attempt"]),
+                    "run_id": run_id,
+                    "events_sha256": event_hash,
+                }
+            )
             with events_path.open("r", encoding="utf-8") as handle:
                 for line_number, line in enumerate(handle, 1):
                     if not line.strip():
@@ -114,6 +132,33 @@ def build_relevance_review_pack(
                                 "salience": _optional_float(score.get("salience")),
                             }
                         )
+        sources.append(
+            {
+                "campaign_id": campaign_id,
+                "campaign_dir": str(campaign_dir),
+                "design": design,
+                "campaign_manifest_sha256": _sha256(manifest_path),
+                "state_tsv_sha256": _sha256(state_path),
+                "expected_state_rows": expected,
+                "completed_state_rows": len(completed),
+                "matrix_complete": len(completed) == expected,
+                "event_sources": sorted(
+                    event_sources,
+                    key=lambda item: (
+                        item["condition_id"],
+                        item["seed"],
+                        item["attempt"],
+                    ),
+                ),
+            }
+        )
+    observed_designs = {str(source["design"]) for source in sources}
+    if len(sources) != 2 or observed_designs != REQUIRED_SOURCE_DESIGNS:
+        raise ValueError(
+            "retrieval review requires exactly one complete Campaign P and E source: "
+            f"count={len(sources)}, "
+            f"designs={sorted(observed_designs)}/{sorted(REQUIRED_SOURCE_DESIGNS)}"
+        )
     if not pairs:
         raise ValueError("completed pilot leaves contain no query-record retrieval pairs")
     boundaries = [_quantile([item["score"] for item in pairs], q) for q in (0.25, 0.5, 0.75)]
@@ -147,16 +192,7 @@ def build_relevance_review_pack(
     for index, pair in enumerate(selected, 1):
         row_id = f"RR{index:04d}_{hashlib.sha256(pair['pair_key'].encode()).hexdigest()[:12]}"
         keyed_rows.append({"row_id": row_id, **pair})
-        blind_rows.append(
-            {
-                "row_id": row_id,
-                "mechanism": pair["mechanism"],
-                "stage": pair["stage"],
-                "phase": pair["phase"],
-                "query": pair["query"],
-                "record": pair["record"],
-            }
-        )
+        blind_rows.append(_blind_row(row_id, pair))
     return {
         "schema_version": "task4_retrieval_relevance_review_pack_v1",
         "status": "pending_independent_human_labels",
@@ -178,8 +214,73 @@ def build_relevance_review_pack(
 def audit_relevance_labels(pack: dict[str, Any], labels: list[dict[str, str]]) -> dict[str, Any]:
     """Validate independent human labels and apply the preregistered threshold rule."""
 
-    rows = {str(row["row_id"]): row for row in pack.get("keyed_rows", [])}
     blockers: list[str] = []
+    keyed_rows = pack.get("keyed_rows", [])
+    if (
+        not isinstance(keyed_rows, list)
+        or not all(
+            isinstance(row, dict) and str(row.get("row_id", "")).strip()
+            for row in keyed_rows
+        )
+    ):
+        blockers.append("review pack keyed rows are invalid")
+        keyed_rows = []
+    row_ids = [str(row["row_id"]) for row in keyed_rows]
+    if len(set(row_ids)) != len(row_ids):
+        blockers.append("review pack contains duplicate keyed row IDs")
+    rows = {str(row["row_id"]): row for row in keyed_rows}
+    if pack.get("schema_version") != "task4_retrieval_relevance_review_pack_v1":
+        blockers.append("review pack schema is invalid")
+    if pack.get("status") != "pending_independent_human_labels":
+        blockers.append("review pack status is invalid")
+    if pack.get("policy") != REVIEW_POLICY:
+        blockers.append("review pack policy is missing or altered")
+    sources = pack.get("sources", [])
+    source_designs = (
+        {str(source.get("design", "")) for source in sources}
+        if isinstance(sources, list)
+        and all(isinstance(source, dict) for source in sources)
+        else set()
+    )
+    if (
+        not isinstance(sources, list)
+        or len(sources) != 2
+        or source_designs != REQUIRED_SOURCE_DESIGNS
+    ):
+        blockers.append("review pack does not bind complete Campaign P/E designs")
+    if (
+        not isinstance(sources, list)
+        or len(sources) != 2
+        or any(not _source_evidence_complete(source) for source in sources)
+    ):
+        blockers.append("review pack source matrix or event evidence is incomplete")
+    blind_rows = pack.get("blind_rows", [])
+    expected_blind_rows = [
+        _blind_row(str(row["row_id"]), row)
+        for row in keyed_rows
+    ]
+    if blind_rows != expected_blind_rows:
+        blockers.append("blind review rows do not match the keyed-row projection")
+    source_rebuild_verified = False
+    source_rebuild_content_sha256 = None
+    if (
+        isinstance(sources, list)
+        and len(sources) == 2
+        and all(_source_evidence_complete(source) for source in sources)
+    ):
+        try:
+            rebuilt = build_relevance_review_pack(
+                [str(source["campaign_dir"]) for source in sources],
+                sample_size=int(pack.get("requested_sample_size", 0)),
+                sample_seed=int(pack.get("sample_seed", 0)),
+            )
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            blockers.append(f"review pack source rebuild failed: {type(exc).__name__}")
+        else:
+            source_rebuild_content_sha256 = _json_sha256(rebuilt)
+            source_rebuild_verified = rebuilt == pack
+            if not source_rebuild_verified:
+                blockers.append("review pack differs from deterministic source rebuild")
     if len(rows) < int(REVIEW_POLICY["minimum_rows"]):
         blockers.append(f"review sample too small: {len(rows)}")
     label_map: dict[str, dict[str, str]] = {}
@@ -248,7 +349,7 @@ def audit_relevance_labels(pack: dict[str, Any], labels: list[dict[str, str]]) -
     if not eligible:
         blockers.append("no candidate threshold satisfies the preregistered review policy")
     return {
-        "schema_version": "task4_retrieval_relevance_audit_v1",
+        "schema_version": "task4_retrieval_relevance_audit_v2",
         "review_status": "human_labels_verified" if not blockers else "blocked",
         "retrieval_threshold_status": "frozen" if not blockers else "blocked",
         "minimum_retrieval_score": selected_threshold,
@@ -257,12 +358,52 @@ def audit_relevance_labels(pack: dict[str, Any], labels: list[dict[str, str]]) -
         "labeled_row_count": len(label_map),
         "uncertain_rate": uncertain_rate,
         "candidate_evaluations": evaluations,
+        "review_pack_content_sha256": _json_sha256(pack),
+        "review_policy_sha256": _json_sha256(REVIEW_POLICY),
+        "source_campaign_count": len(sources) if isinstance(sources, list) else 0,
+        "source_designs": sorted(source_designs),
+        "source_evidence": sources if isinstance(sources, list) else [],
+        "source_rebuild_verified": source_rebuild_verified,
+        "source_rebuild_content_sha256": source_rebuild_content_sha256,
         "blockers": blockers,
     }
 
 
 def _optional_float(value: Any) -> float | None:
     return None if value is None else float(value)
+
+
+def _blind_record(record: dict[str, Any]) -> dict[str, Any]:
+    outcome_prefixes = (
+        "hand_outcome:",
+        "showdown_visible_agent_ids:",
+        "summary:",
+    )
+    state_lines = str(record.get("state_summary", "")).splitlines()
+    outcome_blind_state = "\n".join(
+        line
+        for line in state_lines
+        if not line.strip().lower().startswith(outcome_prefixes)
+    )
+    return {
+        "state_summary": outcome_blind_state,
+        "action_summary": str(record.get("action_summary", "")),
+        "features": list(record.get("features", [])),
+    }
+
+
+def _blind_row(row_id: str, pair: dict[str, Any]) -> dict[str, Any]:
+    record = pair.get("record", {})
+    if not isinstance(record, dict):
+        record = {}
+    return {
+        "row_id": row_id,
+        "mechanism": str(pair.get("mechanism", "")),
+        "stage": str(pair.get("stage", "")),
+        "phase": str(pair.get("phase", "")),
+        "query": str(pair.get("query", "")),
+        "record": _blind_record(record),
+    }
 
 
 def _score_bin(value: float, boundaries: list[float]) -> str:
@@ -312,3 +453,49 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _json_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _source_evidence_complete(source: Any) -> bool:
+    if not isinstance(source, dict):
+        return False
+    if source.get("matrix_complete") is not True:
+        return False
+    if not str(source.get("campaign_dir", "")).strip():
+        return False
+    try:
+        expected = int(source.get("expected_state_rows", -1))
+        completed = int(source.get("completed_state_rows", -2))
+    except (TypeError, ValueError):
+        return False
+    if expected < 1 or completed != expected:
+        return False
+    if not _is_sha256(source.get("campaign_manifest_sha256")):
+        return False
+    if not _is_sha256(source.get("state_tsv_sha256")):
+        return False
+    event_sources = source.get("event_sources")
+    return (
+        isinstance(event_sources, list)
+        and len(event_sources) == expected
+        and all(
+            isinstance(event, dict)
+            and bool(str(event.get("run_id", "")).strip())
+            and _is_sha256(event.get("events_sha256"))
+            for event in event_sources
+        )
+    )
+
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value)
+    return len(text) == 64 and all(char in "0123456789abcdef" for char in text)

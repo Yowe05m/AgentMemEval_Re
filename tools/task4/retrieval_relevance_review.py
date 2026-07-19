@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 from pathlib import Path
 
@@ -73,6 +74,25 @@ def main() -> int:
         labels = list(csv.DictReader(handle, delimiter="\t"))
     pack = json.loads(Path(args.review_key).read_text(encoding="utf-8"))
     result = audit_relevance_labels(pack, labels)
+    reviewer_ids = sorted(
+        {
+            str(row.get("reviewer_id", "")).strip()
+            for row in labels
+            if str(row.get("reviewer_id", "")).strip()
+        }
+    )
+    result["input_evidence"] = {
+        "review_key_path": str(Path(args.review_key).resolve()),
+        "review_key_sha256": _sha256(Path(args.review_key)),
+        "labels_path": str(Path(args.labels).resolve()),
+        "labels_sha256": _sha256(Path(args.labels)),
+        "label_row_count": len(labels),
+        "human_reviewer_count": len(reviewer_ids),
+        "human_reviewer_ids_sha256": [
+            hashlib.sha256(value.encode("utf-8")).hexdigest()
+            for value in reviewer_ids
+        ],
+    }
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as handle:
@@ -80,6 +100,14 @@ def main() -> int:
         handle.write("\n")
     print(json.dumps({"output": str(output), **result}, ensure_ascii=False, indent=2))
     return 0 if result["retrieval_threshold_status"] == "frozen" else 2
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 if __name__ == "__main__":

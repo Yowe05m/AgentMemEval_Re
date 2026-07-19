@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from agentmemeval.evaluation.pilot import (
     build_pilot_runtime_equivalence_audit,
     calibrate_behavior_thresholds,
 )
+from agentmemeval.evaluation.relevance_review import REVIEW_POLICY
 
 
 def _p() -> dict[str, object]:
@@ -244,10 +246,67 @@ def _metrics(
 
 def _review() -> dict[str, object]:
     return {
-        "schema_version": "task4_retrieval_relevance_audit_v1",
+        "schema_version": "task4_retrieval_relevance_audit_v2",
         "review_status": "human_labels_verified",
         "retrieval_threshold_status": "frozen",
         "minimum_retrieval_score": 0.42,
+        "sampled_row_count": 200,
+        "labeled_row_count": 200,
+        "review_pack_content_sha256": "a" * 64,
+        "review_policy_sha256": hashlib.sha256(
+            json.dumps(
+                REVIEW_POLICY,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        "source_campaign_count": 2,
+        "source_designs": [
+            "mixed_table",
+            "target_vs_seven_no_memory",
+        ],
+        "source_evidence": [
+            {
+                "campaign_dir": "/evidence/p",
+                "design": "mixed_table",
+                "matrix_complete": True,
+                "expected_state_rows": 1,
+                "completed_state_rows": 1,
+                "campaign_manifest_sha256": "b" * 64,
+                "state_tsv_sha256": "c" * 64,
+                "event_sources": [
+                    {
+                        "run_id": "p__s1__a01",
+                        "events_sha256": "d" * 64,
+                    }
+                ],
+            },
+            {
+                "campaign_dir": "/evidence/e",
+                "design": "target_vs_seven_no_memory",
+                "matrix_complete": True,
+                "expected_state_rows": 1,
+                "completed_state_rows": 1,
+                "campaign_manifest_sha256": "e" * 64,
+                "state_tsv_sha256": "f" * 64,
+                "event_sources": [
+                    {
+                        "run_id": "e__s1__a01",
+                        "events_sha256": "a" * 64,
+                    }
+                ],
+            },
+        ],
+        "source_rebuild_verified": True,
+        "source_rebuild_content_sha256": "a" * 64,
+        "input_evidence": {
+            "review_key_sha256": "b" * 64,
+            "labels_sha256": "c" * 64,
+            "label_row_count": 200,
+            "human_reviewer_count": 1,
+            "human_reviewer_ids_sha256": ["d" * 64],
+        },
         "blockers": [],
     }
 
@@ -325,7 +384,13 @@ def test_freeze_proposal_requires_power_behavior_and_execution() -> None:
         "retrieval_threshold_status": "frozen",
         "minimum_retrieval_score": 0.42,
         "reason": "independent outcome-blind human relevance review",
-        "review_audit_schema_version": "task4_retrieval_relevance_audit_v1",
+        "review_audit_schema_version": "task4_retrieval_relevance_audit_v2",
+        "source_designs": [
+            "mixed_table",
+            "target_vs_seven_no_memory",
+        ],
+        "review_key_sha256": "b" * 64,
+        "labels_sha256": "c" * 64,
     }
     p_audits[0] = {
         "evaluation_target_ids": ["fact_00"],
