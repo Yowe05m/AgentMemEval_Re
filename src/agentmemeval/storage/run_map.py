@@ -5,7 +5,8 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-from pathlib import Path
+import re
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
@@ -28,14 +29,18 @@ RUN_MAP_FIELDS = (
     "classification",
     "formal_main_table_eligible",
     "exclusion_reasons",
+    "leaf_artifacts_sha256",
     "campaign_manifest_sha256",
     "state_tsv_sha256",
 )
 REQUIRED_LEAF_ARTIFACTS = (
     "resolved_config.yaml",
     "manifest.json",
+    "hand_summaries.jsonl",
     "metrics.json",
     "protocol_audit.json",
+    "checkpoint_generalization.json",
+    "report.md",
     "experiment_result.json",
 )
 
@@ -54,22 +59,43 @@ def build_run_map(
         state_path = campaign_dir / "state.tsv"
         manifest = _read_json(manifest_path)
         campaign_id = str(manifest.get("campaign_id") or campaign_dir.name)
+        nested_campaign = manifest.get("campaign")
+        campaign_manifest_identity_invalid = (
+            manifest.get("schema_version") != "agentmemeval_campaign_v1"
+            or not manifest.get("campaign_id")
+            or not isinstance(nested_campaign, dict)
+            or nested_campaign.get("campaign_id") != manifest.get("campaign_id")
+        )
         with state_path.open("r", encoding="utf-8", newline="") as handle:
             states = list(csv.DictReader(handle, delimiter="\t"))
         latest: dict[tuple[str, str, str], dict[str, str]] = {}
+        lifecycle_identities: dict[
+            tuple[str, str, str], set[tuple[str, str, str]]
+        ] = {}
         for state in states:
             key = (
                 str(state.get("condition_id", "")),
                 str(state.get("seed", "")),
                 str(state.get("attempt", "")),
             )
+            lifecycle_identities.setdefault(key, set()).add(
+                (
+                    str(state.get("target_mechanism", "")),
+                    str(state.get("run_id", "")),
+                    str(state.get("run_dir", "")),
+                )
+            )
             latest[key] = state
-        for state in latest.values():
+        for key, state in latest.items():
             mapped.append(
                 _map_attempt(
                     campaign_dir,
                     campaign_id,
                     state,
+                    campaign_manifest_identity_invalid=(
+                        campaign_manifest_identity_invalid
+                    ),
+                    lifecycle_identity_conflict=len(lifecycle_identities[key]) != 1,
                     manifest_sha=_sha256(manifest_path),
                     state_sha=_sha256(state_path),
                 )
@@ -92,7 +118,7 @@ def build_run_map(
         writer.writerows(mapped)
     excluded = [row for row in mapped if not row["formal_main_table_eligible"]]
     payload = {
-        "schema_version": "task4_formal_main_table_exclusions_v1",
+        "schema_version": "task4_formal_main_table_exclusions_v2",
         "run_map": str(output),
         "run_map_sha256": _sha256(output),
         "total_attempts": len(mapped),
@@ -119,13 +145,16 @@ def _map_attempt(
     campaign_id: str,
     state: dict[str, str],
     *,
+    campaign_manifest_identity_invalid: bool,
+    lifecycle_identity_conflict: bool,
     manifest_sha: str,
     state_sha: str,
 ) -> dict[str, Any]:
     run_id = str(state.get("run_id", ""))
     source_run_dir = str(state.get("run_dir", ""))
-    local = campaign_dir / "runs" / run_id
-    run_dir = local if local.is_dir() else Path(source_run_dir)
+    raw_runs_root = campaign_dir / "runs"
+    runs_root = raw_runs_root.resolve()
+    run_dir = (campaign_dir / "runs" / run_id).resolve()
     reasons: list[str] = []
     status = str(state.get("status", ""))
     run_mode = "unknown"
@@ -133,24 +162,75 @@ def _map_attempt(
     validity_status = "unavailable"
     execution_valid: bool | None = None
     paper_eligible: bool | None = None
-    missing = [name for name in REQUIRED_LEAF_ARTIFACTS if not (run_dir / name).is_file()]
+    canonical_leaf = (
+        bool(run_id)
+        and not raw_runs_root.is_symlink()
+        and run_dir.is_relative_to(runs_root)
+        and run_dir.is_dir()
+    )
+    if not canonical_leaf:
+        reasons.append("canonical_archive_leaf_missing_or_unsafe")
+    if campaign_manifest_identity_invalid:
+        reasons.append("campaign_manifest_identity_invalid")
+    if lifecycle_identity_conflict:
+        reasons.append("state_lifecycle_identity_conflict")
+    missing = (
+        [
+            name
+            for name in REQUIRED_LEAF_ARTIFACTS
+            if not (run_dir / name).is_file()
+            or (run_dir / name).stat().st_size < 1
+        ]
+        if canonical_leaf
+        else list(REQUIRED_LEAF_ARTIFACTS)
+    )
     if status != "complete":
         reasons.append(f"state_status:{status}")
     if missing:
         reasons.append("missing_artifacts:" + ";".join(missing))
     if not missing:
         resolved = yaml.safe_load((run_dir / "resolved_config.yaml").read_text(encoding="utf-8"))
+        if not isinstance(resolved, dict):
+            raise ValueError(f"expected YAML object: {run_dir / 'resolved_config.yaml'}")
         experiment = dict(resolved.get("experiment", {}))
         run_mode = str(experiment.get("run_mode", "unknown"))
         protocol_variant = str(experiment.get("protocol_variant", "unknown"))
+        run_manifest = _read_json(run_dir / "manifest.json")
         metrics = _read_json(run_dir / "metrics.json")
         protocol = _read_json(run_dir / "protocol_audit.json")
+        experiment_result = _read_json(run_dir / "experiment_result.json")
+        reasons.extend(
+            _identity_reasons(
+                state=state,
+                campaign_id=campaign_id,
+                source_run_dir=source_run_dir,
+                run_manifest=run_manifest,
+                experiment=experiment,
+                experiment_result=experiment_result,
+            )
+        )
         validity = dict(metrics.get("run_validity", {}))
         validity_status = str(validity.get("status", "unknown"))
-        paper_eligible = bool(validity.get("paper_eligible"))
-        execution_valid = dict(protocol.get("execution_health", {})).get("valid") is True
+        paper_eligible = validity.get("paper_eligible") is True
+        execution = dict(protocol.get("execution_health", {}))
+        execution_valid = (
+            execution.get("valid") is True
+            and execution.get("status") == "passed"
+            and all(
+                _safe_int(execution.get(key)) == 0
+                for key in (
+                    "fallback_count",
+                    "memory_revision_fallback_count",
+                    "reward_conservation_violation_count",
+                    "stack_conservation_violation_count",
+                )
+            )
+        )
         if not execution_valid:
             reasons.append("execution_invalid")
+        code = dict(dict(run_manifest.get("metadata", {})).get("code", {}))
+        if code.get("dirty") is not False:
+            reasons.append("dirty_or_unverified_code")
         if not paper_eligible:
             reasons.append(f"run_validity:{validity_status}")
         if run_mode != "formal":
@@ -162,12 +242,21 @@ def _map_attempt(
         classification = "formal_main_table_candidate"
     elif status != "complete":
         classification = "partial_or_failed"
-    elif run_mode == "pilot":
-        classification = "pilot_descriptive_only"
     elif "model_substituted" in protocol_variant:
         classification = "sensitivity_only"
+    elif run_mode == "pilot":
+        classification = "pilot_descriptive_only"
     else:
         classification = "invalid_or_ineligible"
+    leaf_hashes = (
+        {
+            name: _sha256(run_dir / name)
+            for name in REQUIRED_LEAF_ARTIFACTS
+            if (run_dir / name).is_file()
+        }
+        if canonical_leaf
+        else {}
+    )
     return {
         "campaign_id": campaign_id,
         "condition_id": state.get("condition_id", ""),
@@ -186,9 +275,67 @@ def _map_attempt(
         "classification": classification,
         "formal_main_table_eligible": eligible,
         "exclusion_reasons": "|".join(reasons),
+        "leaf_artifacts_sha256": json.dumps(
+            leaf_hashes, ensure_ascii=False, sort_keys=True
+        ),
         "campaign_manifest_sha256": manifest_sha,
         "state_tsv_sha256": state_sha,
     }
+
+
+def _identity_reasons(
+    *,
+    state: dict[str, str],
+    campaign_id: str,
+    source_run_dir: str,
+    run_manifest: dict[str, Any],
+    experiment: dict[str, Any],
+    experiment_result: dict[str, Any],
+) -> list[str]:
+    reasons: list[str] = []
+    run_id = str(state.get("run_id", ""))
+    seed = _safe_int(state.get("seed"))
+    expected_config_path = _source_child_path(
+        source_run_dir, "resolved_config.yaml"
+    )
+    manifest_contract = {
+        "run_id": run_id,
+        "seed": seed,
+        "output_dir": source_run_dir,
+        "config_snapshot_path": expected_config_path,
+    }
+    for key, expected in manifest_contract.items():
+        if run_manifest.get(key) != expected:
+            reasons.append(f"manifest_identity_mismatch:{key}")
+    experiment_contract = {
+        "campaign_id": campaign_id,
+        "campaign_condition_id": str(state.get("condition_id", "")),
+        "seed": seed,
+        "run_id": run_id,
+    }
+    for key, expected in experiment_contract.items():
+        if experiment.get(key) != expected:
+            reasons.append(f"resolved_config_identity_mismatch:{key}")
+    if experiment_result.get("run_id") != run_id:
+        reasons.append("experiment_result_identity_mismatch:run_id")
+    return reasons
+
+
+def _source_child_path(source: str, child: str) -> str:
+    if not source:
+        return ""
+    if re.match(r"^[A-Za-z]:[\\/]", source) or source.startswith("\\\\"):
+        return str(PureWindowsPath(source) / child)
+    return str(PurePosixPath(source) / child)
+
+
+def _safe_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _read_json(path: Path) -> dict[str, Any]:

@@ -175,7 +175,10 @@ python tools/task4/file_manifest.py verify `
 回收多个 campaign 后生成一份 `server_run_map.csv` 和 formal 主表排除清单。工具按
 campaign/condition/seed/attempt 折叠 lifecycle，只把完整、formal、execution valid、
 paper eligible 且非 model-substituted 的 leaf 标为候选；Pilot、失败、partial 和敏感性
-实验保留但分层排除：
+实验保留但分层排除。V2 只读取每个回收 campaign 自身 `runs/<run_id>` 的 canonical
+leaf，不回退到 `state.tsv` 中仍可访问的服务器绝对路径；同时交叉绑定 state、manifest、
+resolved config 与 experiment result 身份，要求八项标准工件、clean code、零 fallback/
+守恒违规，并把每个叶工件的 SHA-256 写入 run map：
 
 ```powershell
 python tools/task4/build_run_map.py `
