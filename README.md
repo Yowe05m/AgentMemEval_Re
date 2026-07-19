@@ -228,6 +228,17 @@ python tools/task4/file_manifest.py verify `
 GNU 风格 `.sha256` 和最后写入的 verified receipt。工具会重新校验源目录、逐 tar member
 读取大小/SHA-256、拒绝危险或特殊成员，并在本地下载后提供严格 checksum 验证：
 
+封存前先运行 latest-attempt/矩阵/标准工件/symlink/静默期门禁。`state.tsv` 是
+append-only，因此历史 `running` 行不会误阻塞；门禁按每个矩阵身份的最大 attempt
+最后状态判断。只有 `ready_to_seal` 才可执行 snapshot build：
+
+```bash
+python tools/task4/audit_campaign_seal.py \
+  --campaign-dir outputs/campaigns/<campaign> \
+  --minimum-quiet-seconds 120 \
+  --output /root/autodl-tmp/backups/<unique>_seal_readiness.json
+```
+
 ```bash
 python tools/task4/snapshot_archive.py build \
   --root outputs/campaigns/<campaign> \
