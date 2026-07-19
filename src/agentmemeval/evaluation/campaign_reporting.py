@@ -171,6 +171,51 @@ def _extract_rows(
                 }
                 for seed, effect in zip(seeds, values, strict=True)
             )
+        auxiliary = metrics.get("auxiliary_table_run_estimands", {})
+        if isinstance(auxiliary, dict):
+            for metric_name, raw_family in sorted(auxiliary.items()):
+                if not isinstance(raw_family, dict):
+                    continue
+                auxiliary_family = raw_family.get("estimand")
+                if not isinstance(auxiliary_family, dict):
+                    continue
+                auxiliary_baseline = str(
+                    auxiliary_family.get("baseline_mechanism", baseline)
+                )
+                auxiliary_seeds = [
+                    int(value)
+                    for value in auxiliary_family.get("matched_seeds", [])
+                ]
+                auxiliary_effects = dict(
+                    auxiliary_family.get("effects_by_mechanism", {})
+                )
+                auxiliary_summaries = dict(auxiliary_family.get("metrics", {}))
+                for mechanism, values in sorted(auxiliary_effects.items()):
+                    contrast = f"{mechanism}_vs_{auxiliary_baseline}"
+                    summary = dict(auxiliary_summaries.get(mechanism, {}))
+                    summary["raw_p_value"] = None
+                    summary["adjusted_p_value"] = None
+                    rows.append(
+                        _table_row(
+                            design,
+                            contrast,
+                            str(metric_name),
+                            auxiliary_baseline,
+                            summary,
+                        )
+                    )
+                    paired.extend(
+                        {
+                            "design": design,
+                            "contrast": contrast,
+                            "endpoint": str(metric_name),
+                            "seed": seed,
+                            "effect": float(effect),
+                        }
+                        for seed, effect in zip(
+                            auxiliary_seeds, values, strict=True
+                        )
+                    )
         return rows, paired
     if design == "target_vs_seven_no_memory":
         endpoint = str(aggregate.get("primary_endpoint", "final_test_bb_per_100"))

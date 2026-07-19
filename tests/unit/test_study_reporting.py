@@ -154,31 +154,49 @@ def _analysis_bundle(root: Path, design: str, status: str) -> Path:
             ),
         )
         writer.writeheader()
-        writer.writerow(
-            {
-                "campaign_status": status,
-                "paper_inference_eligible": status == "ready",
-                "analysis_classification": (
-                    "formal_inference_ready"
-                    if status == "ready"
-                    else "pilot_descriptive_only"
-                ),
-                "design": design,
-                "contrast": "expr_vs_baseline",
-                "endpoint": "final_test_bb_per_100",
-                "baseline": "baseline",
-                "n_seed_pairs": 8,
-                "mean_effect": 1.5,
-                "median_effect": 1.0,
-                "std_effect": 2.0,
-                "ci95_low": -0.5,
-                "ci95_high": 3.5,
-                "bootstrap_ci95_low": -0.25,
-                "bootstrap_ci95_high": 3.25,
-                "raw_p_value": 0.1,
-                "holm_adjusted_p_value": 0.4,
-            }
+        contrasts = (
+            ("expr_vs_fact", "fact_expr_sync_vs_fact", "fact_expr_async_vs_fact")
+            if design == "mixed_table"
+            else ("fact_target", "expr_target", "sync_target", "async_target")
         )
+        endpoints = (
+            "final_test_bb_per_100",
+            "final_test_chip_per_hand",
+            "train_bb_per_100",
+            "train_chip_per_hand",
+            "generalization_gap_bb_per_100",
+        )
+        for contrast in contrasts:
+            for endpoint in endpoints:
+                writer.writerow(
+                    {
+                        "campaign_status": status,
+                        "paper_inference_eligible": status == "ready",
+                        "analysis_classification": (
+                            "formal_inference_ready"
+                            if status == "ready"
+                            else "pilot_descriptive_only"
+                        ),
+                        "design": design,
+                        "contrast": contrast,
+                        "endpoint": endpoint,
+                        "baseline": "baseline",
+                        "n_seed_pairs": 8,
+                        "mean_effect": 1.5,
+                        "median_effect": 1.0,
+                        "std_effect": 2.0,
+                        "ci95_low": -0.5,
+                        "ci95_high": 3.5,
+                        "bootstrap_ci95_low": -0.25,
+                        "bootstrap_ci95_high": 3.25,
+                        "raw_p_value": (
+                            0.1 if endpoint == "final_test_bb_per_100" else None
+                        ),
+                        "holm_adjusted_p_value": (
+                            0.4 if endpoint == "final_test_bb_per_100" else None
+                        ),
+                    }
+                )
     report = root / "campaign_analysis_report.md"
     report.write_text("# report", encoding="utf-8")
     plot_data = root / "primary_effects_plot_data.csv"

@@ -41,6 +41,17 @@ def test_mixed_nonformal_campaign_is_complete_descriptive_only(tmp_path: Path) -
     assert result["aggregate_status"] == "descriptive_only"
     aggregate = yaml.safe_load(Path(result["aggregate_path"]).read_text(encoding="utf-8"))
     assert aggregate["status"] == "descriptive_only"
+    auxiliary = aggregate["aggregate_metrics"]["auxiliary_table_run_estimands"]
+    assert set(auxiliary) == {
+        "final_test_chip_per_hand",
+        "train_bb_per_100",
+        "train_chip_per_hand",
+        "generalization_gap_bb_per_100",
+    }
+    assert all(
+        item["estimand"]["status"] == "descriptive_only"
+        for item in auxiliary.values()
+    )
     campaign_dir = Path(result["campaign_dir"])
     state_path = campaign_dir / "state.tsv"
     state_text = state_path.read_text(encoding="utf-8")

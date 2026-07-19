@@ -183,7 +183,9 @@ python -m agentmemeval pilot-plan `
 `blocked_or_underpowered`；只有 aggregate status 为 `ready` 时
 `paper_inference_eligible=true`，其余状态显式禁止论文推断。V3 对 Campaign E
 同时导出 final test BB/100、final chip/hand、train BB/100、train chip/hand 和
-train-to-test generalization gap；p 值与主图仍只对应预注册主终点：
+train-to-test generalization gap；Campaign P 也从 immutable checkpoint rows
+按同 seed table/run、同机制桌内均值重建上述五类指标。p 值与主图仍只对应预注册
+主终点，四类次要指标只报告效应、n 和 bootstrap 95% CI：
 
 ```powershell
 python tools/task4/build_campaign_analysis.py `

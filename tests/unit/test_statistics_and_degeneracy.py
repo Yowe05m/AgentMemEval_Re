@@ -158,6 +158,45 @@ def test_A7_R_collapses_agents_within_table_before_seed_effect() -> None:
     assert unit["seed"] == 7
 
 
+def test_A7_R_supports_secondary_train_chip_and_gap_endpoints() -> None:
+    rows = [
+        {
+            "checkpoint_hand": 10,
+            "mechanism": "fact",
+            "train_bb_per_100": 1.0,
+            "train_chip_per_hand": 0.02,
+            "test_chip_per_hand": 0.03,
+            "generalization_gap_bb_per_100": -0.5,
+        },
+        {
+            "checkpoint_hand": 10,
+            "mechanism": "expr",
+            "train_bb_per_100": 4.0,
+            "train_chip_per_hand": 0.08,
+            "test_chip_per_hand": 0.09,
+            "generalization_gap_bb_per_100": 1.5,
+        },
+    ]
+    expected = {
+        "final_test_chip_per_hand": 0.06,
+        "train_bb_per_100": 3.0,
+        "train_chip_per_hand": 0.06,
+        "generalization_gap_bb_per_100": 2.0,
+    }
+    for endpoint, effect in expected.items():
+        unit = build_table_run_estimand(
+            rows,
+            seed=7,
+            run_id="run-7",
+            endpoint=endpoint,
+            baseline_mechanism="fact",
+            statistical_plan_status="pending_pilot_power_calibration",
+            multiple_comparison_method="holm",
+            required_seed_pairs=None,
+        )
+        assert unit["effects_vs_baseline"]["expr"] == pytest.approx(effect)
+
+
 def test_formal_A7_R_aggregation_uses_one_effect_per_seed_and_holm() -> None:
     metrics = []
     for seed, effect in ((1, 2.0), (2, 4.0), (3, 6.0)):

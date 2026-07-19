@@ -19,6 +19,8 @@ from agentmemeval.config.loader import load_config
 from agentmemeval.core.errors import ConfigError
 from agentmemeval.evaluation.aggregation import (
     aggregate_metrics,
+    aggregate_table_run_units,
+    build_table_run_estimand,
     validate_runtime_homogeneity,
 )
 from agentmemeval.evaluation.statistics import (
@@ -473,6 +475,13 @@ def _aggregate_campaign(
     if str(spec["design"]) == "mixed_table":
         metrics = [_read_json(Path(item["run_dir"]) / "metrics.json") for item in completed_runs]
         aggregate = aggregate_metrics(metrics)
+        aggregate["auxiliary_table_run_estimands"] = (
+            _aggregate_mixed_auxiliary_endpoints(
+                base_config,
+                completed_runs,
+                metrics,
+            )
+        )
         run_mode = str(base_config["experiment"].get("run_mode", "smoke"))
         if len(completed_runs) != expected:
             status = "incomplete_matrix"
@@ -492,6 +501,64 @@ def _aggregate_campaign(
             "aggregate_metrics": aggregate,
         }
     return _aggregate_target_vs_no_memory(spec, base_config, completed_runs, homogeneity)
+
+
+def _aggregate_mixed_auxiliary_endpoints(
+    base_config: dict[str, Any],
+    completed_runs: list[dict[str, str]],
+    metrics_list: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Rebuild secondary mixed-table effects from immutable checkpoint rows."""
+
+    experiment = dict(base_config.get("experiment", {}))
+    endpoints = (
+        "final_test_chip_per_hand",
+        "train_bb_per_100",
+        "train_chip_per_hand",
+        "generalization_gap_bb_per_100",
+    )
+    units: dict[str, list[dict[str, Any]]] = {endpoint: [] for endpoint in endpoints}
+    eligible_units: dict[str, list[dict[str, Any]]] = {
+        endpoint: [] for endpoint in endpoints
+    }
+    for state, metrics in zip(completed_runs, metrics_list, strict=True):
+        run_dir = Path(state["run_dir"])
+        checkpoint = _read_json(run_dir / "checkpoint_generalization.json")
+        rows = list(checkpoint.get("results", []))
+        for endpoint in endpoints:
+            unit = build_table_run_estimand(
+                rows,
+                seed=int(state["seed"]),
+                run_id=str(state["run_id"]),
+                endpoint=endpoint,
+                baseline_mechanism=str(
+                    experiment.get("primary_baseline_mechanism", "fact")
+                ),
+                statistical_plan_status=str(
+                    experiment.get("statistical_plan_status", "")
+                ),
+                multiple_comparison_method=str(
+                    experiment.get("multiple_comparison_method", "holm")
+                ),
+                required_seed_pairs=experiment.get("required_seed_pairs"),
+            )
+            units[endpoint].append(unit)
+            if metrics.get("run_validity", {}).get("paper_eligible") is True:
+                eligible_units[endpoint].append(unit)
+    formal = str(experiment.get("run_mode", "smoke")) == "formal"
+    return {
+        endpoint: {
+            "inference_role": "secondary_descriptive_no_p_value",
+            "population": (
+                "paper_eligible_formal_runs" if formal else "all_nonformal_runs"
+            ),
+            "estimand": aggregate_table_run_units(
+                eligible_units[endpoint] if formal else units[endpoint],
+                inference=False,
+            ),
+        }
+        for endpoint in endpoints
+    }
 
 
 def _aggregate_target_vs_no_memory(

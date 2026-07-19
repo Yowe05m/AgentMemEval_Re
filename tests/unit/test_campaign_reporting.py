@@ -25,7 +25,24 @@ def test_build_mixed_campaign_analysis_bundle(tmp_path: Path) -> None:
                 "matched_seeds": [11, 12, 13],
                 "effects_by_mechanism": {"expr": effects},
                 "metrics": {"expr": summary},
-            }
+            },
+            "auxiliary_table_run_estimands": {
+                "train_bb_per_100": {
+                    "inference_role": "secondary_descriptive_no_p_value",
+                    "population": "all_nonformal_runs",
+                    "estimand": {
+                        "endpoint": "train_bb_per_100",
+                        "baseline_mechanism": "fact",
+                        "matched_seeds": [11, 12, 13],
+                        "effects_by_mechanism": {"expr": [2.0, 4.0, 6.0]},
+                        "metrics": {
+                            "expr": summarize_values(
+                                [2.0, 4.0, 6.0], bootstrap_samples=100
+                            )
+                        },
+                    },
+                }
+            },
         },
     }
     source = tmp_path / "aggregate.json"
@@ -36,7 +53,9 @@ def test_build_mixed_campaign_analysis_bundle(tmp_path: Path) -> None:
     assert result["paper_inference_eligible"] is False
     assert result["paper_conclusion_prohibited"] is True
     assert result["analysis_classification"] == "pilot_descriptive_only"
-    assert result["paired_effect_row_count"] == 3
+    assert result["table_row_count"] == 2
+    assert result["primary_table_row_count"] == 1
+    assert result["paired_effect_row_count"] == 6
     assert (output / "primary_effects_plot.png").stat().st_size > 0
     with (output / "main_table.csv").open(
         "r", encoding="utf-8-sig", newline=""
@@ -45,6 +64,14 @@ def test_build_mixed_campaign_analysis_bundle(tmp_path: Path) -> None:
     assert rows[0]["contrast"] == "expr_vs_fact"
     assert rows[0]["n_seed_pairs"] == "3"
     assert rows[0]["paper_inference_eligible"] == "False"
+    assert {row["endpoint"] for row in rows} == {
+        "final_test_bb_per_100",
+        "train_bb_per_100",
+    }
+    secondary = next(
+        row for row in rows if row["endpoint"] == "train_bb_per_100"
+    )
+    assert secondary["holm_adjusted_p_value"] == ""
     with pytest.raises(FileExistsError):
         build_campaign_analysis(source, output)
 

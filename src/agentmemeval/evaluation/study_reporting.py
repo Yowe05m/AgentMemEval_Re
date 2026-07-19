@@ -42,6 +42,9 @@ def build_task4_study_report(
         evidence.extend(analysis["evidence"])
         for row in analysis["table_rows"]:
             table_rows.append({"campaign": campaign_key, **row})
+        blockers.extend(
+            _analysis_scope_blockers(campaign_key, analysis["table_rows"])
+        )
         if analysis["paper_inference_eligible"] is not True:
             blockers.append(
                 f"{campaign_key} analysis is not formal inference eligible"
@@ -269,6 +272,42 @@ def _audit_run_map(
         "eligible_attempt_count": len(eligible),
         "excluded_attempt_count": len(rows) - len(eligible),
     }
+
+
+def _analysis_scope_blockers(
+    campaign_key: str,
+    rows: list[dict[str, str]],
+) -> list[str]:
+    endpoints = {
+        "final_test_bb_per_100",
+        "final_test_chip_per_hand",
+        "train_bb_per_100",
+        "train_chip_per_hand",
+        "generalization_gap_bb_per_100",
+    }
+    contrasts = (
+        {
+            "expr_vs_fact",
+            "fact_expr_sync_vs_fact",
+            "fact_expr_async_vs_fact",
+        }
+        if campaign_key == "campaign_p"
+        else {"fact_target", "expr_target", "sync_target", "async_target"}
+    )
+    observed = {
+        (str(row.get("contrast", "")), str(row.get("endpoint", "")))
+        for row in rows
+    }
+    missing = sorted(
+        (contrast, endpoint)
+        for contrast in contrasts
+        for endpoint in endpoints
+        if (contrast, endpoint) not in observed
+    )
+    return [
+        f"{campaign_key} analysis is missing required cell {contrast}/{endpoint}"
+        for contrast, endpoint in missing
+    ]
 
 
 def _resource_status(audit: dict[str, Any]) -> str:

@@ -20,6 +20,9 @@ from agentmemeval.evaluation.statistics import (
 ENDPOINT_FIELDS = {
     "final_test_bb_per_100": "bb_per_100",
     "final_test_chip_per_hand": "test_chip_per_hand",
+    "train_bb_per_100": "train_bb_per_100",
+    "train_chip_per_hand": "train_chip_per_hand",
+    "generalization_gap_bb_per_100": "generalization_gap_bb_per_100",
 }
 
 
@@ -226,6 +229,16 @@ def _aggregate_table_run_units(
         "effects_by_mechanism": effects,
         "metrics": summaries,
     }
+
+
+def aggregate_table_run_units(
+    units: list[dict[str, Any]],
+    *,
+    inference: bool = True,
+) -> dict[str, Any]:
+    """Aggregate public table/run estimands without exposing agent-level pseudoreplication."""
+
+    return _aggregate_table_run_units(units, inference=inference)
 
 
 def validate_runtime_homogeneity(manifests: list[dict[str, Any]]) -> dict[str, Any]:
