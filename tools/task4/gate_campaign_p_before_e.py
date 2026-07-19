@@ -6,10 +6,16 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
-from agentmemeval.evaluation.pilot import calibrate_behavior_thresholds
+from agentmemeval.evaluation.pilot import (
+    PRIMARY_MDE_BB_PER_100,
+    SENSITIVITY_MDES_BB_PER_100,
+    calibrate_behavior_thresholds,
+)
+from agentmemeval.evaluation.statistics import estimate_paired_seed_requirement
 
 REQUIRED_ARTIFACTS = (
     "resolved_config.yaml",
@@ -21,22 +27,40 @@ REQUIRED_ARTIFACTS = (
     "report.md",
     "experiment_result.json",
 )
+EXPECTED_PAIRED_MECHANISMS = {
+    "expr",
+    "fact_expr_async",
+    "fact_expr_sync",
+}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--campaign-dir", required=True)
+    parser.add_argument("--aggregate", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--expected-code-sha", required=True)
     parser.add_argument("--expected-max-model-len", type=int, required=True)
+    parser.add_argument("--expected-decision-version", required=True)
+    parser.add_argument("--expected-decision-system-sha256", required=True)
+    parser.add_argument("--expected-experience-update-sha256", required=True)
     args = parser.parse_args()
 
     campaign_dir = Path(args.campaign_dir).resolve()
+    aggregate_path = Path(args.aggregate).resolve()
     output = Path(args.output).resolve()
     audit = build_gate(
         campaign_dir,
+        aggregate_path=aggregate_path,
         expected_code_sha=str(args.expected_code_sha),
         expected_max_model_len=int(args.expected_max_model_len),
+        expected_prompts={
+            "decision_version": str(args.expected_decision_version),
+            "decision_system_sha256": str(args.expected_decision_system_sha256),
+            "experience_update_sha256": str(
+                args.expected_experience_update_sha256
+            ),
+        },
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as handle:
@@ -49,12 +73,17 @@ def main() -> int:
 def build_gate(
     campaign_dir: Path,
     *,
+    aggregate_path: Path,
     expected_code_sha: str,
     expected_max_model_len: int,
+    expected_prompts: dict[str, str],
 ) -> dict[str, Any]:
+    campaign_dir = campaign_dir.resolve()
+    aggregate_path = aggregate_path.resolve()
     manifest_path = campaign_dir / "campaign_manifest.json"
     state_path = campaign_dir / "state.tsv"
     manifest = _read_json(manifest_path)
+    aggregate = _read_json(aggregate_path)
     campaign = manifest.get("campaign", {})
     conditions = campaign.get("conditions") or [
         {"condition_id": "mixed_table", "target_mechanism": "mixed"}
@@ -73,12 +102,29 @@ def build_gate(
         identity for identity in set(identities) if identities.count(identity) > 1
     )
     blockers: list[str] = []
+    if (
+        aggregate_path.parent != campaign_dir
+        or not aggregate_path.name.startswith("campaign_aggregate_")
+        or aggregate_path.suffix != ".json"
+    ):
+        blockers.append(
+            "aggregate must be a campaign_aggregate_*.json file directly "
+            "inside campaign_dir"
+        )
     if len(completed) != expected:
         blockers.append(f"complete matrix mismatch: {len(completed)}/{expected}")
     if failed:
         blockers.append(f"failed state rows present: {len(failed)}")
     if duplicates:
         blockers.append(f"duplicate complete matrix units: {duplicates}")
+    power_diagnostic = _campaign_p_power_diagnostic(
+        aggregate,
+        expected_run_count=expected,
+        expected_code_sha=expected_code_sha,
+        expected_seeds=[int(seed) for seed in seeds],
+        expected_prompts=expected_prompts,
+    )
+    blockers.extend(str(item) for item in power_diagnostic["blockers"])
 
     metrics_list: list[dict[str, Any]] = []
     evaluation_target_ids_by_run: list[list[str]] = []
@@ -109,6 +155,24 @@ def build_gate(
         execution = protocol.get("execution_health", {})
         if not isinstance(execution, dict) or execution.get("valid") is not True:
             blockers.append(f"{row['run_id']} execution health invalid")
+        else:
+            if execution.get("status") != "passed":
+                blockers.append(
+                    f"{row['run_id']} execution health status is "
+                    f"{execution.get('status')}"
+                )
+            for key in (
+                "fallback_count",
+                "memory_revision_fallback_count",
+                "reward_conservation_violation_count",
+                "stack_conservation_violation_count",
+            ):
+                observed_count = _safe_int(execution.get(key))
+                if observed_count != 0:
+                    blockers.append(
+                        f"{row['run_id']} execution {key}: "
+                        f"{execution.get(key)}"
+                    )
         revision_fallbacks = _revision_fallback_count(metrics)
         if revision_fallbacks:
             blockers.append(
@@ -132,6 +196,13 @@ def build_gate(
             blockers.append(
                 f"{row['run_id']} max_model_len mismatch: {observed_context}"
             )
+        observed_prompts = dict(runtime.get("prompts", {}))
+        for key, expected_value in expected_prompts.items():
+            if str(observed_prompts.get(key)) != expected_value:
+                blockers.append(
+                    f"{row['run_id']} prompt identity mismatch for {key}: "
+                    f"{observed_prompts.get(key)}"
+                )
         leaf_evidence.append(
             {
                 "condition_id": row["condition_id"],
@@ -166,7 +237,7 @@ def build_gate(
             blockers.append(f"behavior gate status is {behavior.get('status')}")
 
     return {
-        "schema_version": "task4_campaign_p_before_e_gate_v2",
+        "schema_version": "task4_campaign_p_before_e_gate_v3",
         "campaign_dir": str(campaign_dir),
         "campaign_id": campaign.get("campaign_id"),
         "expected_matrix_units": expected,
@@ -175,16 +246,200 @@ def build_gate(
         "ignored_noncomplete_state_rows": len(rows) - len(completed),
         "expected_code_sha": expected_code_sha,
         "expected_max_model_len": expected_max_model_len,
+        "expected_prompts": expected_prompts,
         "runtime_identity": runtime_identities[0] if len(canonical_runtime) == 1 else None,
         "behavior_freeze_preview": behavior,
+        "campaign_p_power_diagnostic": power_diagnostic,
         "campaign_manifest_sha256": _sha256(manifest_path),
         "state_tsv_sha256": _sha256(state_path),
+        "aggregate_path": str(aggregate_path),
+        "aggregate_sha256": _sha256(aggregate_path),
         "leaf_evidence": sorted(
             leaf_evidence, key=lambda item: (item["condition_id"], item["seed"])
         ),
         "blockers": blockers,
         "status": "ready_to_start_campaign_e" if not blockers else "no_go",
     }
+
+
+def _campaign_p_power_diagnostic(
+    aggregate: dict[str, Any],
+    *,
+    expected_run_count: int,
+    expected_code_sha: str,
+    expected_seeds: list[int],
+    expected_prompts: dict[str, str],
+) -> dict[str, Any]:
+    """Audit P-side paired variance without claiming a joint P/E formal freeze."""
+
+    blockers: list[str] = []
+    completed = _safe_int(aggregate.get("completed_run_count"))
+    expected = _safe_int(aggregate.get("expected_run_count"))
+    if completed != expected_run_count or expected != expected_run_count:
+        blockers.append(
+            "aggregate matrix mismatch: "
+            f"completed={completed}, expected={expected}, gate={expected_run_count}"
+        )
+    if aggregate.get("status") != "descriptive_only":
+        blockers.append("aggregate status must be descriptive_only")
+    if aggregate.get("design") != "mixed_table":
+        blockers.append(
+            f"aggregate design mismatch: {aggregate.get('design')}"
+        )
+    homogeneity = aggregate.get("runtime_homogeneity", {})
+    if not isinstance(homogeneity, dict) or homogeneity.get("homogeneous") is not True:
+        blockers.append("aggregate runtime homogeneity is not verified")
+    else:
+        identity = homogeneity.get("identity", {})
+        code = _pairs_to_dict(
+            identity.get("code", {}) if isinstance(identity, dict) else {}
+        )
+        if str(code.get("commit")) != expected_code_sha:
+            blockers.append(
+                f"aggregate code SHA mismatch: {code.get('commit')}"
+            )
+        if code.get("dirty") is not False:
+            blockers.append("aggregate runtime identity was dirty")
+        prompts = _pairs_to_dict(
+            identity.get("prompts", {}) if isinstance(identity, dict) else {}
+        )
+        for key, expected_value in expected_prompts.items():
+            if str(prompts.get(key)) != expected_value:
+                blockers.append(
+                    f"aggregate prompt identity mismatch for {key}: "
+                    f"{prompts.get(key)}"
+                )
+    paired = (
+        aggregate.get("aggregate_metrics", {})
+        .get("paired_estimand_descriptive", {})
+    )
+    if not isinstance(paired, dict) or paired.get("status") != "descriptive_only":
+        blockers.append("aggregate paired estimand is unavailable")
+        paired = {}
+    if _safe_int(paired.get("independent_seed_count")) != expected_run_count:
+        blockers.append(
+            "paired estimand independent seed count mismatch: "
+            f"{paired.get('independent_seed_count')}/{expected_run_count}"
+        )
+    paired_contract = {
+        "design": "A7-R_same_seed_table_run_paired_mechanism_effect",
+        "endpoint": "final_test_bb_per_100",
+        "baseline_mechanism": "fact",
+        "multiple_comparison_method": "holm",
+    }
+    for key, expected_value in paired_contract.items():
+        if paired.get(key) != expected_value:
+            blockers.append(
+                f"paired estimand {key} mismatch: {paired.get(key)}"
+            )
+    raw_matched_seeds = paired.get("matched_seeds")
+    if not isinstance(raw_matched_seeds, list):
+        blockers.append("paired estimand matched_seeds is unavailable")
+    else:
+        matched_seeds = [_safe_int(seed) for seed in raw_matched_seeds]
+        if (
+            any(seed is None for seed in matched_seeds)
+            or matched_seeds != expected_seeds
+        ):
+            blockers.append(
+                "paired estimand matched seeds mismatch: "
+                f"{raw_matched_seeds}/{expected_seeds}"
+            )
+    effects_by_mechanism = paired.get("effects_by_mechanism", {})
+    plans: dict[str, Any] = {}
+    if not isinstance(effects_by_mechanism, dict) or not effects_by_mechanism:
+        blockers.append("paired estimand has no mechanism effects")
+    else:
+        observed_mechanisms = {str(value) for value in effects_by_mechanism}
+        if observed_mechanisms != EXPECTED_PAIRED_MECHANISMS:
+            blockers.append(
+                "paired estimand mechanisms mismatch: "
+                f"{sorted(observed_mechanisms)}/"
+                f"{sorted(EXPECTED_PAIRED_MECHANISMS)}"
+            )
+        for mechanism, raw_effects in sorted(effects_by_mechanism.items()):
+            if not isinstance(raw_effects, list):
+                blockers.append(f"{mechanism} paired effects is not a list")
+                continue
+            try:
+                effects = [float(value) for value in raw_effects]
+            except (TypeError, ValueError):
+                blockers.append(
+                    f"{mechanism} paired effects contains non-numeric values"
+                )
+                continue
+            if not all(math.isfinite(value) for value in effects):
+                blockers.append(
+                    f"{mechanism} paired effects contains non-finite values"
+                )
+                continue
+            if len(effects) != expected_run_count:
+                blockers.append(
+                    f"{mechanism} paired effects mismatch: "
+                    f"{len(effects)}/{expected_run_count}"
+                )
+                continue
+            plans[str(mechanism)] = {
+                "effects": effects,
+                "sensitivity_by_mde_bb_per_100": {
+                    str(mde): estimate_paired_seed_requirement(effects, mde)
+                    for mde in SENSITIVITY_MDES_BB_PER_100
+                },
+            }
+    primary_requirements = [
+        int(
+            plan["sensitivity_by_mde_bb_per_100"][
+                str(PRIMARY_MDE_BB_PER_100)
+            ]["required_seed_pairs_normal_approximation"]
+        )
+        for plan in plans.values()
+    ]
+    return {
+        "schema_version": "task4_campaign_p_power_diagnostic_v1",
+        "primary_endpoint": "final_test_bb_per_100",
+        "primary_mde_bb_per_100": PRIMARY_MDE_BB_PER_100,
+        "sensitivity_mdes_bb_per_100": list(SENSITIVITY_MDES_BB_PER_100),
+        "alpha": 0.05,
+        "power": 0.80,
+        "planning_method": "paired_normal_approximation_for_planning_only",
+        "contrasts": plans,
+        "required_seed_pairs_primary_max_across_p_only": (
+            max(primary_requirements)
+            if primary_requirements and not blockers
+            else None
+        ),
+        "joint_p_e_power_freeze_complete": False,
+        "joint_freeze_note": (
+            "Campaign E independent pilot is still required before the joint "
+            "P/E formal seed plan can be frozen."
+        ),
+        "blockers": blockers,
+        "status": (
+            "p_side_power_diagnostic_ready_not_joint_freeze"
+            if not blockers
+            else "blocked_invalid_or_incomplete_campaign_p_aggregate"
+        ),
+    }
+
+
+def _pairs_to_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, list):
+        try:
+            return {str(key): item for key, item in value}
+        except (TypeError, ValueError):
+            return {}
+    return {}
+
+
+def _safe_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _runtime_identity(manifest: dict[str, Any]) -> dict[str, Any]:
