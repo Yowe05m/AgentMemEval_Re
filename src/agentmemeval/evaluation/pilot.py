@@ -42,12 +42,14 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     "configs/campaigns/task4_campaign_e_pilot_parallel_v7_counterfactual_calibrated.yaml",
     "configs/campaigns/task4_campaign_p_strict_model_substituted.yaml",
     "src/agentmemeval/cli/main.py",
+    "src/agentmemeval/evaluation/aggregation.py",
     "src/agentmemeval/evaluation/campaign_progress.py",
     "src/agentmemeval/evaluation/campaign_reporting.py",
     "src/agentmemeval/evaluation/formal_freeze.py",
     "src/agentmemeval/evaluation/pilot.py",
     "src/agentmemeval/evaluation/relevance_review.py",
     "src/agentmemeval/evaluation/runtime_lock.py",
+    "src/agentmemeval/evaluation/study_reporting.py",
     "src/agentmemeval/experiments/campaign.py",
     # The admission change is confined to the formal/frozen-preflight branch;
     # ordinary Pilot admission returns before the V2 runtime-lock check.
@@ -67,10 +69,13 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     "tests/unit/test_run_map.py",
     "tests/unit/test_runtime_lock.py",
     "tests/unit/test_snapshot_archive.py",
+    "tests/unit/test_statistics_and_degeneracy.py",
+    "tests/unit/test_study_reporting.py",
     "tests/integration/test_campaign.py",
     "tools/task4/audit_pilot_prelaunch_code_paths.py",
     "tools/task4/audit_pilot_runtime_equivalence.py",
     "tools/task4/build_formal_runtime_lock.py",
+    "tools/task4/build_study_report.py",
     "tools/task4/campaign_progress.py",
     "tools/task4/gate_campaign_p_before_e.py",
     "tools/task4/retrieval_relevance_review.py",
@@ -78,11 +83,11 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     "tools/task4/start_campaign_e_v7_pilot.sh",
 }
 PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256 = {
-    # The only execution-adjacent P→E change is the reviewed seed-major matrix
-    # scheduler. Binding the exact Git patch prevents this path-level exception
-    # from authorizing any later leaf execution or aggregation change.
+    # The execution-adjacent P→E file contains the reviewed seed-major scheduler
+    # plus post-run mixed-table endpoint reconstruction. Binding the exact Git
+    # patch prevents this path exception from authorizing any later leaf change.
     "src/agentmemeval/experiments/campaign.py": (
-        "f261385922bde8f0294c164d6990b5bf5a424032e67748574b8c429d774141c3"
+        "13a41be9f15641af233b2fd053ce8e853d0e682bab6f8b809239f9982baec6e5"
     ),
 }
 EXECUTION_ZERO_FIELDS = (
