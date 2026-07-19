@@ -158,7 +158,9 @@ python tools/task4/build_campaign_analysis.py `
 ```
 
 服务器打包前和本地解压后使用同一文件级 SHA-256 manifest 工具。manifest 必须放在
-被归档根目录之外；默认同时拒绝缺失、大小/哈希不符、危险相对路径和额外文件：
+被归档根目录之外；默认同时拒绝 header/行格式错误、缺失、大小/哈希不符、危险或重复
+相对路径、root/manifest symlink、目录内任意 symlink 和额外文件。失败以结构化 V2
+verification 报告返回，不把 malformed manifest 异常误作已验证归档：
 
 ```powershell
 python tools/task4/file_manifest.py build `
