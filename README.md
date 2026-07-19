@@ -192,10 +192,19 @@ python tools/task4/snapshot_archive.py build \
 python tools/task4/snapshot_archive.py verify-checksum `
   --archive outputs/R_<date>/<snapshot>/<snapshot>.tar.gz `
   --checksum outputs/R_<date>/<snapshot>/<snapshot>.tar.gz.sha256
+
+python tools/task4/snapshot_archive.py extract `
+  --archive outputs/R_<date>/<snapshot>/<snapshot>.tar.gz `
+  --checksum outputs/R_<date>/<snapshot>/<snapshot>.tar.gz.sha256 `
+  --manifest outputs/R_<date>/<snapshot>/<snapshot>.files.tsv `
+  --output-dir outputs/R_<date>/<snapshot>/extracted `
+  --receipt outputs/R_<date>/<snapshot>/<snapshot>.extract.receipt.json
 ```
 
 只有 receipt `status=verified`、下载后 checksum 通过、解压后 file-manifest V2 也通过的
-快照，才能成为本地分析输入。打包失败时已有 partial 输出永久保留，重试必须换新名称。
+快照，才能成为本地分析输入。`extract` 只写全新目录，预先拒绝路径穿越、symlink、
+hardlink、special/额外/缺失成员，并在解压后再次逐文件校验。打包或解压失败时已有
+partial 输出永久保留，重试必须换新名称。
 
 回收多个 campaign 后生成一份 `server_run_map.csv` 和 formal 主表排除清单。工具按
 campaign/condition/seed/attempt 折叠 lifecycle，只把完整、formal、execution valid、

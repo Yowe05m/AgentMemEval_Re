@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import re
+import shutil
 import tarfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -13,6 +14,7 @@ from typing import Any, BinaryIO
 
 from agentmemeval.storage.archive import (
     MANIFEST_FIELDS,
+    _filesystem_path,
     build_file_manifest,
     verify_file_manifest,
 )
@@ -141,6 +143,111 @@ def verify_archive_checksum(
         "verified": verified,
         "status": "verified" if verified else "failed",
     }
+
+
+def extract_snapshot_archive(
+    archive: str | Path,
+    checksum: str | Path,
+    manifest: str | Path,
+    output_dir: str | Path,
+    receipt: str | Path,
+) -> dict[str, Any]:
+    """Verify and safely extract one snapshot into a brand-new directory."""
+
+    archive_path = Path(archive).absolute()
+    checksum_path = Path(checksum).absolute()
+    manifest_path = Path(manifest).absolute()
+    output = Path(output_dir).absolute()
+    receipt_path = Path(receipt).absolute()
+    if output.exists() or output.is_symlink():
+        raise FileExistsError(output)
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise FileExistsError(receipt_path)
+    receipt_resolved = receipt_path.resolve()
+    output_resolved = output.resolve()
+    if (
+        receipt_resolved == output_resolved
+        or output_resolved in receipt_resolved.parents
+    ):
+        raise ValueError("extraction receipt must be outside the output directory")
+    if manifest_path.is_symlink():
+        raise ValueError("snapshot manifest must not be a symlink")
+
+    checksum_verification = verify_archive_checksum(archive_path, checksum_path)
+    if not checksum_verification["verified"]:
+        raise ValueError("snapshot archive checksum verification failed")
+    root_name = _infer_archive_root_name(archive_path)
+    archive_verification = _verify_archive_members(
+        archive_path,
+        manifest_path,
+        root_name=root_name,
+    )
+    if not archive_verification["verified"]:
+        raise ValueError("snapshot archive member verification failed")
+
+    filesystem_output = _filesystem_path(output)
+    filesystem_output.mkdir(parents=True, exist_ok=False)
+    with tarfile.open(archive_path, mode="r:gz") as handle:
+        for member in handle.getmembers():
+            pure = PurePosixPath(member.name)
+            target = output.joinpath(*pure.parts)
+            if not target.resolve().is_relative_to(output_resolved):
+                raise ValueError(f"archive member escaped output directory: {member.name}")
+            filesystem_target = _filesystem_path(target)
+            if member.isdir():
+                filesystem_target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                raise ValueError(f"unsupported archive member: {member.name}")
+            filesystem_target.parent.mkdir(parents=True, exist_ok=True)
+            source = handle.extractfile(member)
+            if source is None:
+                raise ValueError(f"archive member has no data stream: {member.name}")
+            with filesystem_target.open("xb") as destination:
+                shutil.copyfileobj(source, destination, length=1024 * 1024)
+
+    extracted_root = output / root_name
+    extracted_verification = verify_file_manifest(
+        extracted_root,
+        manifest_path,
+    )
+    if not extracted_verification["verified"]:
+        raise RuntimeError(
+            "extracted snapshot verification failed; partial output was preserved"
+        )
+    payload = {
+        "schema_version": "task4_snapshot_extraction_receipt_v1",
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "status": "verified",
+        "archive": str(archive_path.resolve()),
+        "checksum": str(checksum_path.resolve()),
+        "manifest": str(manifest_path.resolve()),
+        "manifest_sha256": _sha256_path(manifest_path),
+        "output_dir": str(output),
+        "extracted_root": str(extracted_root),
+        "root_name": root_name,
+        "checksum_verification": checksum_verification,
+        "archive_verification": archive_verification,
+        "extracted_verification": extracted_verification,
+    }
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    with _filesystem_path(receipt_path).open("x", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    return {"receipt": str(receipt_path), **payload}
+
+
+def _infer_archive_root_name(archive: Path) -> str:
+    roots: set[str] = set()
+    with tarfile.open(archive, mode="r:gz") as handle:
+        for member in handle.getmembers():
+            pure = PurePosixPath(member.name)
+            if pure.is_absolute() or ".." in pure.parts or not pure.parts:
+                raise ValueError(f"unsafe archive member: {member.name}")
+            roots.add(pure.parts[0])
+    if len(roots) != 1:
+        raise ValueError(f"archive must have exactly one top-level root: {sorted(roots)}")
+    return next(iter(roots))
 
 
 def _verify_archive_members(

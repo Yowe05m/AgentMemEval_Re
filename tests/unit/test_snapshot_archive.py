@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import tarfile
 from pathlib import Path
@@ -8,6 +10,7 @@ import pytest
 
 from agentmemeval.storage.snapshot_archive import (
     build_snapshot_archive,
+    extract_snapshot_archive,
     verify_archive_checksum,
 )
 
@@ -78,3 +81,77 @@ def test_snapshot_checksum_rejects_tamper_and_malformed_file(
     assert mismatch["verified"] is False
     assert mismatch["format_errors"] == []
     assert mismatch["hash_matches"] is False
+
+
+def test_snapshot_archive_extracts_only_after_all_verification(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "campaign"
+    root.mkdir()
+    (root / "state.tsv").write_text("status\ncomplete\n", encoding="utf-8")
+    archive = tmp_path / "snapshot.tar.gz"
+    manifest = tmp_path / "snapshot.files.tsv"
+    checksum = tmp_path / "snapshot.tar.gz.sha256"
+    build_receipt = tmp_path / "snapshot.build.json"
+    build_snapshot_archive(
+        root,
+        archive,
+        manifest,
+        checksum,
+        build_receipt,
+    )
+    output = tmp_path / "extracted"
+    receipt = tmp_path / "snapshot.extract.json"
+
+    result = extract_snapshot_archive(
+        archive,
+        checksum,
+        manifest,
+        output,
+        receipt,
+    )
+
+    assert result["status"] == "verified"
+    assert result["extracted_verification"]["verified"] is True
+    assert (output / "campaign" / "state.tsv").read_text(
+        encoding="utf-8"
+    ) == "status\ncomplete\n"
+    with pytest.raises(FileExistsError):
+        extract_snapshot_archive(
+            archive,
+            checksum,
+            manifest,
+            output,
+            tmp_path / "another-receipt.json",
+        )
+
+
+def test_snapshot_archive_rejects_path_traversal_before_creating_output(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "unsafe.tar.gz"
+    payload = b"escape"
+    with tarfile.open(archive, mode="x:gz") as handle:
+        member = tarfile.TarInfo("../escape.txt")
+        member.size = len(payload)
+        handle.addfile(member, io.BytesIO(payload))
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    checksum = tmp_path / "unsafe.tar.gz.sha256"
+    checksum.write_text(f"{digest}  {archive.name}\n", encoding="ascii")
+    manifest = tmp_path / "unsafe.files.tsv"
+    manifest.write_text(
+        "relative_path\tsize_bytes\tsha256\n"
+        f"escape.txt\t{len(payload)}\t{hashlib.sha256(payload).hexdigest()}\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "extracted"
+
+    with pytest.raises(ValueError, match="unsafe archive member"):
+        extract_snapshot_archive(
+            archive,
+            checksum,
+            manifest,
+            output,
+            tmp_path / "extract.json",
+        )
+    assert not output.exists()
