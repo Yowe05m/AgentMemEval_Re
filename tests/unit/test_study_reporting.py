@@ -25,6 +25,8 @@ def test_study_report_is_ready_only_when_all_evidence_is_verified(
         tmp_path / "runtime_lock.json",
         {"status": "verified_from_real_service_run_manifest"},
     )
+    p_seal = _seal(tmp_path / "p_seal.json")
+    e_seal = _seal(tmp_path / "e_seal.json")
     receipt = _json(tmp_path / "receipt.json", {"status": "verified"})
     protocol = tmp_path / "protocol.md"
     protocol.write_text("# verified", encoding="utf-8")
@@ -39,6 +41,8 @@ def test_study_report_is_ready_only_when_all_evidence_is_verified(
             "campaign_p_resource_audit": str(p_resource),
             "campaign_e_resource_audit": str(e_resource),
             "formal_runtime_lock": str(runtime_lock),
+            "campaign_p_seal_readiness": str(p_seal),
+            "campaign_e_seal_readiness": str(e_seal),
             "archive_receipts": [str(receipt)],
             "protocol_evidence": [
                 {"label": "protocol", "path": str(protocol), "status": "verified"}
@@ -83,6 +87,8 @@ def test_study_report_keeps_pilot_and_bad_run_map_out_of_paper(
         tmp_path / "runtime_lock.json",
         {"status": "verified_from_real_service_run_manifest"},
     )
+    p_seal = _seal(tmp_path / "p_seal.json", ready=False)
+    e_seal = _seal(tmp_path / "e_seal.json")
     receipt = _json(tmp_path / "receipt.json", {"status": "verified"})
     protocol = tmp_path / "protocol.md"
     protocol.write_text("# verified", encoding="utf-8")
@@ -97,6 +103,8 @@ def test_study_report_keeps_pilot_and_bad_run_map_out_of_paper(
             "campaign_p_resource_audit": str(p_resource),
             "campaign_e_resource_audit": str(e_resource),
             "formal_runtime_lock": str(runtime_lock),
+            "campaign_p_seal_readiness": str(p_seal),
+            "campaign_e_seal_readiness": str(e_seal),
             "archive_receipts": [str(receipt)],
             "protocol_evidence": [
                 {"label": "protocol", "path": str(protocol), "status": "verified"}
@@ -114,6 +122,7 @@ def test_study_report_keeps_pilot_and_bad_run_map_out_of_paper(
         "campaign_p run map does not cover the formal analysis matrix"
         in result["blockers"]
     )
+    assert "campaign_p seal-readiness audit is not verified" in result["blockers"]
     report = (tmp_path / "report" / "task4_paper_report_zh.md").read_text(
         encoding="utf-8"
     )
@@ -273,6 +282,25 @@ def _resource_audit(path: Path) -> Path:
                 "status": "heuristic_estimate_not_provider_usage",
                 "estimated_total_tokens": 1234,
             },
+        },
+    )
+
+
+def _seal(path: Path, *, ready: bool = True) -> Path:
+    return _json(
+        path,
+        {
+            "schema_version": "task4_campaign_seal_readiness_v1",
+            "status": "ready_to_seal" if ready else "not_ready_to_seal",
+            "blockers": [] if ready else ["latest attempts are not complete"],
+            "campaign_manifest_sha256": "a" * 64,
+            "state_tsv_sha256": "b" * 64,
+            "minimum_quiet_seconds": 120,
+            "observed_quiet_seconds": 180.0,
+            "expected_matrix_count": 1,
+            "complete_latest_attempt_count": 1 if ready else 0,
+            "file_count": 20,
+            "total_bytes": 1000,
         },
     )
 

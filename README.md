@@ -195,7 +195,7 @@ python tools/task4/build_campaign_analysis.py `
 
 两侧 formal 分析完成并回收到已校验的本地证据库后，使用 study spec 将
 Campaign P/E 的 V3 分析 manifest、formal run map、资源审计、runtime lock、
-archive receipt 与协议证据绑定为中文论文级总报告：
+P/E seal-readiness、archive receipt 与协议证据绑定为中文论文级总报告：
 
 ```powershell
 python tools/task4/build_study_report.py `

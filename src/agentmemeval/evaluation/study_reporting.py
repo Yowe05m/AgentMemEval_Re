@@ -92,6 +92,20 @@ def build_task4_study_report(
         if status != "verified_from_real_service_run_manifest":
             blockers.append("formal runtime lock is not verified")
 
+    seal_audits: dict[str, dict[str, Any]] = {}
+    for campaign_key in ("campaign_p", "campaign_e"):
+        raw = spec.get(f"{campaign_key}_seal_readiness")
+        if not raw:
+            blockers.append(f"{campaign_key} seal-readiness audit is missing")
+            continue
+        path = _resolve_input(spec_path, raw)
+        audit = _read_json(path)
+        seal_audits[campaign_key] = audit
+        status = _seal_status(audit)
+        evidence.append(_evidence(campaign_key + "_seal_readiness", path, status))
+        if status != "verified_ready_to_seal":
+            blockers.append(f"{campaign_key} seal-readiness audit is not verified")
+
     receipt_paths = [
         _resolve_input(spec_path, value)
         for value in spec.get("archive_receipts", [])
@@ -155,6 +169,7 @@ def build_task4_study_report(
         analyses=analyses,
         run_maps=run_map_audits,
         resources=resources,
+        seal_audits=seal_audits,
         verified_receipt_count=verified_receipt_count,
         gpu_status=gpu_status,
         blockers=blockers,
@@ -172,6 +187,7 @@ def build_task4_study_report(
             run_maps=run_map_audits,
             resources=resources,
             runtime_lock=runtime_lock,
+            seal_audits=seal_audits,
             verified_receipt_count=verified_receipt_count,
             gpu_status=gpu_status,
             gpu_identities=gpu_identities,
@@ -322,6 +338,34 @@ def _resource_status(audit: dict[str, Any]) -> str:
     return "verified_zero_fallback"
 
 
+def _seal_status(audit: dict[str, Any]) -> str:
+    if audit.get("schema_version") != "task4_campaign_seal_readiness_v1":
+        return "blocked_wrong_schema"
+    if audit.get("status") != "ready_to_seal":
+        return "blocked_not_ready_to_seal"
+    if audit.get("blockers") != []:
+        return "blocked_nonempty_blockers"
+    for field in ("campaign_manifest_sha256", "state_tsv_sha256"):
+        value = str(audit.get(field, ""))
+        if len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            return f"blocked_invalid_{field}"
+    if int(audit.get("expected_matrix_count", 0)) < 1:
+        return "blocked_empty_matrix"
+    if audit.get("complete_latest_attempt_count") != audit.get(
+        "expected_matrix_count"
+    ):
+        return "blocked_incomplete_latest_matrix"
+    quiet = audit.get("observed_quiet_seconds")
+    minimum = audit.get("minimum_quiet_seconds")
+    if not isinstance(quiet, (int, float)) or not isinstance(minimum, int):
+        return "blocked_invalid_quiet_period"
+    if quiet < minimum:
+        return "blocked_insufficient_quiet_period"
+    return "verified_ready_to_seal"
+
+
 def _gpu_homogeneity(
     resources: dict[str, dict[str, Any]],
 ) -> tuple[str, list[dict[str, str]]]:
@@ -351,6 +395,7 @@ def _status_rows(
     analyses: dict[str, dict[str, Any]],
     run_maps: dict[str, dict[str, Any]],
     resources: dict[str, dict[str, Any]],
+    seal_audits: dict[str, dict[str, Any]],
     verified_receipt_count: int,
     gpu_status: str,
     blockers: list[str],
@@ -396,6 +441,18 @@ def _status_rows(
                 "evidence": _resource_status(resource) if resource else "missing",
             }
         )
+        seal = seal_audits.get(campaign)
+        rows.append(
+            {
+                "item": campaign + "_seal_readiness",
+                "classification": (
+                    "verified"
+                    if seal and _seal_status(seal) == "verified_ready_to_seal"
+                    else "blocked"
+                ),
+                "evidence": _seal_status(seal) if seal else "missing",
+            }
+        )
     rows.extend(
         [
             {
@@ -430,6 +487,7 @@ def _render_report(
     run_maps: dict[str, dict[str, Any]],
     resources: dict[str, dict[str, Any]],
     runtime_lock: dict[str, Any],
+    seal_audits: dict[str, dict[str, Any]],
     verified_receipt_count: int,
     gpu_status: str,
     gpu_identities: list[dict[str, str]],
@@ -533,6 +591,20 @@ def _render_report(
             "- `study_effects.csv` 是本报告效应表的数据源；"
             "`verification_status.csv` 保存 verified/blocked 判定。",
             "- 本报告由 study spec 一键重建；输出目录必须不存在，避免覆盖旧报告。",
+        ]
+    )
+    for campaign in ("campaign_p", "campaign_e"):
+        seal = seal_audits.get(campaign, {})
+        lines.append(
+            f"- {campaign} seal：`{_seal_status(seal) if seal else 'missing'}`；"
+            f"matrix={seal.get('complete_latest_attempt_count', 'NA')}/"
+            f"{seal.get('expected_matrix_count', 'NA')}；"
+            f"quiet={seal.get('observed_quiet_seconds', 'NA')} s；"
+            f"files={seal.get('file_count', 'NA')}；"
+            f"bytes={seal.get('total_bytes', 'NA')}。"
+        )
+    lines.extend(
+        [
             "",
             "## 局限性",
             "",
