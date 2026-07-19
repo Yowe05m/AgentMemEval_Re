@@ -73,6 +73,9 @@ def test_pilot_requires_real_service_smokes_before_run_directory() -> None:
         "decision_service_smoke_passed": True,
         "embedding_service_smoke_passed": True,
     }
+    config["experiment"]["formal_runtime_lock"] = {
+        "intentionally_invalid_for_formal": True
+    }
     audit = assess_run_admission(config, Path.cwd())
     assert audit["blockers"] == []
     assert audit["not_for_paper"] is True

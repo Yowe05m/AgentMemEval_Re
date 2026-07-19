@@ -35,14 +35,29 @@ BEHAVIOR_FREEZE_POLICY = {
     },
 }
 PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
+    # Documentation, tests, and Pilot/Formal post-processing do not participate
+    # in table play. Keep this list exact rather than allowing whole directories.
+    "README.md",
     "configs/campaigns/task4_campaign_e_pilot_parallel_v7_counterfactual_calibrated.yaml",
     "src/agentmemeval/cli/main.py",
+    "src/agentmemeval/evaluation/formal_freeze.py",
     "src/agentmemeval/evaluation/pilot.py",
+    "src/agentmemeval/evaluation/relevance_review.py",
+    "src/agentmemeval/evaluation/runtime_lock.py",
+    # The admission change is confined to the formal/frozen-preflight branch;
+    # ordinary Pilot admission returns before the V2 runtime-lock check.
+    "src/agentmemeval/experiments/admission.py",
     "tests/unit/test_campaign_p_gate.py",
     "tests/unit/test_config_validation.py",
+    "tests/unit/test_formal_freeze.py",
     "tests/unit/test_pilot_power_plan.py",
+    "tests/unit/test_protocol_admission.py",
+    "tests/unit/test_relevance_review.py",
+    "tests/unit/test_runtime_lock.py",
     "tools/task4/audit_pilot_runtime_equivalence.py",
+    "tools/task4/build_formal_runtime_lock.py",
     "tools/task4/gate_campaign_p_before_e.py",
+    "tools/task4/retrieval_relevance_review.py",
     "tools/task4/start_campaign_e_v7_pilot.sh",
 }
 EXECUTION_ZERO_FIELDS = (
