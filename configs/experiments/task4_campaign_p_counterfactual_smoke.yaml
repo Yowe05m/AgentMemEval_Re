@@ -1,0 +1,12 @@
+extends: task4_campaign_p_pilot.yaml
+
+experiment:
+  seed: 2026071991
+  run_id: task4_campaign_p_counterfactual_smoke_s2026071991
+  output_root: outputs/task4_counterfactual_smoke
+  run_mode: smoke
+  protocol_label: real_service_counterfactual_calibration_smoke_not_for_main_table
+  train_hands: 30
+  checkpoint_interval: 30
+  checkpoint_test_hands: 10
+  test_hands: 10
