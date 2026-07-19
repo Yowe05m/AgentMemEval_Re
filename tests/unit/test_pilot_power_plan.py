@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from agentmemeval.evaluation.pilot import (
+    PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256,
     build_pilot_freeze_proposal,
     build_pilot_freeze_proposal_from_paths,
     build_pilot_power_plan,
@@ -192,6 +193,7 @@ def test_pilot_runtime_equivalence_accepts_registered_post_p_v7_changes() -> Non
         "src/agentmemeval/evaluation/relevance_review.py",
         "src/agentmemeval/evaluation/runtime_lock.py",
         "src/agentmemeval/experiments/admission.py",
+        "src/agentmemeval/experiments/campaign.py",
         "src/agentmemeval/storage/archive.py",
         "src/agentmemeval/storage/run_map.py",
         "src/agentmemeval/storage/snapshot_archive.py",
@@ -206,6 +208,7 @@ def test_pilot_runtime_equivalence_accepts_registered_post_p_v7_changes() -> Non
         "tests/unit/test_run_map.py",
         "tests/unit/test_runtime_lock.py",
         "tests/unit/test_snapshot_archive.py",
+        "tests/integration/test_campaign.py",
         "tools/task4/audit_pilot_prelaunch_code_paths.py",
         "tools/task4/audit_pilot_runtime_equivalence.py",
         "tools/task4/build_formal_runtime_lock.py",
@@ -218,12 +221,14 @@ def test_pilot_runtime_equivalence_accepts_registered_post_p_v7_changes() -> Non
         _p(),
         campaign_e,
         changed_paths,
+        dict(PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256),
     )
     assert audit["status"] == (
         "verified_execution_runtime_equivalent_for_pilot_power_only"
     )
     assert audit["disallowed_changed_paths"] == []
     assert audit["changed_paths"] == sorted(changed_paths)
+    assert audit["required_diff_sha256_match"] is True
 
 
 def test_pilot_prelaunch_code_audit_is_narrow_and_does_not_grant_runtime_equivalence(
@@ -242,6 +247,24 @@ def test_pilot_prelaunch_code_audit_is_narrow_and_does_not_grant_runtime_equival
     assert safe["runtime_equivalence_not_yet_granted"] is True
     assert safe["formal_homogeneity_not_granted"] is True
     assert safe["disallowed_changed_paths"] == []
+
+    scheduler_safe = build_pilot_prelaunch_code_audit(
+        "a" * 40,
+        "b" * 40,
+        ["src/agentmemeval/experiments/campaign.py"],
+        dict(PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256),
+    )
+    assert scheduler_safe["status"] == (
+        "verified_code_paths_safe_to_launch_campaign_e_pilot"
+    )
+    scheduler_blocked = build_pilot_prelaunch_code_audit(
+        "a" * 40,
+        "b" * 40,
+        ["src/agentmemeval/experiments/campaign.py"],
+        {"src/agentmemeval/experiments/campaign.py": "wrong"},
+    )
+    assert scheduler_blocked["status"] == "no_go_code_paths_changed"
+    assert any("diff hash mismatch" in item for item in scheduler_blocked["blockers"])
 
     blocked = build_pilot_prelaunch_code_audit(
         "short",

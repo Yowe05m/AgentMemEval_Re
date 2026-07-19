@@ -47,6 +47,7 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     "src/agentmemeval/evaluation/pilot.py",
     "src/agentmemeval/evaluation/relevance_review.py",
     "src/agentmemeval/evaluation/runtime_lock.py",
+    "src/agentmemeval/experiments/campaign.py",
     # The admission change is confined to the formal/frozen-preflight branch;
     # ordinary Pilot admission returns before the V2 runtime-lock check.
     "src/agentmemeval/experiments/admission.py",
@@ -64,6 +65,7 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     "tests/unit/test_run_map.py",
     "tests/unit/test_runtime_lock.py",
     "tests/unit/test_snapshot_archive.py",
+    "tests/integration/test_campaign.py",
     "tools/task4/audit_pilot_prelaunch_code_paths.py",
     "tools/task4/audit_pilot_runtime_equivalence.py",
     "tools/task4/build_formal_runtime_lock.py",
@@ -71,6 +73,14 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     "tools/task4/retrieval_relevance_review.py",
     "tools/task4/snapshot_archive.py",
     "tools/task4/start_campaign_e_v7_pilot.sh",
+}
+PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256 = {
+    # The only execution-adjacent P→E change is the reviewed seed-major matrix
+    # scheduler. Binding the exact Git patch prevents this path-level exception
+    # from authorizing any later leaf execution or aggregation change.
+    "src/agentmemeval/experiments/campaign.py": (
+        "f261385922bde8f0294c164d6990b5bf5a424032e67748574b8c429d774141c3"
+    ),
 }
 EXECUTION_ZERO_FIELDS = (
     "fallback_count",
@@ -552,6 +562,7 @@ def build_pilot_runtime_equivalence_audit(
     campaign_p: dict[str, Any],
     campaign_e: dict[str, Any],
     changed_paths: list[str],
+    changed_path_diff_sha256: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Prove Pilot execution equivalence across orchestration-only commits."""
 
@@ -597,6 +608,11 @@ def build_pilot_runtime_equivalence_audit(
     )
     if disallowed:
         blockers.append(f"execution-relevant or unregistered paths changed: {disallowed}")
+    diff_hash_blockers = _required_diff_hash_blockers(
+        normalized_paths,
+        changed_path_diff_sha256,
+    )
+    blockers.extend(diff_hash_blockers)
     return {
         "schema_version": "task4_pilot_runtime_equivalence_audit_v1",
         "campaign_p_code_sha": p_commit,
@@ -612,6 +628,11 @@ def build_pilot_runtime_equivalence_audit(
             PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS
         ),
         "disallowed_changed_paths": disallowed,
+        "changed_path_diff_sha256": dict(changed_path_diff_sha256 or {}),
+        "required_diff_sha256_policy": dict(
+            PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256
+        ),
+        "required_diff_sha256_match": not diff_hash_blockers,
         "formal_homogeneity_not_granted": True,
         "blockers": blockers,
         "status": (
@@ -626,6 +647,7 @@ def build_pilot_prelaunch_code_audit(
     campaign_p_code_sha: str,
     campaign_e_code_sha: str,
     changed_paths: list[str],
+    changed_path_diff_sha256: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Fail closed on unregistered code changes before Campaign E starts."""
 
@@ -658,6 +680,11 @@ def build_pilot_prelaunch_code_audit(
     )
     if disallowed:
         blockers.append(f"execution-relevant or unregistered paths changed: {disallowed}")
+    diff_hash_blockers = _required_diff_hash_blockers(
+        normalized_paths,
+        changed_path_diff_sha256,
+    )
+    blockers.extend(diff_hash_blockers)
     return {
         "schema_version": "task4_pilot_prelaunch_code_path_audit_v1",
         "campaign_p_code_sha": campaign_p_code_sha,
@@ -671,6 +698,11 @@ def build_pilot_prelaunch_code_audit(
             sorted(PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS)
         ),
         "disallowed_changed_paths": disallowed,
+        "changed_path_diff_sha256": dict(changed_path_diff_sha256 or {}),
+        "required_diff_sha256_policy": dict(
+            PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256
+        ),
+        "required_diff_sha256_match": not diff_hash_blockers,
         "runtime_equivalence_not_yet_granted": True,
         "formal_homogeneity_not_granted": True,
         "blockers": blockers,
@@ -1126,11 +1158,54 @@ def _runtime_equivalence_blockers(
         PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS
     ):
         blockers.append("pilot runtime-equivalence audit policy is stale or altered")
+    if audit.get("required_diff_sha256_policy") != dict(
+        PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256
+    ):
+        blockers.append(
+            "pilot runtime-equivalence required diff-hash policy is stale or altered"
+        )
+    if audit.get("required_diff_sha256_match") is not True:
+        blockers.append(
+            "pilot runtime-equivalence required diff hashes are not verified"
+        )
+    reported_diff_hashes = audit.get("changed_path_diff_sha256")
+    if not isinstance(reported_diff_hashes, dict):
+        blockers.append(
+            "pilot runtime-equivalence audit lacks changed_path_diff_sha256"
+        )
+    elif isinstance(reported_changed_paths, list):
+        blockers.extend(
+            _required_diff_hash_blockers(
+                [
+                    str(path).replace("\\", "/")
+                    for path in reported_changed_paths
+                ],
+                {str(key): str(value) for key, value in reported_diff_hashes.items()},
+            )
+        )
     return blockers
 
 
 def _without_code_identity(identity: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in identity.items() if key != "code"}
+
+
+def _required_diff_hash_blockers(
+    changed_paths: list[str],
+    changed_path_diff_sha256: dict[str, str] | None,
+) -> list[str]:
+    observed = dict(changed_path_diff_sha256 or {})
+    blockers: list[str] = []
+    for path, expected_hash in PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256.items():
+        if path not in changed_paths:
+            continue
+        actual_hash = str(observed.get(path, ""))
+        if actual_hash != expected_hash:
+            blockers.append(
+                f"registered execution-adjacent path diff hash mismatch for "
+                f"{path}: {actual_hash or '<missing>'}"
+            )
+    return blockers
 
 
 def _pairs_to_dict(value: Any) -> dict[str, Any]:

@@ -130,6 +130,10 @@ def test_task4_counterfactual_v7_pilot_campaigns_are_valid_and_seed_paired() -> 
         assert spec["max_parallel_runs"] == 4
         assert "counterfactual_calibrated" in spec["protocol_label"]
         assert "not_for_main_table" in spec["protocol_label"]
+        if spec["design"] == "target_vs_seven_no_memory":
+            assert spec["matrix_order"] == "seed_major"
+        else:
+            assert spec.get("matrix_order", "condition_major") == "condition_major"
     assert seed_sets[0] == seed_sets[1]
     assert seed_sets[0] == list(range(2026072301, 2026072309))
 

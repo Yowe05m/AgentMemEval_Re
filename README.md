@@ -132,7 +132,10 @@ python -m agentmemeval campaign --config configs/campaigns/task4_campaign_e_pilo
 
 如果 Campaign P/E Pilot 因审计与后处理提交使用不同 commit，启动 E 前先生成 immutable
 changed-path 审计；它只证明差异文件均在精确非执行白名单，不提前授予运行时等价或
-formal 同质性。E 完成后仍必须从两侧 aggregate 生成完整 runtime-equivalence audit：
+formal 同质性。唯一的执行邻近例外是 E 的 `seed_major` matrix scheduler；审计会要求
+其 Git patch SHA-256 与冻结策略精确一致，任何额外 `campaign.py` 改动均 NO-GO。
+seed-major 使同一 seed 的五个条件交错排队，避免条件与多日运行时间系统性绑定。
+E 完成后仍必须从两侧 aggregate 生成完整 runtime-equivalence audit：
 
 ```bash
 python tools/task4/audit_pilot_prelaunch_code_paths.py \

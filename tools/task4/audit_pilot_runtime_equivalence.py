@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 from pathlib import Path
 
 from agentmemeval.evaluation.pilot import (
+    PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256,
     build_pilot_runtime_equivalence_audit,
 )
 
@@ -26,10 +28,17 @@ def main() -> int:
     p_sha = _runtime_commit(campaign_p)
     e_sha = _runtime_commit(campaign_e)
     changed_paths = _git_changed_paths(repo, p_sha, e_sha)
+    changed_path_diff_sha256 = _git_required_diff_sha256(
+        repo,
+        p_sha,
+        e_sha,
+        changed_paths,
+    )
     audit = build_pilot_runtime_equivalence_audit(
         campaign_p,
         campaign_e,
         changed_paths,
+        changed_path_diff_sha256,
     )
     output = Path(args.output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -50,6 +59,37 @@ def _git_changed_paths(repo: Path, p_sha: str, e_sha: str) -> list[str]:
         encoding="utf-8",
     )
     return [line for line in process.stdout.splitlines() if line]
+
+
+def _git_required_diff_sha256(
+    repo: Path,
+    p_sha: str,
+    e_sha: str,
+    changed_paths: list[str],
+) -> dict[str, str]:
+    observed: dict[str, str] = {}
+    for path in sorted(
+        set(changed_paths)
+        & set(PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256)
+    ):
+        process = subprocess.run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={repo.as_posix()}",
+                "diff",
+                "--binary",
+                p_sha,
+                e_sha,
+                "--",
+                path,
+            ],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+        observed[path] = hashlib.sha256(process.stdout).hexdigest()
+    return observed
 
 
 def _runtime_commit(aggregate: dict[str, object]) -> str:
