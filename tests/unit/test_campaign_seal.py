@@ -186,6 +186,11 @@ def test_archive_handoff_reverifies_seal_snapshot_and_live_campaign(
     assert verified["blockers"] == []
     assert verified["file_count"] == seal["file_count"]
     assert verified["archive_sha256"]
+    assert (
+        verified["campaign_manifest_sha256"]
+        == seal["campaign_manifest_sha256"]
+    )
+    assert verified["state_tsv_sha256"] == seal["state_tsv_sha256"]
     with (campaign / "state.tsv").open("a", encoding="utf-8") as handle:
         handle.write("\n")
 

@@ -156,6 +156,8 @@ bash tools/task4/start_campaign_e_v7_pilot.sh \
 启动器会在 E 进程创建前重新验证 P 的 seal readiness、snapshot build receipt、
 archive checksum、外置 manifest 和当前 P Campaign 全部文件；seal 后新增写入、文件
 漂移、缺失/symlink、receipt/manifest/archive hash 或文件数不一致均会阻止 E 启动。
+启动器还要求 archive-handoff 与 P gate 中的 Campaign 路径、manifest SHA-256 和
+`state.tsv` SHA-256 精确一致，防止把不同时间或不同 Campaign 的两组有效证据误配。
 
 只从 immutable manifest、append-only state 和 run 工件重建新的版本化聚合：
 

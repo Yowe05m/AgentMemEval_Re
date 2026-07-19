@@ -302,13 +302,13 @@ def audit_campaign_archive_handoff(
 
     manifest_path_live = root / "campaign_manifest.json"
     state_path_live = root / "state.tsv"
-    if manifest_path_live.is_file() and _sha256(manifest_path_live) != seal.get(
-        "campaign_manifest_sha256"
-    ):
+    campaign_manifest_sha256 = (
+        _sha256(manifest_path_live) if manifest_path_live.is_file() else None
+    )
+    state_tsv_sha256 = _sha256(state_path_live) if state_path_live.is_file() else None
+    if campaign_manifest_sha256 != seal.get("campaign_manifest_sha256"):
         blockers.append("campaign manifest changed after seal readiness")
-    if state_path_live.is_file() and _sha256(state_path_live) != seal.get(
-        "state_tsv_sha256"
-    ):
+    if state_tsv_sha256 != seal.get("state_tsv_sha256"):
         blockers.append("state.tsv changed after seal readiness")
 
     observed_files = [path for path in root.rglob("*") if path.is_file()]
@@ -347,6 +347,8 @@ def audit_campaign_archive_handoff(
         snapshot_receipt_sha256=_sha256(receipt_path),
         manifest_sha256=manifest_sha256,
         archive_sha256=archive_sha256,
+        campaign_manifest_sha256=campaign_manifest_sha256,
+        state_tsv_sha256=state_tsv_sha256,
         file_count=observed_file_count,
         total_bytes=observed_total_bytes,
         source_verification=source_verification,
@@ -364,6 +366,8 @@ def _archive_handoff_result(
     snapshot_receipt_sha256: str | None = None,
     manifest_sha256: str | None = None,
     archive_sha256: str | None = None,
+    campaign_manifest_sha256: str | None = None,
+    state_tsv_sha256: str | None = None,
     file_count: int | None = None,
     total_bytes: int | None = None,
     source_verification: dict[str, Any] | None = None,
@@ -379,6 +383,8 @@ def _archive_handoff_result(
         "snapshot_receipt_sha256": snapshot_receipt_sha256,
         "manifest_sha256": manifest_sha256,
         "archive_sha256": archive_sha256,
+        "campaign_manifest_sha256": campaign_manifest_sha256,
+        "state_tsv_sha256": state_tsv_sha256,
         "file_count": file_count,
         "total_bytes": total_bytes,
         "source_verification": source_verification or {},

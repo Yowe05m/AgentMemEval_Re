@@ -51,6 +51,7 @@ export PYTHONPATH="$repo/src"
   'import json, sys
 path = sys.argv[1]
 audit = json.load(open(path, encoding="utf-8"))
+handoff = json.load(open(sys.argv[2], encoding="utf-8"))
 assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v6"
 assert audit["status"] == "ready_to_start_campaign_e"
 assert audit["blockers"] == []
@@ -69,11 +70,18 @@ assert audit["expected_prompts"] == {
         "7788fa2f85adca9710cf20f2fc95769db1b2b93ee60f9a5236a430b87d4ad382"
     ),
 }
+assert handoff["schema_version"] == "task4_campaign_archive_handoff_v1"
+assert handoff["status"] == "verified_campaign_archive_handoff"
+assert handoff["blockers"] == []
+assert handoff["campaign_dir"] == audit["campaign_dir"]
+assert handoff["campaign_manifest_sha256"] == audit["campaign_manifest_sha256"]
+assert handoff["state_tsv_sha256"] == audit["state_tsv_sha256"]
 power = audit["campaign_p_power_diagnostic"]
 assert power["status"] == "p_side_power_diagnostic_ready_not_joint_freeze"
 assert power["blockers"] == []
 assert power["joint_p_e_power_freeze_complete"] is False' \
-  "$gate"
+  "$gate" \
+  "$archive_handoff_audit"
 
 curl -fsS --max-time 5 http://127.0.0.1:8000/v1/models >/dev/null
 curl -fsS --max-time 5 http://127.0.0.1:8001/v1/models >/dev/null

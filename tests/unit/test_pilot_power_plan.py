@@ -309,6 +309,11 @@ def test_campaign_e_start_requires_verified_campaign_p_archive_handoff() -> None
     audit_index = script.index("tools/task4/audit_campaign_archive_handoff.py")
     campaign_index = script.index("campaign \\\n")
     assert audit_index < campaign_index
+    assert (
+        'handoff["campaign_manifest_sha256"] == audit["campaign_manifest_sha256"]'
+        in script
+    )
+    assert 'handoff["state_tsv_sha256"] == audit["state_tsv_sha256"]' in script
 
 
 def test_pilot_runtime_equivalence_rejects_execution_relevant_change() -> None:
