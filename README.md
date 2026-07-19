@@ -156,6 +156,15 @@ bash tools/task4/start_campaign_e_v7_pilot.sh \
 python -m agentmemeval campaign-aggregate --input outputs/campaigns/<campaign_id>
 ```
 
+长跑进度使用协议感知的只读工具；它从 resolved config 重建 train +
+checkpoint×evaluation-target 的预算，区分 training、checkpoint generalization、
+finalizing 和 complete，并检查 complete leaf 的八项标准工件。该输出不评估论文资格：
+
+```powershell
+python tools/task4/campaign_progress.py `
+  --campaign-dir outputs/campaigns/<campaign_id>
+```
+
 完整独立 Pilot 后，先从版本化 P/E aggregate 生成固定 MDE 5 BB/100、敏感性
 3/5/10、alpha 0.05、power 0.80 的功效计划；计划会对所有 P/E 对比取最大所需
 seed，且不会按资源静默截断：
