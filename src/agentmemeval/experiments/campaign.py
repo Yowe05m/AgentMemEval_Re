@@ -749,17 +749,58 @@ def _next_attempt(rows: list[dict[str, str]], condition_id: str, seed: int) -> i
 def _valid_completed_attempt(
     rows: list[dict[str, str]], *, condition_id: str, seed: int
 ) -> dict[str, str] | None:
-    candidates = [
+    identity_rows = [
         row
         for row in rows
         if row["condition_id"] == condition_id
         and int(row["seed"]) == int(seed)
-        and row["status"] == "complete"
     ]
-    for row in sorted(candidates, key=lambda item: int(item["attempt"]), reverse=True):
-        if _run_artifacts_valid(Path(row["run_dir"])):
-            return row
-    return None
+    if not identity_rows:
+        return None
+    attempts = [int(row["attempt"]) for row in identity_rows]
+    if any(attempt < 1 for attempt in attempts):
+        raise ConfigError(
+            f"campaign state has nonpositive attempt for {(condition_id, seed)}"
+        )
+    maximum_attempt = max(attempts)
+    latest_attempt_rows = [
+        row for row in identity_rows if int(row["attempt"]) == maximum_attempt
+    ]
+    latest = latest_attempt_rows[-1]
+    completed_attempts = {
+        int(row["attempt"])
+        for row in identity_rows
+        if row.get("status") == "complete"
+    }
+    if len(completed_attempts) > 1:
+        raise ConfigError(
+            f"multiple completed attempts for {(condition_id, seed)}: "
+            f"{sorted(completed_attempts)}"
+        )
+    if (
+        any(row.get("status") == "failed" for row in latest_attempt_rows)
+        and latest.get("status") == "complete"
+    ):
+        raise ConfigError(
+            "failed state precedes completion within latest attempt for "
+            f"{(condition_id, seed)}"
+        )
+    if completed_attempts and (
+        maximum_attempt not in completed_attempts
+        or latest.get("status") != "complete"
+    ):
+        raise ConfigError(
+            f"completed attempt is superseded by a non-complete lifecycle for "
+            f"{(condition_id, seed)}"
+        )
+    if latest.get("status") != "complete":
+        return None
+    run_dir = Path(latest["run_dir"])
+    if not _run_artifacts_valid(run_dir):
+        raise ConfigError(
+            f"latest completed attempt has incomplete artifacts: {run_dir}"
+        )
+    return latest
 
 
 def _completed_runs(rows: list[dict[str, str]]) -> list[dict[str, str]]:
