@@ -4,6 +4,7 @@ import csv
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from agentmemeval.storage.run_map import (
@@ -291,7 +292,7 @@ def test_run_map_classifies_model_substituted_pilot_as_sensitivity(
         row = next(csv.DictReader(handle))
     assert row["classification"] == "sensitivity_only"
     payload = json.loads(exclusions.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "task4_formal_main_table_exclusions_v2"
+    assert payload["schema_version"] == "task4_formal_main_table_exclusions_v3"
 
 
 def test_run_map_preserves_source_platform_path_style() -> None:
@@ -301,3 +302,118 @@ def test_run_map_preserves_source_platform_path_style() -> None:
     assert _source_child_path(
         r"C:\campaign\runs\run-1", "resolved_config.yaml"
     ) == r"C:\campaign\runs\run-1\resolved_config.yaml"
+
+
+def test_run_map_excludes_completed_attempt_superseded_by_failure(
+    tmp_path: Path,
+) -> None:
+    campaign = tmp_path / "campaign"
+    campaign.mkdir()
+    (campaign / "campaign_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "agentmemeval_campaign_v1",
+                "campaign_id": "campaign-x",
+                "campaign": {"campaign_id": "campaign-x"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    first_source = "/server/campaign/runs/formal__s1__a01"
+    second_source = "/server/campaign/runs/formal__s1__a02"
+    _leaf(
+        campaign,
+        "formal__s1__a01",
+        condition_id="formal",
+        seed=1,
+        source_run_dir=first_source,
+        run_mode="formal",
+        paper_eligible=True,
+    )
+    header = (
+        "event_utc\tcondition_id\ttarget_mechanism\tseed\tattempt\tstatus\t"
+        "run_id\trun_dir\tfailure_class\tmessage\n"
+    )
+    states = [
+        f"t\tformal\tfact\t1\t1\tcomplete\tformal__s1__a01\t{first_source}\t\t",
+        f"t\tformal\tfact\t1\t2\trunning\tformal__s1__a02\t{second_source}\t\t",
+        f"t\tformal\tfact\t1\t2\tfailed\tformal__s1__a02\t{second_source}\terror\tx",
+    ]
+    (campaign / "state.tsv").write_text(
+        header + "\n".join(states) + "\n", encoding="utf-8"
+    )
+
+    output = tmp_path / "run_map.csv"
+    exclusions = tmp_path / "exclusions.json"
+    result = build_run_map([campaign], output, exclusions)
+
+    with output.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = {row["run_id"]: row for row in csv.DictReader(handle)}
+    assert result["formal_main_table_candidates"] == 0
+    assert result["state_selections"] == [
+        {
+            "campaign_id": "campaign-x",
+            "matrix_unit_count": 1,
+            "complete_latest_attempt_count": 0,
+            "incomplete_latest_attempt_count": 1,
+            "superseded_failed_state_rows": 0,
+        }
+    ]
+    assert rows["formal__s1__a01"]["formal_main_table_eligible"] == "False"
+    assert "not_latest_completed_attempt" in rows["formal__s1__a01"][
+        "exclusion_reasons"
+    ]
+    assert rows["formal__s1__a02"]["classification"] == "partial_or_failed"
+
+
+def test_run_map_rejects_multiple_completed_attempts(tmp_path: Path) -> None:
+    campaign = tmp_path / "campaign"
+    campaign.mkdir()
+    (campaign / "campaign_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "agentmemeval_campaign_v1",
+                "campaign_id": "campaign-x",
+                "campaign": {"campaign_id": "campaign-x"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    first_source = "/server/campaign/runs/formal__s1__a01"
+    second_source = "/server/campaign/runs/formal__s1__a02"
+    _leaf(
+        campaign,
+        "formal__s1__a01",
+        condition_id="formal",
+        seed=1,
+        source_run_dir=first_source,
+        run_mode="formal",
+        paper_eligible=True,
+    )
+    _leaf(
+        campaign,
+        "formal__s1__a02",
+        condition_id="formal",
+        seed=1,
+        source_run_dir=second_source,
+        run_mode="formal",
+        paper_eligible=True,
+    )
+    header = (
+        "event_utc\tcondition_id\ttarget_mechanism\tseed\tattempt\tstatus\t"
+        "run_id\trun_dir\tfailure_class\tmessage\n"
+    )
+    states = [
+        f"t\tformal\tfact\t1\t1\tcomplete\tformal__s1__a01\t{first_source}\t\t",
+        f"t\tformal\tfact\t1\t2\tcomplete\tformal__s1__a02\t{second_source}\t\t",
+    ]
+    (campaign / "state.tsv").write_text(
+        header + "\n".join(states) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="multiple completed attempts"):
+        build_run_map(
+            [campaign],
+            tmp_path / "run_map.csv",
+            tmp_path / "exclusions.json",
+        )

@@ -11,6 +11,10 @@ from typing import Any
 
 import yaml
 
+from agentmemeval.evaluation.resource_audit import (
+    select_latest_completed_state_rows,
+)
+
 RUN_MAP_FIELDS = (
     "campaign_id",
     "condition_id",
@@ -53,6 +57,7 @@ def build_run_map(
     """Write one latest lifecycle row per attempt plus formal-main exclusion reasons."""
 
     mapped: list[dict[str, Any]] = []
+    state_selections: list[dict[str, Any]] = []
     for raw_dir in campaign_dirs:
         campaign_dir = Path(raw_dir).resolve()
         manifest_path = campaign_dir / "campaign_manifest.json"
@@ -68,6 +73,16 @@ def build_run_map(
         )
         with state_path.open("r", encoding="utf-8", newline="") as handle:
             states = list(csv.DictReader(handle, delimiter="\t"))
+        latest_completed, state_selection = select_latest_completed_state_rows(states)
+        latest_completed_attempts = {
+            (
+                str(row["condition_id"]),
+                str(row["seed"]),
+                str(row["attempt"]),
+            )
+            for row in latest_completed
+        }
+        state_selections.append({"campaign_id": campaign_id, **state_selection})
         latest: dict[tuple[str, str, str], dict[str, str]] = {}
         lifecycle_identities: dict[
             tuple[str, str, str], set[tuple[str, str, str]]
@@ -96,6 +111,7 @@ def build_run_map(
                         campaign_manifest_identity_invalid
                     ),
                     lifecycle_identity_conflict=len(lifecycle_identities[key]) != 1,
+                    latest_completed_attempt=key in latest_completed_attempts,
                     manifest_sha=_sha256(manifest_path),
                     state_sha=_sha256(state_path),
                 )
@@ -118,12 +134,13 @@ def build_run_map(
         writer.writerows(mapped)
     excluded = [row for row in mapped if not row["formal_main_table_eligible"]]
     payload = {
-        "schema_version": "task4_formal_main_table_exclusions_v2",
+        "schema_version": "task4_formal_main_table_exclusions_v3",
         "run_map": str(output),
         "run_map_sha256": _sha256(output),
         "total_attempts": len(mapped),
         "formal_main_table_candidates": len(mapped) - len(excluded),
         "excluded_attempts": len(excluded),
+        "state_selections": state_selections,
         "exclusions": excluded,
     }
     with exclusions.open("x", encoding="utf-8") as handle:
@@ -135,6 +152,7 @@ def build_run_map(
         "total_attempts": len(mapped),
         "formal_main_table_candidates": len(mapped) - len(excluded),
         "excluded_attempts": len(excluded),
+        "state_selections": state_selections,
         "run_map_sha256": _sha256(output),
         "exclusion_list_sha256": _sha256(exclusions),
     }
@@ -147,6 +165,7 @@ def _map_attempt(
     *,
     campaign_manifest_identity_invalid: bool,
     lifecycle_identity_conflict: bool,
+    latest_completed_attempt: bool,
     manifest_sha: str,
     state_sha: str,
 ) -> dict[str, Any]:
@@ -174,6 +193,8 @@ def _map_attempt(
         reasons.append("campaign_manifest_identity_invalid")
     if lifecycle_identity_conflict:
         reasons.append("state_lifecycle_identity_conflict")
+    if not latest_completed_attempt:
+        reasons.append("not_latest_completed_attempt")
     missing = (
         [
             name
