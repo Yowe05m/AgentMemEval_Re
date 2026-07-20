@@ -269,7 +269,11 @@ def aggregate_campaign(campaign_dir: str | Path) -> dict[str, Any]:
         raise ConfigError("campaign manifest 缺少冻结的 campaign/base_config")
     state_rows = _prefer_campaign_local_run_dirs(root, _read_state(state_path))
     completed_runs = _completed_runs(state_rows)
-    aggregate = _aggregate_campaign(spec, base_config, completed_runs)
+    aggregate = build_campaign_aggregate_payload(
+        spec,
+        base_config,
+        completed_runs,
+    )
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     output_path = root / f"campaign_aggregate_{stamp}.json"
     _write_new_json(output_path, aggregate)
@@ -279,6 +283,16 @@ def aggregate_campaign(campaign_dir: str | Path) -> dict[str, Any]:
         "status": aggregate.get("status"),
         "completed_run_count": len(completed_runs),
     }
+
+
+def build_campaign_aggregate_payload(
+    spec: dict[str, Any],
+    base_config: dict[str, Any],
+    completed_runs: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Build the canonical aggregate payload from frozen campaign leaves."""
+
+    return _aggregate_campaign(spec, base_config, completed_runs)
 
 
 def _prefer_campaign_local_run_dirs(

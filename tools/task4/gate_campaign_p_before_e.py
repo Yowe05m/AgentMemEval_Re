@@ -12,16 +12,13 @@ from typing import Any
 
 import yaml
 
-from agentmemeval.evaluation.aggregation import (
-    aggregate_metrics,
-    validate_runtime_homogeneity,
-)
 from agentmemeval.evaluation.pilot import (
     PRIMARY_MDE_BB_PER_100,
     SENSITIVITY_MDES_BB_PER_100,
     calibrate_behavior_thresholds,
 )
 from agentmemeval.evaluation.statistics import estimate_paired_seed_requirement
+from agentmemeval.experiments.campaign import build_campaign_aggregate_payload
 
 REQUIRED_ARTIFACTS = (
     "resolved_config.yaml",
@@ -329,7 +326,30 @@ def build_gate(
         blockers.extend(str(item) for item in behavior.get("blockers", []))
         if not behavior.get("blockers"):
             blockers.append(f"behavior gate status is {behavior.get('status')}")
-    rebuilt_aggregate_metrics = aggregate_metrics(metrics_list)
+    canonical_completed = [
+        {
+            **row,
+            "run_dir": str(
+                (campaign_dir / "runs" / str(row["run_id"])).resolve()
+            ),
+        }
+        for row in completed
+    ]
+    base_config = manifest.get("base_config")
+    if not isinstance(campaign, dict) or not isinstance(base_config, dict):
+        blockers.append(
+            "campaign manifest lacks campaign/base_config for canonical rebuild"
+        )
+        rebuilt_campaign_aggregate: dict[str, Any] = {}
+    else:
+        rebuilt_campaign_aggregate = build_campaign_aggregate_payload(
+            campaign,
+            base_config,
+            canonical_completed,
+        )
+    rebuilt_aggregate_metrics = rebuilt_campaign_aggregate.get(
+        "aggregate_metrics"
+    )
     observed_aggregate_metrics = aggregate.get("aggregate_metrics")
     observed_aggregate_metrics_sha256 = _json_sha256(observed_aggregate_metrics)
     rebuilt_aggregate_metrics_sha256 = _json_sha256(rebuilt_aggregate_metrics)
@@ -340,7 +360,9 @@ def build_gate(
         blockers.append(
             "aggregate metrics do not match a canonical rebuild from campaign leaves"
         )
-    rebuilt_runtime_homogeneity = validate_runtime_homogeneity(run_manifests)
+    rebuilt_runtime_homogeneity = rebuilt_campaign_aggregate.get(
+        "runtime_homogeneity"
+    )
     observed_runtime_homogeneity = aggregate.get("runtime_homogeneity")
     observed_runtime_homogeneity_sha256 = _json_sha256(
         observed_runtime_homogeneity

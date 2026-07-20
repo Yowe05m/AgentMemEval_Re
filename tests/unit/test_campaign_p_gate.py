@@ -8,10 +8,7 @@ from types import ModuleType
 
 import yaml
 
-from agentmemeval.evaluation.aggregation import (
-    aggregate_metrics,
-    validate_runtime_homogeneity,
-)
+from agentmemeval.experiments.campaign import build_campaign_aggregate_payload
 
 
 def _gate_module() -> ModuleType:
@@ -67,6 +64,35 @@ def _metrics(
     }
 
 
+def _checkpoint_results(seed: int) -> list[dict[str, object]]:
+    effects = {
+        1: {
+            "fact": 0.0,
+            "expr": 10.0,
+            "fact_expr_async": 4.0,
+            "fact_expr_sync": 8.0,
+        },
+        2: {
+            "fact": 0.0,
+            "expr": -5.0,
+            "fact_expr_async": -2.0,
+            "fact_expr_sync": 1.0,
+        },
+    }[seed]
+    return [
+        {
+            "checkpoint_hand": 100,
+            "mechanism": mechanism,
+            "bb_per_100": value,
+            "test_chip_per_hand": value / 100.0,
+            "train_bb_per_100": value / 2.0,
+            "train_chip_per_hand": value / 200.0,
+            "generalization_gap_bb_per_100": value / 3.0,
+        }
+        for mechanism, value in effects.items()
+    ]
+
+
 def _campaign(
     tmp_path: Path,
     *,
@@ -79,9 +105,19 @@ def _campaign(
         "schema_version": "agentmemeval_campaign_v1",
         "campaign": {
             "campaign_id": "p-gate-test",
+            "design": "mixed_table",
             "seeds": [1, 2],
             "conditions": [{"condition_id": "mixed", "target_mechanism": "mixed"}],
-        }
+        },
+        "base_config": {
+            "experiment": {
+                "run_mode": "smoke",
+                "primary_baseline_mechanism": "fact",
+                "statistical_plan_status": "pending_pilot_power_calibration",
+                "multiple_comparison_method": "holm",
+                "required_seed_pairs": None,
+            }
+        },
     }
     (campaign / "campaign_manifest.json").write_text(
         json.dumps(campaign_manifest), encoding="utf-8"
@@ -97,7 +133,6 @@ def _campaign(
         ),
         encoding="utf-8",
     )
-    run_manifests: list[dict[str, object]] = []
     for seed in (1, 2):
         run_dir = campaign / "runs" / f"mixed__s{seed}__a01"
         run_dir.mkdir(parents=True)
@@ -131,7 +166,6 @@ def _campaign(
                 },
             }
         }
-        run_manifests.append(runtime)
         json_files = {
             "manifest.json": runtime,
             "metrics.json": _metrics(seed, revision_fallback),
@@ -146,7 +180,9 @@ def _campaign(
                     "stack_conservation_violation_count": 0,
                 },
             },
-            "checkpoint_generalization.json": {"results": []},
+            "checkpoint_generalization.json": {
+                "results": _checkpoint_results(seed)
+            },
             "experiment_result.json": {"status": "complete"},
         }
         for name, data in json_files.items():
@@ -167,23 +203,26 @@ def _campaign(
         )
         (run_dir / "hand_summaries.jsonl").write_text("{}\n", encoding="utf-8")
         (run_dir / "report.md").write_text("complete\n", encoding="utf-8")
+    completed_runs = [
+        {
+            "condition_id": "mixed",
+            "target_mechanism": "mixed",
+            "seed": str(seed),
+            "attempt": "1",
+            "status": "complete",
+            "run_id": f"mixed__s{seed}__a01",
+            "run_dir": str(campaign / "runs" / f"mixed__s{seed}__a01"),
+        }
+        for seed in (1, 2)
+    ]
+    aggregate_payload = build_campaign_aggregate_payload(
+        campaign_manifest["campaign"],
+        campaign_manifest["base_config"],
+        completed_runs,
+    )
     aggregate_path = campaign / "campaign_aggregate_test.json"
     aggregate_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "agentmemeval_campaign_aggregate_v1",
-                "status": "descriptive_only",
-                "completed_run_count": 2,
-                "expected_run_count": 2,
-                "runtime_homogeneity": validate_runtime_homogeneity(
-                    run_manifests
-                ),
-                "design": "mixed_table",
-                "aggregate_metrics": aggregate_metrics(
-                    [_metrics(1), _metrics(2)]
-                ),
-            }
-        ),
+        json.dumps(aggregate_payload),
         encoding="utf-8",
     )
     return campaign, aggregate_path
@@ -204,7 +243,7 @@ def test_campaign_p_gate_accepts_complete_clean_homogeneous_evidence(
             "experience_update_sha256": "experience-hash",
         },
     )
-    assert audit["status"] == "ready_to_start_campaign_e"
+    assert audit["status"] == "ready_to_start_campaign_e", audit["blockers"]
     assert audit["schema_version"] == "task4_campaign_p_before_e_gate_v7"
     assert audit["blockers"] == []
     assert audit["behavior_freeze_preview"]["status"] == "frozen"
@@ -218,6 +257,11 @@ def test_campaign_p_gate_accepts_complete_clean_homogeneous_evidence(
     )
     assert len(audit["leaf_evidence"][0]["sha256"]) == 8
     assert len(audit["leaf_evidence"]) == 2
+    aggregate_data = json.loads(aggregate.read_text(encoding="utf-8"))
+    assert (
+        "auxiliary_table_run_estimands"
+        in aggregate_data["aggregate_metrics"]
+    )
     assert audit["aggregate_metrics_match_canonical_leaf_rebuild"] is True
     assert (
         audit["observed_aggregate_metrics_sha256"]
@@ -265,7 +309,7 @@ def test_campaign_p_gate_accepts_failed_attempt_followed_by_complete_retry(
         },
     )
 
-    assert audit["status"] == "ready_to_start_campaign_e"
+    assert audit["status"] == "ready_to_start_campaign_e", audit["blockers"]
     assert audit["failed_state_rows"] == 1
     assert audit["superseded_failed_state_rows"] == 1
     assert audit["latest_failed_matrix_units"] == 0
