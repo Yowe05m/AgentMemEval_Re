@@ -10,6 +10,10 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from agentmemeval.evaluation.resource_audit import (
+    select_latest_completed_state_rows,
+)
+
 ALLOWED_LABELS = {"relevant", "irrelevant", "uncertain"}
 REQUIRED_SOURCE_DESIGNS = {"mixed_table", "target_vs_seven_no_memory"}
 REVIEW_POLICY = {
@@ -51,7 +55,7 @@ def build_relevance_review_pack(
         expected = len(seeds) * len(conditions)
         with state_path.open("r", encoding="utf-8", newline="") as handle:
             states = list(csv.DictReader(handle, delimiter="\t"))
-        completed = [row for row in states if row.get("status") == "complete"]
+        completed, state_selection = select_latest_completed_state_rows(states)
         if expected < 1 or len(completed) != expected:
             raise ValueError(
                 f"{campaign_id} matrix is incomplete: {len(completed)}/{expected}"
@@ -142,6 +146,7 @@ def build_relevance_review_pack(
                 "expected_state_rows": expected,
                 "completed_state_rows": len(completed),
                 "matrix_complete": len(completed) == expected,
+                "state_selection": state_selection,
                 "event_sources": sorted(
                     event_sources,
                     key=lambda item: (

@@ -19,7 +19,7 @@ def build_campaign_resource_audit(campaign_dir: str | Path) -> dict[str, Any]:
     state_path = root / "state.tsv"
     with state_path.open("r", encoding="utf-8", newline="") as handle:
         states = list(csv.DictReader(handle, delimiter="\t"))
-    completed, state_selection = _latest_completed_rows(states)
+    completed, state_selection = select_latest_completed_state_rows(states)
     latencies: list[float] = []
     prompt_tokens = 0
     completion_tokens = 0
@@ -113,7 +113,7 @@ def build_campaign_resource_audit(campaign_dir: str | Path) -> dict[str, Any]:
     }
 
 
-def _latest_completed_rows(
+def select_latest_completed_state_rows(
     states: list[dict[str, str]],
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
     grouped: dict[tuple[str, int], list[dict[str, str]]] = {}

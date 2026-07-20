@@ -233,6 +233,26 @@ def test_build_relevance_review_pack_rejects_incomplete_source_matrix(
         build_relevance_review_pack([campaign_p, campaign_e])
 
 
+def test_build_relevance_review_pack_uses_latest_attempt_state(
+    tmp_path: Path,
+) -> None:
+    campaign_p = _campaign(tmp_path, "pilot-p", "mixed_table")
+    state_path = campaign_p / "state.tsv"
+    with state_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "later\tmixed\tmixed\t1\t2\trunning\t"
+            "mixed__s1__a02\t/newer\t\t\n"
+        )
+    campaign_e = _campaign(
+        tmp_path,
+        "pilot-e",
+        "target_vs_seven_no_memory",
+    )
+
+    with pytest.raises(ValueError, match="matrix is incomplete: 0/1"):
+        build_relevance_review_pack([campaign_p, campaign_e])
+
+
 def test_build_relevance_review_pack_requires_exactly_one_p_and_e_campaign(
     tmp_path: Path,
 ) -> None:
