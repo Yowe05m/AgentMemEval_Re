@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agentmemeval.evaluation.study_reporting import (
     _archive_pair_status,
+    _audit_run_map,
     build_task4_study_report,
 )
 from agentmemeval.storage.snapshot_archive import (
@@ -287,19 +288,86 @@ def _run_map(
     eligible: bool,
     add_excluded_attempt: bool = False,
 ) -> Path:
+    fields = (
+        "campaign_id",
+        "condition_id",
+        "seed",
+        "attempt",
+        "state_status",
+        "run_id",
+        "run_mode",
+        "execution_valid",
+        "paper_eligible",
+        "classification",
+        "formal_main_table_eligible",
+        "exclusion_reasons",
+        "leaf_artifacts_sha256",
+        "campaign_manifest_sha256",
+        "state_tsv_sha256",
+    )
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow(
+            {
+                "campaign_id": path.stem,
+                "condition_id": "condition",
+                "seed": 1,
+                "attempt": 1,
+                "state_status": "complete",
+                "run_id": "run_1",
+                "run_mode": "formal",
+                "execution_valid": True,
+                "paper_eligible": True,
+                "classification": "formal_main_table_candidate",
+                "formal_main_table_eligible": eligible,
+                "exclusion_reasons": "" if eligible else "not_eligible",
+                "leaf_artifacts_sha256": json.dumps(
+                    {"manifest.json": "a" * 64}
+                ),
+                "campaign_manifest_sha256": "b" * 64,
+                "state_tsv_sha256": "c" * 64,
+            }
+        )
+        if add_excluded_attempt:
+            writer.writerow(
+                {
+                    "campaign_id": path.stem,
+                    "condition_id": "condition",
+                    "seed": 1,
+                    "attempt": 2,
+                    "state_status": "failed",
+                    "run_id": "run_1_failed",
+                    "run_mode": "formal",
+                    "execution_valid": False,
+                    "paper_eligible": False,
+                    "classification": "partial_or_failed",
+                    "formal_main_table_eligible": False,
+                    "exclusion_reasons": "state_status:failed",
+                    "leaf_artifacts_sha256": "{}",
+                    "campaign_manifest_sha256": "b" * 64,
+                    "state_tsv_sha256": "c" * 64,
+                }
+            )
+    return path
+
+
+def test_run_map_audit_rejects_count_only_eligible_csv(tmp_path: Path) -> None:
+    path = tmp_path / "weak_run_map.csv"
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(
             handle, fieldnames=("run_id", "formal_main_table_eligible")
         )
         writer.writeheader()
         writer.writerow(
-            {"run_id": "run_1", "formal_main_table_eligible": eligible}
+            {"run_id": "run_1", "formal_main_table_eligible": True}
         )
-        if add_excluded_attempt:
-            writer.writerow(
-                {"run_id": "run_1_failed", "formal_main_table_eligible": False}
-            )
-    return path
+
+    audit = _audit_run_map(path, expected_eligible_count=1)
+
+    assert audit["status"] == "blocked_formal_candidate_count_mismatch"
+    assert "state_status" in audit["missing_fields"]
+    assert audit["invalid_eligible_rows"]
 
 
 def _resource_audit(path: Path) -> Path:

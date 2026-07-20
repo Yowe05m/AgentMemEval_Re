@@ -295,15 +295,100 @@ def _audit_run_map(
     expected_eligible_count: int,
 ) -> dict[str, Any]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
+        reader = csv.DictReader(handle)
+        fieldnames = set(reader.fieldnames or ())
+        rows = list(reader)
+    required_fields = {
+        "campaign_id",
+        "condition_id",
+        "seed",
+        "attempt",
+        "state_status",
+        "run_id",
+        "run_mode",
+        "execution_valid",
+        "paper_eligible",
+        "classification",
+        "formal_main_table_eligible",
+        "exclusion_reasons",
+        "leaf_artifacts_sha256",
+        "campaign_manifest_sha256",
+        "state_tsv_sha256",
+    }
+    missing_fields = sorted(required_fields - fieldnames)
     eligible = [
         row
         for row in rows
         if str(row.get("formal_main_table_eligible", "")).lower() == "true"
     ]
+    invalid_eligible_rows: list[dict[str, Any]] = []
+    eligible_identities: set[tuple[str, str, int]] = set()
+    duplicate_eligible_identities: list[dict[str, Any]] = []
+    for row_number, row in enumerate(eligible, start=2):
+        reasons: list[str] = []
+        try:
+            seed = int(str(row.get("seed", "")))
+            attempt = int(str(row.get("attempt", "")))
+            if attempt < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            reasons.append("invalid_seed_or_attempt")
+            seed = 0
+        identity = (
+            str(row.get("campaign_id", "")),
+            str(row.get("condition_id", "")),
+            seed,
+        )
+        if not identity[0] or not identity[1]:
+            reasons.append("missing_matrix_identity")
+        elif identity in eligible_identities:
+            duplicate_eligible_identities.append(
+                {"row_number": row_number, "identity": list(identity)}
+            )
+        else:
+            eligible_identities.add(identity)
+        expected_values = {
+            "state_status": "complete",
+            "run_mode": "formal",
+            "execution_valid": "true",
+            "paper_eligible": "true",
+            "classification": "formal_main_table_candidate",
+            "exclusion_reasons": "",
+        }
+        for field, expected in expected_values.items():
+            if str(row.get(field, "")).lower() != expected:
+                reasons.append(f"{field}_mismatch")
+        try:
+            leaf_hashes = json.loads(str(row.get("leaf_artifacts_sha256", "")))
+            if not isinstance(leaf_hashes, dict) or not leaf_hashes:
+                raise ValueError
+            if any(
+                not _is_sha256(value)
+                for value in leaf_hashes.values()
+            ):
+                raise ValueError
+        except (TypeError, ValueError, json.JSONDecodeError):
+            reasons.append("invalid_leaf_artifact_hashes")
+        for field in ("campaign_manifest_sha256", "state_tsv_sha256"):
+            if not _is_sha256(row.get(field)):
+                reasons.append(f"invalid_{field}")
+        if reasons:
+            invalid_eligible_rows.append(
+                {
+                    "row_number": row_number,
+                    "run_id": str(row.get("run_id", "")),
+                    "reasons": reasons,
+                }
+            )
     status = (
         "verified_formal_candidates_cover_analysis"
-        if expected_eligible_count > 0 and len(eligible) == expected_eligible_count
+        if (
+            expected_eligible_count > 0
+            and len(eligible) == expected_eligible_count
+            and not missing_fields
+            and not invalid_eligible_rows
+            and not duplicate_eligible_identities
+        )
         else "blocked_formal_candidate_count_mismatch"
     )
     return {
@@ -311,7 +396,15 @@ def _audit_run_map(
         "attempt_count": len(rows),
         "eligible_attempt_count": len(eligible),
         "excluded_attempt_count": len(rows) - len(eligible),
+        "missing_fields": missing_fields,
+        "invalid_eligible_rows": invalid_eligible_rows,
+        "duplicate_eligible_identities": duplicate_eligible_identities,
     }
+
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value or "")
+    return len(text) == 64 and all(character in "0123456789abcdef" for character in text)
 
 
 def _analysis_scope_blockers(
