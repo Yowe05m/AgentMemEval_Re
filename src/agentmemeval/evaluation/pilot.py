@@ -48,6 +48,7 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     "src/agentmemeval/evaluation/formal_freeze.py",
     "src/agentmemeval/evaluation/pilot.py",
     "src/agentmemeval/evaluation/relevance_review.py",
+    "src/agentmemeval/evaluation/resource_audit.py",
     "src/agentmemeval/evaluation/runtime_lock.py",
     "src/agentmemeval/evaluation/study_reporting.py",
     "src/agentmemeval/experiments/campaign.py",
@@ -59,6 +60,7 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     "src/agentmemeval/storage/run_map.py",
     "src/agentmemeval/storage/snapshot_archive.py",
     "tests/unit/test_archive_manifest.py",
+    "tests/unit/test_campaign_attempts.py",
     "tests/unit/test_campaign_p_gate.py",
     "tests/unit/test_campaign_progress.py",
     "tests/unit/test_campaign_reporting.py",
@@ -68,6 +70,7 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     "tests/unit/test_pilot_power_plan.py",
     "tests/unit/test_protocol_admission.py",
     "tests/unit/test_relevance_review.py",
+    "tests/unit/test_resource_audit.py",
     "tests/unit/test_run_map.py",
     "tests/unit/test_runtime_lock.py",
     "tests/unit/test_snapshot_archive.py",
@@ -87,11 +90,13 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
     "tools/task4/start_campaign_e_v7_pilot.sh",
 }
 PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256 = {
-    # The execution-adjacent P→E file contains the reviewed seed-major scheduler
-    # plus post-run mixed-table endpoint reconstruction. Binding the exact Git
-    # patch prevents this path exception from authorizing any later leaf change.
+    # The execution-adjacent P→E file contains the reviewed seed-major scheduler,
+    # rolling run-start lifecycle timestamps, fail-closed latest-attempt selection,
+    # and post-run mixed-table endpoint reconstruction. None changes the resolved
+    # leaf config or table-play path. Binding the exact Git patch prevents this
+    # exception from authorizing any later leaf change.
     "src/agentmemeval/experiments/campaign.py": (
-        "13a41be9f15641af233b2fd053ce8e853d0e682bab6f8b809239f9982baec6e5"
+        "0a20c0e03629309282b92b4292ab28c7c04e32a71b239ff26396301f541adbf6"
     ),
 }
 EXECUTION_ZERO_FIELDS = (
