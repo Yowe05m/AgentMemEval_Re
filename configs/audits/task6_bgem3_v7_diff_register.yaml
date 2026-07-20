@@ -1,0 +1,66 @@
+schema_version: task6_diff_register_v1
+comparison_scope: same-seed cross-backend mirrored Pilot
+paper_claim_boundary: not_for_paper
+
+authority:
+  v7_main_base_commit: f15952aa1a69352d89b1ee5c23beec69f0bf6c3a
+  848_true_run_commit: d9cd9c6de54d093c7e0dc2333e7ab8e280c932b9
+  528_bgem3_v6_source_commit: dfe65bdef22e56eed501111a93a9ed4f0978f9b6
+  local_bgem3_cherry_pick_commit: ce7e3979bee30ff4276490839de4cd8f0612b533
+  task6_implementation_commit: 25cda301bbb0cec9547d6d7ab69ceac1ad9582cc
+  implementation_tree: bb6161872b27afd3c7be2459aa6c23710a1d5537
+
+frozen_contract:
+  decision_prompt_source: inherited_from_v7_main_base
+  decision_version: 2026-07-19-v6-counterfactual-calibrated-memory
+  decision_system_sha256: 9cd2f157225e14bfee9113c3af01a2ff4fff839aeb68dcfd8f11740bd8647800
+  experience_update_sha256: 7788fa2f85adca9710cf20f2fc95769db1b2b93ee60f9a5236a430b87d4ad382
+  bge_query_policy: raw_symmetric_no_instruction
+  bge_hybrid_weights: [0.4, 0.2, 0.4]
+  candidate_depth: 1000
+  colbert_rerank_depth: 1000
+  final_top_k_policy: agent_roster_top_k
+  cache_schema_version: bgem3_native_document_repr_v1
+
+categories:
+  bge_m3_required_changes:
+    rationale: native dense+sparse+ColBERT retrieval and 528 service integration
+    paths:
+      - README.md
+      - configs/campaigns/task4_campaign_p_pilot_parallel_v6_bgem3_native_528.yaml
+      - configs/experiments/task4_campaign_p_pilot_bgem3_native_528.yaml
+      - configs/experiments/task4_real_pilot_base_bgem3_native_528.yaml
+      - pyproject.toml
+      - src/agentmemeval/config/loader.py
+      - src/agentmemeval/experiments/admission.py
+      - src/agentmemeval/experiments/fixed_table.py
+      - src/agentmemeval/memory/bgem3_contract.py
+      - src/agentmemeval/memory/factual.py
+      - src/agentmemeval/memory/rag.py
+      - tools/bgem3_hybrid_server.py
+  v7_prompt_required_changes:
+    rationale: V7 prompt bytes are inherited unchanged from the authoritative main base
+    paths: []
+    inherited_evidence:
+      - src/agentmemeval/prompts/decision.py
+      - src/agentmemeval/prompts/experience_update.py
+  postprocessing_and_audit_changes:
+    rationale: V7 mirrored protocol, immutable identity capture, gates, and regression tests
+    paths:
+      - configs/audits/task6_bgem3_v7_diff_register.yaml
+      - configs/campaigns/task4_campaign_p_pilot_parallel_v7_bgem3_native_528.yaml
+      - configs/experiments/task6_campaign_p_v7_bgem3_native_528.yaml
+      - configs/experiments/task6_campaign_p_v7_bgem3_preflight_528.yaml
+      - configs/experiments/task6_real_pilot_base_v7_bgem3_native_528.yaml
+      - src/agentmemeval/storage/artifacts.py
+      - tests/unit/test_bgem3_contract.py
+      - tests/unit/test_config_validation.py
+      - tests/unit/test_rag_and_evaluator.py
+      - tools/task6/gate_bgem3_v7_preflight.py
+  unexplained_changes:
+    paths: []
+
+admission:
+  all_changed_paths_classified: true
+  unexplained_change_count: 0
+  result: eligible_for_real_service_preflight

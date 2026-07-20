@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
+import yaml
 
 from agentmemeval.config.loader import load_config, validate_config
 from agentmemeval.core.errors import ConfigError
@@ -224,6 +225,51 @@ def test_528_bgem3_v7_manifest_metadata_seals_threshold_and_embedding_identity()
     assert metadata["embedding"]["cache_schema_version"] == (
         "bgem3_native_document_repr_v1"
     )
+
+
+def test_task6_diff_register_has_no_unexplained_paths() -> None:
+    register = yaml.safe_load(
+        Path("configs/audits/task6_bgem3_v7_diff_register.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    categories = register["categories"]
+    classified = {
+        path
+        for name in (
+            "bge_m3_required_changes",
+            "v7_prompt_required_changes",
+            "postprocessing_and_audit_changes",
+        )
+        for path in categories[name]["paths"]
+    }
+    expected = {
+        "README.md",
+        "configs/audits/task6_bgem3_v7_diff_register.yaml",
+        "configs/campaigns/task4_campaign_p_pilot_parallel_v6_bgem3_native_528.yaml",
+        "configs/campaigns/task4_campaign_p_pilot_parallel_v7_bgem3_native_528.yaml",
+        "configs/experiments/task4_campaign_p_pilot_bgem3_native_528.yaml",
+        "configs/experiments/task4_real_pilot_base_bgem3_native_528.yaml",
+        "configs/experiments/task6_campaign_p_v7_bgem3_native_528.yaml",
+        "configs/experiments/task6_campaign_p_v7_bgem3_preflight_528.yaml",
+        "configs/experiments/task6_real_pilot_base_v7_bgem3_native_528.yaml",
+        "pyproject.toml",
+        "src/agentmemeval/config/loader.py",
+        "src/agentmemeval/experiments/admission.py",
+        "src/agentmemeval/experiments/fixed_table.py",
+        "src/agentmemeval/memory/bgem3_contract.py",
+        "src/agentmemeval/memory/factual.py",
+        "src/agentmemeval/memory/rag.py",
+        "src/agentmemeval/storage/artifacts.py",
+        "tests/unit/test_bgem3_contract.py",
+        "tests/unit/test_config_validation.py",
+        "tests/unit/test_rag_and_evaluator.py",
+        "tools/bgem3_hybrid_server.py",
+        "tools/task6/gate_bgem3_v7_preflight.py",
+    }
+    assert classified == expected
+    assert categories["unexplained_changes"]["paths"] == []
+    assert register["admission"]["unexplained_change_count"] == 0
 
 
 def test_task4_target_scoped_pilot_campaigns_are_valid_and_seed_paired() -> None:
