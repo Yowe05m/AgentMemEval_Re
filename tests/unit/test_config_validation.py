@@ -157,7 +157,7 @@ def test_528_bgem3_v7_mirrors_848_contract_and_freezes_preflight() -> None:
     assert provider["model_tokenizer_revision"] == provider["model_revision"]
     assert provider["service_startup_parameters"]["gpu_memory_utilization"] == 0.62
     assert provider["service_startup_parameters"]["quantization"] is None
-    assert "vllm_use_flashinfer_sampler" not in provider["service_startup_parameters"]
+    assert provider["service_startup_parameters"]["vllm_use_flashinfer_sampler"] is False
     assert agent["embedding_hybrid_weights"] == [0.4, 0.2, 0.4]
     assert agent["embedding_candidate_depth"] == 1000
     assert agent["embedding_colbert_rerank_depth"] == 1000

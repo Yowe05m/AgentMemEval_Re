@@ -21,10 +21,16 @@ frozen_contract:
   colbert_rerank_depth: 1000
   final_top_k_policy: agent_roster_top_k
   cache_schema_version: bgem3_native_document_repr_v1
+  decision_gpu_memory_utilization: 0.62
+  hardware_runtime_delta:
+    field: VLLM_USE_FLASHINFER_SAMPLER
+    848_value: not_explicitly_set
+    528_value: false
+    rationale: verified RTX5090 runtime compatibility setting carried from healthy 528 V6
 
 categories:
   bge_m3_required_changes:
-    rationale: native dense+sparse+ColBERT retrieval and 528 service integration
+    rationale: native dense+sparse+ColBERT retrieval and 528 hardware/service integration
     paths:
       - README.md
       - configs/campaigns/task4_campaign_p_pilot_parallel_v6_bgem3_native_528.yaml
