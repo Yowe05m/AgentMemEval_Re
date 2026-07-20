@@ -9,6 +9,8 @@
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from agentmemeval.core.domain import (
     FactualMemoryRecord,
     LegalAction,
@@ -125,6 +127,9 @@ def test_bgem3_hybrid_backend_uses_raw_query_and_preserves_all_score_modes() -> 
             super().__init__(
                 model="BAAI/bge-m3",
                 revision="fixed-bgem3-revision",
+                weights_hash="fixed-bgem3-weights",
+                tokenizer_revision="fixed-bgem3-tokenizer",
+                cache_schema_version="bgem3_native_document_repr_v1",
                 weights=[0.4, 0.2, 0.4],
             )
             self.requested = []
@@ -134,7 +139,11 @@ def test_bgem3_hybrid_backend_uses_raw_query_and_preserves_all_score_modes() -> 
             return {
                 "model": "BAAI/bge-m3",
                 "revision": "fixed-bgem3-revision",
+                "weights_hash": "fixed-bgem3-weights",
+                "tokenizer_revision": "fixed-bgem3-tokenizer",
+                "cache_schema_version": "bgem3_native_document_repr_v1",
                 "query_policy": "raw_symmetric_no_instruction",
+                "weights": {"dense": 0.4, "sparse": 0.2, "colbert": 0.4},
                 "scores": [
                     {
                         "combined": 0.61,
@@ -158,6 +167,9 @@ def test_bgem3_hybrid_backend_uses_raw_query_and_preserves_all_score_modes() -> 
     assert metadata["query_instruction"] is None
     assert metadata["query_template"] == "{query}"
     assert metadata["retrieval_modes"] == ["dense", "sparse", "colbert"]
+    assert metadata["candidate_depth"] == 1000
+    assert metadata["colbert_rerank_depth"] == 1000
+    assert metadata["cache_schema_version"] == "bgem3_native_document_repr_v1"
     record = FactualMemoryRecord(
         record_id="fact_1",
         agent_id="agent_00",
@@ -176,6 +188,42 @@ def test_bgem3_hybrid_backend_uses_raw_query_and_preserves_all_score_modes() -> 
     assert retrieval_text_for_backend(record, backend) == (
         "phase=flop pot=10 to_call=2\nflop call won"
     )
+
+
+def test_bgem3_hybrid_backend_fails_closed_on_identity_or_non_finite_score() -> None:
+    backend = BgeM3HybridHttpBackend(
+        model="BAAI/bge-m3",
+        revision="revision",
+        weights_hash="weights",
+        tokenizer_revision="tokenizer",
+        cache_schema_version="schema-v1",
+    )
+    valid = {
+        "model": "BAAI/bge-m3",
+        "revision": "revision",
+        "weights_hash": "weights",
+        "tokenizer_revision": "tokenizer",
+        "cache_schema_version": "schema-v1",
+        "query_policy": "raw_symmetric_no_instruction",
+        "weights": {"dense": 0.4, "sparse": 0.2, "colbert": 0.4},
+        "scores": [{"combined": 0.1, "dense": 0.1, "sparse": 0.1, "colbert": 0.1}],
+    }
+    backend._request = lambda _query, _documents: dict(valid)  # type: ignore[method-assign]
+    assert backend.score_documents("query", ["document"])[0].combined == 0.1
+
+    invalid_identity = dict(valid)
+    invalid_identity["weights_hash"] = "wrong"
+    backend._request = lambda _query, _documents: invalid_identity  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="weights identity"):
+        backend.score_documents("query", ["document"])
+
+    invalid_score = dict(valid)
+    invalid_score["scores"] = [
+        {"combined": float("nan"), "dense": 0.1, "sparse": 0.1, "colbert": 0.1}
+    ]
+    backend._request = lambda _query, _documents: invalid_score  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="non-finite"):
+        backend.score_documents("query", ["document"])
 
 
 def test_poker_evaluator_names_straight_flush() -> None:

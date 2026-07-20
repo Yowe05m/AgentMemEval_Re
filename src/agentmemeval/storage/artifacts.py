@@ -242,6 +242,19 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
     provider = dict(config.get("provider", {}))
     agent = dict(config.get("agent", {}))
     experiment = dict(config.get("experiment", {}))
+    behavior_thresholds = experiment.get("behavior_thresholds")
+    behavior_threshold_sha256 = (
+        hashlib.sha256(
+            json.dumps(
+                behavior_thresholds,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if isinstance(behavior_thresholds, dict)
+        else None
+    )
     runtime: dict[str, Any] = {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
@@ -249,6 +262,13 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
             "run_mode": experiment.get("run_mode", "smoke"),
             "protocol_readiness": experiment.get("protocol_readiness"),
             "admission_audit": experiment.get("admission_audit", {}),
+            "behavior_threshold_status": experiment.get("behavior_threshold_status"),
+            "behavior_thresholds": behavior_thresholds,
+            "behavior_threshold_sha256": behavior_threshold_sha256,
+            "behavior_threshold_source": experiment.get("behavior_threshold_source"),
+            "behavior_threshold_freeze_label": experiment.get(
+                "behavior_threshold_freeze_label"
+            ),
         },
         "code": {
             "commit": get_code_version(cwd),
@@ -258,6 +278,7 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
             "name": provider.get("model"),
             "revision": provider.get("model_revision"),
             "weights_hash": provider.get("model_weights_hash"),
+            "tokenizer_revision": provider.get("model_tokenizer_revision"),
             "served_model_name": provider.get("served_model_name"),
         },
         "embedding": {
@@ -265,6 +286,13 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
             "name": agent.get("embedding_model"),
             "revision": agent.get("embedding_revision"),
             "weights_hash": agent.get("embedding_weights_hash"),
+            "tokenizer_revision": agent.get("embedding_tokenizer_revision"),
+            "query_policy": agent.get("embedding_query_policy"),
+            "hybrid_weights": agent.get("embedding_hybrid_weights"),
+            "candidate_depth": agent.get("embedding_candidate_depth"),
+            "colbert_rerank_depth": agent.get("embedding_colbert_rerank_depth"),
+            "final_top_k_policy": agent.get("embedding_final_top_k_policy"),
+            "cache_schema_version": agent.get("embedding_cache_schema_version"),
             "service_startup_parameters": agent.get(
                 "embedding_service_startup_parameters"
             ),

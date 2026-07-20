@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,9 @@ from agentmemeval.experiments.campaign import (
     _read_campaign_yaml,
     _validate_campaign_spec,
 )
+from agentmemeval.prompts.decision import BASE_SYSTEM_PROMPT, PROMPT_TEMPLATE_VERSION
+from agentmemeval.prompts.experience_update import EXPERIENCE_UPDATE_PROMPT
+from agentmemeval.storage.artifacts import collect_runtime_metadata
 
 
 def _valid_config() -> dict[str, object]:
@@ -68,24 +72,34 @@ def test_validate_config_accepts_bgem3_native_hybrid_without_instruction() -> No
         "embedding_backend": "bgem3_hybrid_http",
         "embedding_model": "BAAI/bge-m3",
         "embedding_revision": "fixed-revision",
+        "embedding_weights_hash": "fixed-weights",
+        "embedding_tokenizer_revision": "fixed-tokenizer",
         "embedding_base_url_env": "BGEM3_BASE_URL",
         "embedding_query_policy": "raw_symmetric_no_instruction",
         "embedding_hybrid_weights": [0.4, 0.2, 0.4],
+        "embedding_candidate_depth": 1000,
+        "embedding_colbert_rerank_depth": 1000,
+        "embedding_final_top_k_policy": "agent_roster_top_k",
+        "embedding_cache_schema_version": "bgem3_native_document_repr_v1",
+        "embedding_service_startup_parameters": {
+            "model_path": "/model",
+            "service_script": "/service.py",
+            "python": "/python",
+            "dtype": "float16",
+            "normalize_embeddings": True,
+            "query_max_length": 256,
+            "passage_max_length": 1024,
+            "cache_capacity": 4096,
+            "cache_schema_version": "bgem3_native_document_repr_v1",
+            "flagembedding_version": "1.4.0",
+        },
     }
     validate_config(config)
 
 
 def test_validate_config_rejects_qwen_instruction_for_bgem3_native_hybrid() -> None:
-    config = _valid_config()
-    config["agent"] = {
-        "embedding_backend": "bgem3_hybrid_http",
-        "embedding_model": "BAAI/bge-m3",
-        "embedding_revision": "fixed-revision",
-        "embedding_base_url_env": "BGEM3_BASE_URL",
-        "embedding_query_policy": "raw_symmetric_no_instruction",
-        "embedding_hybrid_weights": [0.4, 0.2, 0.4],
-        "embedding_query_instruction": "Instruct: Qwen-style retrieval",
-    }
+    config = load_config("configs/experiments/task4_real_pilot_base_bgem3_native_528.yaml")
+    config["agent"]["embedding_query_instruction"] = "Instruct: Qwen-style retrieval"
     with pytest.raises(ConfigError, match="禁止 Qwen-style"):
         validate_config(config)
 
@@ -132,6 +146,84 @@ def test_528_bgem3_v6_uses_native_hybrid_and_same_campaign_seeds() -> None:
         Path("configs/campaigns/task4_campaign_p_pilot_parallel_v6_bgem3_native_528.yaml")
     )
     assert campaign["campaign"]["seeds"] == list(range(2026072101, 2026072109))
+
+
+def test_528_bgem3_v7_mirrors_848_contract_and_freezes_preflight() -> None:
+    config = load_config("configs/experiments/task6_campaign_p_v7_bgem3_native_528.yaml")
+    agent = config["agent"]
+    experiment = config["experiment"]
+    provider = config["provider"]
+    assert provider["model_tokenizer_revision"] == provider["model_revision"]
+    assert provider["service_startup_parameters"]["gpu_memory_utilization"] == 0.62
+    assert provider["service_startup_parameters"]["quantization"] is None
+    assert "vllm_use_flashinfer_sampler" not in provider["service_startup_parameters"]
+    assert agent["embedding_hybrid_weights"] == [0.4, 0.2, 0.4]
+    assert agent["embedding_candidate_depth"] == 1000
+    assert agent["embedding_colbert_rerank_depth"] == 1000
+    assert agent["embedding_final_top_k_policy"] == "agent_roster_top_k"
+    assert agent["embedding_cache_schema_version"] == "bgem3_native_document_repr_v1"
+    assert experiment["train_hands"] == 150
+    assert experiment["checkpoint_test_hands"] == 50
+    assert experiment["behavior_threshold_status"] == "frozen"
+    assert experiment["behavior_thresholds"]["min_vpip"] == 0.02
+    assert [item["agent_id"] for item in experiment["agent_roster"]] == [
+        "fact_00",
+        "fact_01",
+        "expr_00",
+        "expr_01",
+        "sync_00",
+        "sync_01",
+        "async_00",
+        "async_01",
+    ]
+
+    preflight = load_config(
+        "configs/experiments/task6_campaign_p_v7_bgem3_preflight_528.yaml"
+    )
+    preflight_experiment = preflight["experiment"]
+    assert preflight_experiment["seed"] == 2026072399
+    assert preflight_experiment["run_mode"] == "smoke"
+    assert preflight_experiment["train_hands"] == 20
+    assert preflight_experiment["checkpoint_interval"] == 20
+    assert preflight_experiment["checkpoint_test_hands"] == 5
+    assert preflight_experiment["train_hands"] + (
+        len(preflight_experiment["agent_roster"])
+        * preflight_experiment["checkpoint_test_hands"]
+    ) == 60
+    assert preflight_experiment["not_for_analysis"] is True
+
+    campaign = _read_campaign_yaml(
+        Path("configs/campaigns/task4_campaign_p_pilot_parallel_v7_bgem3_native_528.yaml")
+    )
+    spec = campaign["campaign"]
+    assert spec["seeds"] == list(range(2026072301, 2026072309))
+    assert spec["max_parallel_runs"] == 4
+    assert "counterfactual_calibrated" in spec["protocol_label"]
+    assert "not_for_main_table" in spec["protocol_label"]
+
+
+def test_528_bgem3_v7_prompt_identity_matches_848_true_leaf_manifest() -> None:
+    assert PROMPT_TEMPLATE_VERSION == "2026-07-19-v6-counterfactual-calibrated-memory"
+    assert hashlib.sha256(BASE_SYSTEM_PROMPT.encode("utf-8")).hexdigest() == (
+        "9cd2f157225e14bfee9113c3af01a2ff4fff839aeb68dcfd8f11740bd8647800"
+    )
+    assert hashlib.sha256(EXPERIENCE_UPDATE_PROMPT.encode("utf-8")).hexdigest() == (
+        "7788fa2f85adca9710cf20f2fc95769db1b2b93ee60f9a5236a430b87d4ad382"
+    )
+
+
+def test_528_bgem3_v7_manifest_metadata_seals_threshold_and_embedding_identity() -> None:
+    config = load_config("configs/experiments/task6_campaign_p_v7_bgem3_native_528.yaml")
+    metadata = collect_runtime_metadata(config, Path.cwd())
+    assert metadata["protocol"]["behavior_threshold_status"] == "frozen"
+    assert len(metadata["protocol"]["behavior_threshold_sha256"]) == 64
+    assert metadata["model"]["tokenizer_revision"] == config["provider"]["model_revision"]
+    assert metadata["embedding"]["tokenizer_revision"] == config["agent"][
+        "embedding_revision"
+    ]
+    assert metadata["embedding"]["cache_schema_version"] == (
+        "bgem3_native_document_repr_v1"
+    )
 
 
 def test_task4_target_scoped_pilot_campaigns_are_valid_and_seed_paired() -> None:

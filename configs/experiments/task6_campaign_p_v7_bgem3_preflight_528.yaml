@@ -1,0 +1,14 @@
+extends: task6_campaign_p_v7_bgem3_native_528.yaml
+
+experiment:
+  run_mode: smoke
+  protocol_variant: task6_v7_bgem3_native_real_service_preflight
+  protocol_label: counterfactual_calibrated_bgem3_native_preflight_not_for_analysis_not_for_main_table
+  seed: 2026072399
+  train_hands: 20
+  test_hands: 5
+  checkpoint_interval: 20
+  checkpoint_test_hands: 5
+  not_for_analysis: true
+  paper_eligible_at_start: false
+  not_for_paper: true

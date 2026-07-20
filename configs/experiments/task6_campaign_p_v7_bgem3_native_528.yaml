@@ -1,0 +1,19 @@
+extends: task6_real_pilot_base_v7_bgem3_native_528.yaml
+
+experiment:
+  protocol_variant: calibration_pilot_for_campaign_p_v7_bgem3_native_528
+  protocol_label: counterfactual_calibrated_bgem3_native_same_seed_mirror_not_for_main_table
+  table_size: 8
+  evaluate_all_train_agents: true
+  primary_estimand: same_seed_table_run_mechanism_effect_vs_baseline
+  primary_baseline_mechanism: fact
+  within_table_mechanism_aggregation: arithmetic_mean
+  agent_roster:
+    - {agent_id: fact_00, mechanism: fact, top_k: 30}
+    - {agent_id: fact_01, mechanism: fact, top_k: 30}
+    - {agent_id: expr_00, mechanism: expr, window_size: 30, experience_revision_strategy: llm}
+    - {agent_id: expr_01, mechanism: expr, window_size: 30, experience_revision_strategy: llm}
+    - {agent_id: sync_00, mechanism: fact_expr_sync, top_k: 15, window_size: 30, experience_revision_strategy: llm}
+    - {agent_id: sync_01, mechanism: fact_expr_sync, top_k: 15, window_size: 30, experience_revision_strategy: llm}
+    - {agent_id: async_00, mechanism: fact_expr_async, top_k: 15, window_size: 5, sweep_every: 5, evidence_k: 30, experience_revision_strategy: llm}
+    - {agent_id: async_01, mechanism: fact_expr_async, top_k: 15, window_size: 5, sweep_every: 5, evidence_k: 30, experience_revision_strategy: llm}

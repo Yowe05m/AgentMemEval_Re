@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import os
 import threading
-from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,7 +14,10 @@ from fastapi.concurrency import run_in_threadpool
 from FlagEmbedding import BGEM3FlagModel
 from pydantic import BaseModel, Field
 
+from agentmemeval.memory.bgem3_contract import VersionedDocumentCache
+
 QUERY_POLICY = "raw_symmetric_no_instruction"
+DEFAULT_CACHE_SCHEMA_VERSION = "bgem3_native_document_repr_v1"
 
 
 class ScoreRequest(BaseModel):
@@ -41,6 +44,12 @@ class BgeM3Scorer:
         self.model_id = os.environ.get("BGEM3_MODEL_ID", "BAAI/bge-m3")
         self.revision = _required_env("BGEM3_REVISION")
         self.weights_hash = _required_env("BGEM3_WEIGHTS_HASH")
+        self.tokenizer_revision = _required_env("BGEM3_TOKENIZER_REVISION")
+        self.cache_schema_version = os.environ.get(
+            "BGEM3_CACHE_SCHEMA_VERSION", DEFAULT_CACHE_SCHEMA_VERSION
+        ).strip()
+        if not self.cache_schema_version:
+            raise RuntimeError("BGE-M3 cache schema version must not be empty")
         self.weights = (
             float(os.environ.get("BGEM3_DENSE_WEIGHT", "0.4")),
             float(os.environ.get("BGEM3_SPARSE_WEIGHT", "0.2")),
@@ -53,10 +62,16 @@ class BgeM3Scorer:
         self.passage_max_length = int(os.environ.get("BGEM3_PASSAGE_MAX_LENGTH", "1024"))
         self.cache_capacity = int(os.environ.get("BGEM3_CACHE_CAPACITY", "4096"))
         self.lock = threading.Lock()
-        self.cache: OrderedDict[str, EncodedText] = OrderedDict()
+        self.cache = VersionedDocumentCache[EncodedText](
+            capacity=self.cache_capacity,
+            schema_version=self.cache_schema_version,
+            model=self.model_id,
+            revision=self.revision,
+            tokenizer_revision=self.tokenizer_revision,
+            passage_max_length=self.passage_max_length,
+        )
         self.request_count = 0
         self.scored_document_count = 0
-        self.cache_hit_count = 0
         self.model = BGEM3FlagModel(
             self.model_path,
             normalize_embeddings=True,
@@ -90,6 +105,8 @@ class BgeM3Scorer:
             "model": self.model_id,
             "revision": self.revision,
             "weights_hash": self.weights_hash,
+            "tokenizer_revision": self.tokenizer_revision,
+            "cache_schema_version": self.cache_schema_version,
             "query_policy": QUERY_POLICY,
             "weights": {
                 "dense": self.weights[0],
@@ -100,11 +117,12 @@ class BgeM3Scorer:
         }
 
     def metadata(self) -> dict[str, Any]:
-        return {
+        metadata = {
             "status": "ok",
             "model": self.model_id,
             "revision": self.revision,
             "weights_hash": self.weights_hash,
+            "tokenizer_revision": self.tokenizer_revision,
             "query_policy": QUERY_POLICY,
             "query_instruction": None,
             "retrieval_modes": ["dense", "sparse", "colbert"],
@@ -116,34 +134,17 @@ class BgeM3Scorer:
             "batch_size": self.batch_size,
             "query_max_length": self.query_max_length,
             "passage_max_length": self.passage_max_length,
-            "cache_capacity": self.cache_capacity,
-            "cache_entries": len(self.cache),
-            "cache_hit_count": self.cache_hit_count,
             "request_count": self.request_count,
             "scored_document_count": self.scored_document_count,
         }
+        metadata.update(self.cache.metadata())
+        return metadata
 
     def _documents(self, texts: list[str]) -> list[EncodedText]:
-        missing: list[str] = []
-        seen_missing: set[str] = set()
-        for text in texts:
-            if text in self.cache:
-                self.cache_hit_count += 1
-                self.cache.move_to_end(text)
-            elif text not in seen_missing:
-                missing.append(text)
-                seen_missing.add(text)
-        if missing:
-            for text, encoded in zip(
-                missing,
-                self._encode(missing, self.passage_max_length),
-                strict=True,
-            ):
-                self.cache[text] = encoded
-                self.cache.move_to_end(text)
-            while len(self.cache) > self.cache_capacity:
-                self.cache.popitem(last=False)
-        return [self.cache[text] for text in texts]
+        return self.cache.resolve(
+            texts,
+            lambda missing: self._encode(missing, self.passage_max_length),
+        )
 
     def _encode(self, texts: list[str], max_length: int) -> list[EncodedText]:
         output = self.model.encode(
@@ -178,12 +179,15 @@ class BgeM3Scorer:
             + self.weights[1] * sparse
             + self.weights[2] * colbert
         ) / weight_sum
-        return {
+        result = {
             "combined": combined,
             "dense": dense,
             "sparse": sparse,
             "colbert": colbert,
         }
+        if not all(math.isfinite(value) for value in result.values()):
+            raise ValueError("BGE-M3 produced a non-finite score")
+        return result
 
 
 def _required_env(name: str) -> str:

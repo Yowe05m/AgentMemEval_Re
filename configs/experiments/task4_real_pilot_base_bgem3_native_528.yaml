@@ -46,8 +46,13 @@ agent:
   embedding_model: BAAI/bge-m3
   embedding_revision: 5617a9f61b028005a4858fdac845db406aefb181
   embedding_weights_hash: b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38
+  embedding_tokenizer_revision: 5617a9f61b028005a4858fdac845db406aefb181
   embedding_query_policy: raw_symmetric_no_instruction
   embedding_hybrid_weights: [0.4, 0.2, 0.4]
+  embedding_candidate_depth: 1000
+  embedding_colbert_rerank_depth: 1000
+  embedding_final_top_k_policy: agent_roster_top_k
+  embedding_cache_schema_version: bgem3_native_document_repr_v1
   embedding_service_startup_parameters:
     model_path: /root/autodl-tmp/hf_cache/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181
     service_script: /root/autodl-tmp/AgentMemEval_Re_bgem3_528/tools/bgem3_hybrid_server.py
@@ -64,6 +69,7 @@ agent:
     query_max_length: 256
     passage_max_length: 1024
     cache_capacity: 4096
+    cache_schema_version: bgem3_native_document_repr_v1
     flagembedding_version: 1.4.0
     hf_hub_offline: true
   embedding_base_url_env: BGEM3_BASE_URL

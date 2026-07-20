@@ -134,10 +134,19 @@ def validate_config(config: dict[str, Any]) -> None:
             if not str(agent.get(field, "")).strip():
                 raise ConfigError(f"真实 embedding backend 缺少 agent.{field}")
     if embedding_backend == "bgem3_hybrid_http":
-        for field in ("embedding_model", "embedding_revision", "embedding_base_url_env"):
+        for field in (
+            "embedding_model",
+            "embedding_revision",
+            "embedding_weights_hash",
+            "embedding_tokenizer_revision",
+            "embedding_base_url_env",
+            "embedding_cache_schema_version",
+            "embedding_final_top_k_policy",
+        ):
             if not str(agent.get(field, "")).strip():
                 raise ConfigError(f"BGE-M3 hybrid backend 缺少 agent.{field}")
-        if str(agent.get("embedding_query_instruction", "")).strip():
+        query_instruction = agent.get("embedding_query_instruction")
+        if query_instruction is not None and str(query_instruction).strip():
             raise ConfigError("BGE-M3 hybrid backend 禁止 Qwen-style embedding_query_instruction")
         if str(agent.get("embedding_query_policy", "")) != "raw_symmetric_no_instruction":
             raise ConfigError(
@@ -152,6 +161,39 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ConfigError("embedding_hybrid_weights 必须是数值") from exc
         if any(value < 0 for value in weights) or sum(weights) <= 0:
             raise ConfigError("embedding_hybrid_weights 必须非负且总和大于零")
+        try:
+            candidate_depth = int(agent.get("embedding_candidate_depth", 0))
+            rerank_depth = int(agent.get("embedding_colbert_rerank_depth", 0))
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("BGE-M3 candidate/rerank depth 必须是整数") from exc
+        if candidate_depth < 1 or rerank_depth < 1 or rerank_depth > candidate_depth:
+            raise ConfigError(
+                "BGE-M3 depth 必须满足 1 <= colbert_rerank_depth <= candidate_depth"
+            )
+        startup = agent.get("embedding_service_startup_parameters")
+        if not isinstance(startup, dict):
+            raise ConfigError("BGE-M3 hybrid backend 缺少 embedding_service_startup_parameters")
+        required_startup = (
+            "model_path",
+            "service_script",
+            "python",
+            "dtype",
+            "normalize_embeddings",
+            "query_max_length",
+            "passage_max_length",
+            "cache_capacity",
+            "cache_schema_version",
+            "flagembedding_version",
+        )
+        for field in required_startup:
+            if field not in startup or startup[field] in (None, ""):
+                raise ConfigError(
+                    f"BGE-M3 hybrid backend 缺少 embedding_service_startup_parameters.{field}"
+                )
+        if str(startup["cache_schema_version"]) != str(
+            agent["embedding_cache_schema_version"]
+        ):
+            raise ConfigError("BGE-M3 cache schema 在 agent 与启动参数间不一致")
     threshold_status = str(agent.get("retrieval_threshold_status", "pending_pilot"))
     if threshold_status not in {"pending_pilot", "frozen"}:
         raise ConfigError("agent.retrieval_threshold_status 必须为 pending_pilot 或 frozen")

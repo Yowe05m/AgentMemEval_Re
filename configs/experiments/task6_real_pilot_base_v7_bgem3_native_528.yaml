@@ -1,0 +1,67 @@
+extends: task4_real_pilot_base.yaml
+
+# TASK6 V7 same-seed mirrored Pilot. The BGE-M3 retrieval contract is carried
+# forward from the verified 528 V6 native service; only the counterfactual-
+# calibrated V7 prompt code inherited from main changes outside that contract.
+provider:
+  model_tokenizer_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  service_startup_parameters:
+    quantization: null
+
+agent:
+  embedding_backend: bgem3_hybrid_http
+  embedding_model: BAAI/bge-m3
+  embedding_revision: 5617a9f61b028005a4858fdac845db406aefb181
+  embedding_weights_hash: b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38
+  embedding_tokenizer_revision: 5617a9f61b028005a4858fdac845db406aefb181
+  embedding_query_policy: raw_symmetric_no_instruction
+  embedding_hybrid_weights: [0.4, 0.2, 0.4]
+  embedding_candidate_depth: 1000
+  embedding_colbert_rerank_depth: 1000
+  embedding_final_top_k_policy: agent_roster_top_k
+  embedding_cache_schema_version: bgem3_native_document_repr_v1
+  embedding_service_startup_parameters:
+    model_path: /root/autodl-tmp/hf_cache/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181
+    service_script: /root/autodl-tmp/AgentMemEval_Re_bgem3_v7_528/tools/bgem3_hybrid_server.py
+    python: /root/autodl-tmp/envs/bgem3-native-528/bin/python
+    host: 127.0.0.1
+    port: 8001
+    dtype: float16
+    quantization: null
+    normalize_embeddings: true
+    query_instruction: null
+    query_policy: raw_symmetric_no_instruction
+    retrieval_modes: [dense, sparse, colbert]
+    hybrid_weights: [0.4, 0.2, 0.4]
+    candidate_depth: 1000
+    colbert_rerank_depth: 1000
+    final_top_k_policy: agent_roster_top_k
+    batch_size: 16
+    query_max_length: 256
+    passage_max_length: 1024
+    cache_capacity: 4096
+    cache_schema_version: bgem3_native_document_repr_v1
+    flagembedding_version: 1.4.0
+    hf_hub_offline: true
+  embedding_base_url_env: BGEM3_BASE_URL
+  embedding_api_key_env: BGEM3_API_KEY
+  embedding_api_key_required: false
+  embedding_timeout_seconds: 120
+  embedding_cache_path: null
+  embedding_query_instruction: null
+
+experiment:
+  protocol_readiness: task6_v7_bgem3_native_mirrored_pilot_ready
+  behavior_threshold_status: frozen
+  behavior_thresholds:
+    min_vpip: 0.02
+    max_fold_rate: 0.98
+    min_voluntary_participation_hands: 1
+    max_all_in_hand_rate: 0.5
+    max_bust_hand_rate: 0.5
+    max_single_hand_reward_activity_share: 0.75
+    single_hand_reward_activity_diagnostic_only: true
+    max_empty_retrieval_rate: 0.98
+    max_structural_signature_share: 0.95
+  behavior_threshold_source: tools/task4/gate_counterfactual_smoke.py
+  behavior_threshold_freeze_label: 848_campaign_p_v7_preregistered

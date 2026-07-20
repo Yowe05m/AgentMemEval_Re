@@ -247,39 +247,79 @@ class BgeM3HybridHttpBackend:
         *,
         model: str,
         revision: str,
+        weights_hash: str,
+        tokenizer_revision: str,
+        cache_schema_version: str,
         base_url_env: str = "BGEM3_BASE_URL",
         api_key_env: str = "BGEM3_API_KEY",
         api_key_required: bool = False,
         timeout_seconds: float = 120.0,
         weights: list[float] | tuple[float, float, float] = (0.4, 0.2, 0.4),
+        candidate_depth: int = 1000,
+        colbert_rerank_depth: int = 1000,
+        final_top_k_policy: str = "agent_roster_top_k",
     ) -> None:
-        if not model or not revision:
-            raise ValueError("BGE-M3 hybrid backend 必须固定 model 和 revision")
+        if not all(
+            value.strip()
+            for value in (model, revision, weights_hash, tokenizer_revision, cache_schema_version)
+        ):
+            raise ValueError(
+                "BGE-M3 hybrid backend 必须固定 model/revision/weights/tokenizer/cache schema"
+            )
         parsed_weights = tuple(float(value) for value in weights)
         if len(parsed_weights) != 3 or any(value < 0 for value in parsed_weights):
             raise ValueError("BGE-M3 hybrid weights 必须是三个非负数")
         if sum(parsed_weights) <= 0:
             raise ValueError("BGE-M3 hybrid weights 之和必须大于零")
+        if candidate_depth < 1 or colbert_rerank_depth < 1:
+            raise ValueError("BGE-M3 candidate/rerank depth 必须为正整数")
+        if colbert_rerank_depth > candidate_depth:
+            raise ValueError("BGE-M3 colbert_rerank_depth 不能超过 candidate_depth")
         self.model = model
         self.revision = revision
+        self.weights_hash = weights_hash
+        self.tokenizer_revision = tokenizer_revision
+        self.cache_schema_version = cache_schema_version
         self.base_url_env = base_url_env
         self.api_key_env = api_key_env
         self.api_key_required = api_key_required
         self.timeout_seconds = timeout_seconds
         self.weights = parsed_weights
+        self.candidate_depth = int(candidate_depth)
+        self.colbert_rerank_depth = int(colbert_rerank_depth)
+        self.final_top_k_policy = final_top_k_policy
         self.request_count = 0
         self.scored_document_count = 0
 
     def score_documents(self, query: str, documents: list[str]) -> list[SemanticScore]:
         if not documents:
             return []
+        if len(documents) > self.candidate_depth:
+            raise RuntimeError(
+                "BGE-M3 candidate count exceeds frozen candidate_depth "
+                f"({len(documents)} > {self.candidate_depth})"
+            )
         body = self._request(query, documents)
         if str(body.get("model", "")) != self.model:
             raise RuntimeError("BGE-M3 scoring service model identity mismatch")
         if str(body.get("revision", "")) != self.revision:
             raise RuntimeError("BGE-M3 scoring service revision identity mismatch")
+        if str(body.get("weights_hash", "")) != self.weights_hash:
+            raise RuntimeError("BGE-M3 scoring service weights identity mismatch")
+        if str(body.get("tokenizer_revision", "")) != self.tokenizer_revision:
+            raise RuntimeError("BGE-M3 scoring service tokenizer identity mismatch")
+        if str(body.get("cache_schema_version", "")) != self.cache_schema_version:
+            raise RuntimeError("BGE-M3 scoring service cache schema mismatch")
         if str(body.get("query_policy", "")) != self.QUERY_POLICY:
             raise RuntimeError("BGE-M3 scoring service query policy mismatch")
+        response_weights = body.get("weights")
+        expected_weights = {
+            "dense": self.weights[0],
+            "sparse": self.weights[1],
+            "colbert": self.weights[2],
+        }
+        if response_weights != expected_weights:
+            raise RuntimeError("BGE-M3 scoring service hybrid weights mismatch")
         raw_scores = body.get("scores")
         if not isinstance(raw_scores, list) or len(raw_scores) != len(documents):
             raise RuntimeError("BGE-M3 scoring service response count mismatch")
@@ -287,12 +327,18 @@ class BgeM3HybridHttpBackend:
         for item in raw_scores:
             if not isinstance(item, dict):
                 raise RuntimeError("BGE-M3 scoring service returned a malformed score")
+            values = {
+                name: float(item[name])
+                for name in ("combined", "dense", "sparse", "colbert")
+            }
+            if not all(math.isfinite(value) for value in values.values()):
+                raise RuntimeError("BGE-M3 scoring service returned a non-finite score")
             scores.append(
                 SemanticScore(
-                    combined=float(item["combined"]),
-                    dense=float(item["dense"]),
-                    sparse=float(item["sparse"]),
-                    colbert=float(item["colbert"]),
+                    combined=values["combined"],
+                    dense=values["dense"],
+                    sparse=values["sparse"],
+                    colbert=values["colbert"],
                 )
             )
         self.request_count += 1
@@ -313,6 +359,8 @@ class BgeM3HybridHttpBackend:
             "backend": "bgem3_hybrid_http",
             "model": self.model,
             "revision": self.revision,
+            "weights_hash": self.weights_hash,
+            "tokenizer_revision": self.tokenizer_revision,
             "semantic_model": True,
             "query_instruction": None,
             "query_instruction_sha256": None,
@@ -326,6 +374,10 @@ class BgeM3HybridHttpBackend:
                 "sparse": self.weights[1],
                 "colbert": self.weights[2],
             },
+            "candidate_depth": self.candidate_depth,
+            "colbert_rerank_depth": self.colbert_rerank_depth,
+            "final_top_k_policy": self.final_top_k_policy,
+            "cache_schema_version": self.cache_schema_version,
             "normalization": "model_native",
             "base_url_env": self.base_url_env,
             "request_count": self.request_count,
@@ -377,11 +429,19 @@ def build_embedding_backend(config: dict[str, object], agent_id: str) -> Embeddi
         return BgeM3HybridHttpBackend(
             model=str(config.get("embedding_model", "")),
             revision=str(config.get("embedding_revision", "")),
+            weights_hash=str(config.get("embedding_weights_hash", "")),
+            tokenizer_revision=str(config.get("embedding_tokenizer_revision", "")),
+            cache_schema_version=str(config.get("embedding_cache_schema_version", "")),
             base_url_env=str(config.get("embedding_base_url_env", "BGEM3_BASE_URL")),
             api_key_env=str(config.get("embedding_api_key_env", "BGEM3_API_KEY")),
             api_key_required=bool(config.get("embedding_api_key_required", False)),
             timeout_seconds=float(config.get("embedding_timeout_seconds", 120)),
             weights=[float(value) for value in raw_weights],
+            candidate_depth=int(config.get("embedding_candidate_depth", 1000)),
+            colbert_rerank_depth=int(config.get("embedding_colbert_rerank_depth", 1000)),
+            final_top_k_policy=str(
+                config.get("embedding_final_top_k_policy", "agent_roster_top_k")
+            ),
         )
     if backend != "openai_compatible":
         raise ValueError(f"未知 embedding backend：{backend}")
