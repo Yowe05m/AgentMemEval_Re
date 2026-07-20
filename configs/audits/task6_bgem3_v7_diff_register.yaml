@@ -21,6 +21,7 @@ frozen_contract:
   colbert_rerank_depth: 1000
   final_top_k_policy: agent_roster_top_k
   cache_schema_version: bgem3_native_document_repr_v1
+  cache_namespace_policy: run_and_agent_isolated
   decision_gpu_memory_utilization: 0.62
   hardware_runtime_delta:
     field: VLLM_USE_FLASHINFER_SAMPLER

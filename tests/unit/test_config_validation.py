@@ -83,6 +83,7 @@ def test_validate_config_accepts_bgem3_native_hybrid_without_instruction() -> No
         "embedding_colbert_rerank_depth": 1000,
         "embedding_final_top_k_policy": "agent_roster_top_k",
         "embedding_cache_schema_version": "bgem3_native_document_repr_v1",
+        "embedding_cache_path": "outputs/cache/{agent_id}",
         "embedding_service_startup_parameters": {
             "model_path": "/model",
             "service_script": "/service.py",
@@ -185,7 +186,7 @@ def test_528_bgem3_v7_mirrors_848_contract_and_freezes_preflight() -> None:
     preflight_experiment = preflight["experiment"]
     assert preflight_experiment["seed"] == 2026072399
     assert preflight_experiment["run_mode"] == "smoke"
-    assert preflight_experiment["run_id"] == "task6_bgem3_v7_preflight_s2026072399"
+    assert preflight_experiment["run_id"] == "task6_bgem3_v7_preflight_s2026072399_a02"
     assert preflight_experiment["output_root"] == "outputs/preflights"
     assert preflight_experiment["train_hands"] == 20
     assert preflight_experiment["checkpoint_interval"] == 20
@@ -228,6 +229,7 @@ def test_528_bgem3_v7_manifest_metadata_seals_threshold_and_embedding_identity()
     assert metadata["embedding"]["cache_schema_version"] == (
         "bgem3_native_document_repr_v1"
     )
+    assert metadata["embedding"]["cache_namespace_template"].endswith("{agent_id}")
 
 
 def test_task6_diff_register_has_no_unexplained_paths() -> None:

@@ -48,7 +48,7 @@ agent:
   embedding_api_key_env: BGEM3_API_KEY
   embedding_api_key_required: false
   embedding_timeout_seconds: 120
-  embedding_cache_path: null
+  embedding_cache_path: outputs/embedding_cache/task6_bgem3_v7/{agent_id}
   embedding_query_instruction: null
 
 experiment:

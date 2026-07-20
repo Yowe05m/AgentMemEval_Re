@@ -141,6 +141,7 @@ def validate_config(config: dict[str, Any]) -> None:
             "embedding_tokenizer_revision",
             "embedding_base_url_env",
             "embedding_cache_schema_version",
+            "embedding_cache_path",
             "embedding_final_top_k_policy",
         ):
             if not str(agent.get(field, "")).strip():

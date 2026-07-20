@@ -27,6 +27,7 @@ class ScoreRequest(BaseModel):
     documents: list[str] = Field(min_length=1, max_length=1000)
     weights: list[float] = Field(min_length=3, max_length=3)
     query_policy: str
+    cache_namespace: str = Field(min_length=1, max_length=512)
 
 
 @dataclass(slots=True)
@@ -97,7 +98,7 @@ class BgeM3Scorer:
             raise ValueError("request weights do not match the frozen service weights")
         with self.lock:
             query = self._encode([request.query], self.query_max_length)[0]
-            documents = self._documents(request.documents)
+            documents = self._documents(request.cache_namespace, request.documents)
             scores = [self._score_pair(query, document) for document in documents]
             self.request_count += 1
             self.scored_document_count += len(documents)
@@ -107,6 +108,7 @@ class BgeM3Scorer:
             "weights_hash": self.weights_hash,
             "tokenizer_revision": self.tokenizer_revision,
             "cache_schema_version": self.cache_schema_version,
+            "cache_namespace": request.cache_namespace,
             "query_policy": QUERY_POLICY,
             "weights": {
                 "dense": self.weights[0],
@@ -140,8 +142,9 @@ class BgeM3Scorer:
         metadata.update(self.cache.metadata())
         return metadata
 
-    def _documents(self, texts: list[str]) -> list[EncodedText]:
+    def _documents(self, namespace: str, texts: list[str]) -> list[EncodedText]:
         return self.cache.resolve(
+            namespace,
             texts,
             lambda missing: self._encode(missing, self.passage_max_length),
         )

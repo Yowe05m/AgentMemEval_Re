@@ -250,6 +250,7 @@ class BgeM3HybridHttpBackend:
         weights_hash: str,
         tokenizer_revision: str,
         cache_schema_version: str,
+        cache_namespace: str,
         base_url_env: str = "BGEM3_BASE_URL",
         api_key_env: str = "BGEM3_API_KEY",
         api_key_required: bool = False,
@@ -261,7 +262,14 @@ class BgeM3HybridHttpBackend:
     ) -> None:
         if not all(
             value.strip()
-            for value in (model, revision, weights_hash, tokenizer_revision, cache_schema_version)
+            for value in (
+                model,
+                revision,
+                weights_hash,
+                tokenizer_revision,
+                cache_schema_version,
+                cache_namespace,
+            )
         ):
             raise ValueError(
                 "BGE-M3 hybrid backend 必须固定 model/revision/weights/tokenizer/cache schema"
@@ -280,6 +288,7 @@ class BgeM3HybridHttpBackend:
         self.weights_hash = weights_hash
         self.tokenizer_revision = tokenizer_revision
         self.cache_schema_version = cache_schema_version
+        self.cache_namespace = cache_namespace
         self.base_url_env = base_url_env
         self.api_key_env = api_key_env
         self.api_key_required = api_key_required
@@ -310,6 +319,8 @@ class BgeM3HybridHttpBackend:
             raise RuntimeError("BGE-M3 scoring service tokenizer identity mismatch")
         if str(body.get("cache_schema_version", "")) != self.cache_schema_version:
             raise RuntimeError("BGE-M3 scoring service cache schema mismatch")
+        if str(body.get("cache_namespace", "")) != self.cache_namespace:
+            raise RuntimeError("BGE-M3 scoring service cache namespace mismatch")
         if str(body.get("query_policy", "")) != self.QUERY_POLICY:
             raise RuntimeError("BGE-M3 scoring service query policy mismatch")
         response_weights = body.get("weights")
@@ -378,6 +389,7 @@ class BgeM3HybridHttpBackend:
             "colbert_rerank_depth": self.colbert_rerank_depth,
             "final_top_k_policy": self.final_top_k_policy,
             "cache_schema_version": self.cache_schema_version,
+            "cache_namespace": self.cache_namespace,
             "normalization": "model_native",
             "base_url_env": self.base_url_env,
             "request_count": self.request_count,
@@ -397,6 +409,7 @@ class BgeM3HybridHttpBackend:
                 "documents": documents,
                 "weights": list(self.weights),
                 "query_policy": self.QUERY_POLICY,
+                "cache_namespace": self.cache_namespace,
             },
             ensure_ascii=False,
         ).encode("utf-8")
@@ -432,6 +445,9 @@ def build_embedding_backend(config: dict[str, object], agent_id: str) -> Embeddi
             weights_hash=str(config.get("embedding_weights_hash", "")),
             tokenizer_revision=str(config.get("embedding_tokenizer_revision", "")),
             cache_schema_version=str(config.get("embedding_cache_schema_version", "")),
+            cache_namespace=str(config.get("embedding_cache_path", "")).format(
+                agent_id=agent_id
+            ),
             base_url_env=str(config.get("embedding_base_url_env", "BGEM3_BASE_URL")),
             api_key_env=str(config.get("embedding_api_key_env", "BGEM3_API_KEY")),
             api_key_required=bool(config.get("embedding_api_key_required", False)),

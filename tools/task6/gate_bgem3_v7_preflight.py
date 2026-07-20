@@ -147,6 +147,12 @@ def build_gate(
         blockers.append("colbert_rerank_depth is not frozen at 1000")
     if embedding.get("final_top_k_policy") != "agent_roster_top_k":
         blockers.append("final top-k policy mismatch")
+    namespace_template = str(embedding.get("cache_namespace_template", ""))
+    if (
+        "task6_bgem3_v7_preflight_s2026072399_a02" not in namespace_template
+        or "{agent_id}" not in namespace_template
+    ):
+        blockers.append(f"preflight cache namespace template mismatch: {namespace_template}")
     if protocol.get("behavior_threshold_status") != "frozen":
         blockers.append("behavior thresholds are not frozen in manifest")
     if not protocol.get("behavior_threshold_sha256"):

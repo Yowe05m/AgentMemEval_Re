@@ -293,6 +293,7 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
             "colbert_rerank_depth": agent.get("embedding_colbert_rerank_depth"),
             "final_top_k_policy": agent.get("embedding_final_top_k_policy"),
             "cache_schema_version": agent.get("embedding_cache_schema_version"),
+            "cache_namespace_template": agent.get("embedding_cache_path"),
             "service_startup_parameters": agent.get(
                 "embedding_service_startup_parameters"
             ),

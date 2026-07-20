@@ -130,6 +130,7 @@ def test_bgem3_hybrid_backend_uses_raw_query_and_preserves_all_score_modes() -> 
                 weights_hash="fixed-bgem3-weights",
                 tokenizer_revision="fixed-bgem3-tokenizer",
                 cache_schema_version="bgem3_native_document_repr_v1",
+                cache_namespace="run/fact_00",
                 weights=[0.4, 0.2, 0.4],
             )
             self.requested = []
@@ -142,6 +143,7 @@ def test_bgem3_hybrid_backend_uses_raw_query_and_preserves_all_score_modes() -> 
                 "weights_hash": "fixed-bgem3-weights",
                 "tokenizer_revision": "fixed-bgem3-tokenizer",
                 "cache_schema_version": "bgem3_native_document_repr_v1",
+                "cache_namespace": "run/fact_00",
                 "query_policy": "raw_symmetric_no_instruction",
                 "weights": {"dense": 0.4, "sparse": 0.2, "colbert": 0.4},
                 "scores": [
@@ -197,6 +199,7 @@ def test_bgem3_hybrid_backend_fails_closed_on_identity_or_non_finite_score() -> 
         weights_hash="weights",
         tokenizer_revision="tokenizer",
         cache_schema_version="schema-v1",
+        cache_namespace="run/fact_00",
     )
     valid = {
         "model": "BAAI/bge-m3",
@@ -204,6 +207,7 @@ def test_bgem3_hybrid_backend_fails_closed_on_identity_or_non_finite_score() -> 
         "weights_hash": "weights",
         "tokenizer_revision": "tokenizer",
         "cache_schema_version": "schema-v1",
+        "cache_namespace": "run/fact_00",
         "query_policy": "raw_symmetric_no_instruction",
         "weights": {"dense": 0.4, "sparse": 0.2, "colbert": 0.4},
         "scores": [{"combined": 0.1, "dense": 0.1, "sparse": 0.1, "colbert": 0.1}],

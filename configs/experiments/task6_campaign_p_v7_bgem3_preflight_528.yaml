@@ -4,7 +4,7 @@ experiment:
   run_mode: smoke
   protocol_variant: task6_v7_bgem3_native_real_service_preflight
   protocol_label: counterfactual_calibrated_bgem3_native_preflight_not_for_analysis_not_for_main_table
-  run_id: task6_bgem3_v7_preflight_s2026072399
+  run_id: task6_bgem3_v7_preflight_s2026072399_a02
   output_root: outputs/preflights
   seed: 2026072399
   train_hands: 20
@@ -14,3 +14,6 @@ experiment:
   not_for_analysis: true
   paper_eligible_at_start: false
   not_for_paper: true
+
+agent:
+  embedding_cache_path: outputs/preflights/task6_bgem3_v7_preflight_s2026072399_a02/embedding_cache/{agent_id}

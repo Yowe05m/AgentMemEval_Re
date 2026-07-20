@@ -14,7 +14,8 @@ class VersionedDocumentCache(Generic[T]):
     """Bounded LRU keyed by the full immutable document-encoding identity."""
 
     KEY_POLICY = (
-        "sha256(schema\\0model\\0revision\\0tokenizer\\0passage_max_length\\0text)"
+        "sha256(schema\\0model\\0revision\\0tokenizer\\0passage_max_length"
+        "\\0namespace\\0text)"
     )
 
     def __init__(
@@ -45,7 +46,9 @@ class VersionedDocumentCache(Generic[T]):
         self.miss_count = 0
         self.replacement_count = 0
 
-    def key(self, text: str) -> str:
+    def key(self, namespace: str, text: str) -> str:
+        if not namespace.strip():
+            raise ValueError("cache namespace must not be empty")
         payload = "\0".join(
             (
                 self.schema_version,
@@ -53,13 +56,19 @@ class VersionedDocumentCache(Generic[T]):
                 self.revision,
                 self.tokenizer_revision,
                 str(self.passage_max_length),
+                namespace,
                 text,
             )
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def resolve(self, texts: list[str], encoder: Callable[[list[str]], list[T]]) -> list[T]:
-        keys = [self.key(text) for text in texts]
+    def resolve(
+        self,
+        namespace: str,
+        texts: list[str],
+        encoder: Callable[[list[str]], list[T]],
+    ) -> list[T]:
+        keys = [self.key(namespace, text) for text in texts]
         missing: list[tuple[str, str]] = []
         seen_missing: set[str] = set()
         for text, key in zip(texts, keys, strict=True):

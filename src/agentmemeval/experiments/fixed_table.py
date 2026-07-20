@@ -254,6 +254,7 @@ class FixedTableScenario:
                     "embedding_colbert_rerank_depth",
                     "embedding_final_top_k_policy",
                     "embedding_cache_schema_version",
+                    "embedding_cache_path",
                 )
             },
             "rebuy_counts": rebuy_counts,
