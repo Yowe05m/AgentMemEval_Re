@@ -19,7 +19,7 @@ def build_campaign_resource_audit(campaign_dir: str | Path) -> dict[str, Any]:
     state_path = root / "state.tsv"
     with state_path.open("r", encoding="utf-8", newline="") as handle:
         states = list(csv.DictReader(handle, delimiter="\t"))
-    completed = [row for row in states if row.get("status") == "complete"]
+    completed, state_selection = _latest_completed_rows(states)
     latencies: list[float] = []
     prompt_tokens = 0
     completion_tokens = 0
@@ -87,6 +87,7 @@ def build_campaign_resource_audit(campaign_dir: str | Path) -> dict[str, Any]:
         "completed_leaf_count": len(completed),
         "campaign_wall_seconds": wall_seconds,
         "campaign_wall_hours": wall_seconds / 3600.0,
+        "state_selection": state_selection,
         "action_request_count": len(latencies),
         "action_latency_ms": _summary(latencies),
         "action_requests_per_wall_second": (
@@ -109,6 +110,65 @@ def build_campaign_resource_audit(campaign_dir: str | Path) -> dict[str, Any]:
         "gpu_utilization_status": "requires_external_service_heartbeat_evidence",
         "monetary_cost_status": "unavailable_local_service_has_no_provider_invoice",
         "leaf_sources": leaf_sources,
+    }
+
+
+def _latest_completed_rows(
+    states: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    grouped: dict[tuple[str, int], list[dict[str, str]]] = {}
+    for row in states:
+        try:
+            condition_id = str(row["condition_id"]).strip()
+            seed = int(row["seed"])
+            attempt = int(row["attempt"])
+            if not condition_id or attempt < 1:
+                raise ValueError
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"malformed campaign state row: {row}") from exc
+        grouped.setdefault((condition_id, seed), []).append(row)
+
+    completed: list[dict[str, str]] = []
+    superseded_failed_state_rows = 0
+    for identity in sorted(grouped):
+        identity_rows = grouped[identity]
+        maximum_attempt = max(int(row["attempt"]) for row in identity_rows)
+        latest_attempt_rows = [
+            row
+            for row in identity_rows
+            if int(row["attempt"]) == maximum_attempt
+        ]
+        completed_attempts = {
+            int(row["attempt"])
+            for row in identity_rows
+            if row.get("status") == "complete"
+        }
+        if len(completed_attempts) > 1:
+            raise ValueError(
+                f"multiple completed attempts for {identity}: "
+                f"{sorted(completed_attempts)}"
+            )
+        latest = latest_attempt_rows[-1]
+        if (
+            any(row.get("status") == "failed" for row in latest_attempt_rows)
+            and latest.get("status") == "complete"
+        ):
+            raise ValueError(
+                "failed state precedes completion within latest attempt for "
+                f"{identity}"
+            )
+        superseded_failed_state_rows += sum(
+            row.get("status") == "failed"
+            and int(row["attempt"]) < maximum_attempt
+            for row in identity_rows
+        )
+        if latest.get("status") == "complete":
+            completed.append(latest)
+    return completed, {
+        "matrix_unit_count": len(grouped),
+        "complete_latest_attempt_count": len(completed),
+        "incomplete_latest_attempt_count": len(grouped) - len(completed),
+        "superseded_failed_state_rows": superseded_failed_state_rows,
     }
 
 
