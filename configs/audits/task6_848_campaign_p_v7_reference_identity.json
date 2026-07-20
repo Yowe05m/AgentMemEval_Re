@@ -1,0 +1,45 @@
+{
+  "schema_version": "task6_848_v7_reference_identity_v1",
+  "status": "sealed_read_only_reference",
+  "campaign_id": "task4_campaign_p_pilot_parallel_v7_counterfactual_calibrated",
+  "run_mode": "pilot",
+  "not_for_paper": true,
+  "representative_run": "mixed_table__s2026072301__a01",
+  "manifest_sha256": "e4c0572cf299deac3e703da63dcb4a30d6c8c4dd5f52919d1004c4844167dae8",
+  "resolved_config_sha256": "eb81b3ad7c95a6b0fd844b3035f9b22986a0b2b2f45a6b4a922a01e7bd953214",
+  "code": {
+    "commit": "d9cd9c6de54d093c7e0dc2333e7ab8e280c932b9",
+    "dirty": false
+  },
+  "prompts": {
+    "decision_version": "2026-07-19-v6-counterfactual-calibrated-memory",
+    "decision_system_sha256": "9cd2f157225e14bfee9113c3af01a2ff4fff839aeb68dcfd8f11740bd8647800",
+    "experience_update_sha256": "7788fa2f85adca9710cf20f2fc95769db1b2b93ee60f9a5236a430b87d4ad382"
+  },
+  "decision_model": {
+    "name": "qwen/qwen3.5-9b",
+    "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "weights_hash": "250e641cf3762c622c5e74761cd6ad8b407bc4f1da86b7587bcfb44422b9baeb",
+    "served_model_name": "qwen/qwen3.5-9b",
+    "max_model_len": 16384,
+    "max_num_seqs": 4,
+    "gpu_memory_utilization": 0.62
+  },
+  "protocol": {
+    "seeds": [
+      2026072301,
+      2026072302,
+      2026072303,
+      2026072304,
+      2026072305,
+      2026072306,
+      2026072307,
+      2026072308
+    ],
+    "train_hands": 150,
+    "test_hands": 25,
+    "checkpoint_interval": 150,
+    "checkpoint_test_hands": 50,
+    "primary_endpoint": "final_test_bb_per_100"
+  }
+}

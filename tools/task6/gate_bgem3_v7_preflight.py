@@ -45,7 +45,7 @@ REQUIRED_ARTIFACTS = (
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True)
-    parser.add_argument("--counterfactual-gate", required=True)
+    parser.add_argument("--reference-identity", required=True)
     parser.add_argument("--bge-health-before", required=True)
     parser.add_argument("--bge-health-after", required=True)
     parser.add_argument("--bge-score-smoke", required=True)
@@ -54,7 +54,7 @@ def main() -> int:
     args = parser.parse_args()
     audit = build_gate(
         run_dir=Path(args.run_dir).resolve(),
-        counterfactual_gate=Path(args.counterfactual_gate).resolve(),
+        reference_identity=Path(args.reference_identity).resolve(),
         health_before=Path(args.bge_health_before).resolve(),
         health_after=Path(args.bge_health_after).resolve(),
         score_smoke=Path(args.bge_score_smoke).resolve(),
@@ -72,7 +72,7 @@ def main() -> int:
 def build_gate(
     *,
     run_dir: Path,
-    counterfactual_gate: Path,
+    reference_identity: Path,
     health_before: Path,
     health_after: Path,
     score_smoke: Path,
@@ -92,7 +92,7 @@ def build_gate(
     metrics = _read_json(run_dir / "metrics.json")
     events = _read_jsonl(run_dir / "events.jsonl")
     hands = _read_jsonl(run_dir / "hand_summaries.jsonl")
-    counterfactual = _read_json(counterfactual_gate)
+    reference = _read_json(reference_identity)
     before = _read_json(health_before)
     after = _read_json(health_after)
     score = _read_json(score_smoke)
@@ -107,8 +107,24 @@ def build_gate(
     for key, expected in EXPECTED_PROMPTS.items():
         if prompts.get(key) != expected:
             blockers.append(f"prompt identity mismatch for {key}: {prompts.get(key)}")
-    if counterfactual.get("status") != "ready_to_start_campaign_p_v7_pilot":
-        blockers.append("counterfactual behavior/execution gate did not pass")
+    if reference.get("status") != "sealed_read_only_reference":
+        blockers.append("848 reference identity is not sealed")
+    if reference.get("prompts") != EXPECTED_PROMPTS:
+        blockers.append("848 reference prompt identity mismatch")
+    reference_model = dict(reference.get("decision_model", {}))
+    expected_decision = {
+        "name": "qwen/qwen3.5-9b",
+        "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+        "weights_hash": (
+            "250e641cf3762c622c5e74761cd6ad8b407bc4f1da86b7587bcfb44422b9baeb"
+        ),
+        "served_model_name": "qwen/qwen3.5-9b",
+        "max_model_len": 16384,
+        "max_num_seqs": 4,
+        "gpu_memory_utilization": 0.62,
+    }
+    if reference_model != expected_decision:
+        blockers.append("848 reference decision identity mismatch")
 
     expected_embedding_fields = {
         "name": EXPECTED_BGE["model"],
@@ -219,7 +235,7 @@ def build_gate(
         "llm_error_count": llm_error_count,
         "bge_counter_deltas": counter_deltas,
         "bge_health_after": after,
-        "counterfactual_gate_sha256": _sha256(counterfactual_gate),
+        "reference_identity_sha256": _sha256(reference_identity),
         "bge_score_smoke_sha256": _sha256(score_smoke),
     }
     return _result(run_dir, expected_code_sha, blockers, evidence)

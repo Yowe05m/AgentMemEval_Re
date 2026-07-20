@@ -53,6 +53,7 @@ categories:
   postprocessing_and_audit_changes:
     rationale: V7 mirrored protocol, immutable identity capture, gates, and regression tests
     paths:
+      - configs/audits/task6_848_campaign_p_v7_reference_identity.json
       - configs/audits/task6_bgem3_v7_diff_register.yaml
       - configs/campaigns/task4_campaign_p_pilot_parallel_v7_bgem3_native_528.yaml
       - configs/experiments/task6_campaign_p_v7_bgem3_native_528.yaml

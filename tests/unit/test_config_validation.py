@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -247,6 +248,7 @@ def test_task6_diff_register_has_no_unexplained_paths() -> None:
     }
     expected = {
         "README.md",
+        "configs/audits/task6_848_campaign_p_v7_reference_identity.json",
         "configs/audits/task6_bgem3_v7_diff_register.yaml",
         "configs/campaigns/task4_campaign_p_pilot_parallel_v6_bgem3_native_528.yaml",
         "configs/campaigns/task4_campaign_p_pilot_parallel_v7_bgem3_native_528.yaml",
@@ -272,6 +274,23 @@ def test_task6_diff_register_has_no_unexplained_paths() -> None:
     assert classified == expected
     assert categories["unexplained_changes"]["paths"] == []
     assert register["admission"]["unexplained_change_count"] == 0
+
+
+def test_task6_848_reference_identity_is_sealed_and_matches_prompt_contract() -> None:
+    reference = json.loads(
+        Path(
+            "configs/audits/task6_848_campaign_p_v7_reference_identity.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert reference["status"] == "sealed_read_only_reference"
+    assert reference["prompts"]["decision_version"] == PROMPT_TEMPLATE_VERSION
+    assert reference["prompts"]["decision_system_sha256"] == hashlib.sha256(
+        BASE_SYSTEM_PROMPT.encode("utf-8")
+    ).hexdigest()
+    assert reference["prompts"]["experience_update_sha256"] == hashlib.sha256(
+        EXPERIENCE_UPDATE_PROMPT.encode("utf-8")
+    ).hexdigest()
+    assert reference["protocol"]["seeds"] == list(range(2026072301, 2026072309))
 
 
 def test_task4_target_scoped_pilot_campaigns_are_valid_and_seed_paired() -> None:
