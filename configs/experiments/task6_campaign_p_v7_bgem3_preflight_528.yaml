@@ -4,6 +4,8 @@ experiment:
   run_mode: smoke
   protocol_variant: task6_v7_bgem3_native_real_service_preflight
   protocol_label: counterfactual_calibrated_bgem3_native_preflight_not_for_analysis_not_for_main_table
+  run_id: task6_bgem3_v7_preflight_s2026072399
+  output_root: outputs/preflights
   seed: 2026072399
   train_hands: 20
   test_hands: 5

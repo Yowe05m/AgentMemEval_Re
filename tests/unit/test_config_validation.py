@@ -184,6 +184,8 @@ def test_528_bgem3_v7_mirrors_848_contract_and_freezes_preflight() -> None:
     preflight_experiment = preflight["experiment"]
     assert preflight_experiment["seed"] == 2026072399
     assert preflight_experiment["run_mode"] == "smoke"
+    assert preflight_experiment["run_id"] == "task6_bgem3_v7_preflight_s2026072399"
+    assert preflight_experiment["output_root"] == "outputs/preflights"
     assert preflight_experiment["train_hands"] == 20
     assert preflight_experiment["checkpoint_interval"] == 20
     assert preflight_experiment["checkpoint_test_hands"] == 5
