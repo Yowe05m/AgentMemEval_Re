@@ -92,11 +92,12 @@ PILOT_RUNTIME_EQUIVALENCE_ALLOWED_CHANGED_PATHS = {
 PILOT_RUNTIME_EQUIVALENCE_REQUIRED_DIFF_SHA256 = {
     # The execution-adjacent P→E file contains the reviewed seed-major scheduler,
     # rolling run-start lifecycle timestamps, fail-closed latest-attempt selection,
-    # and post-run mixed-table endpoint reconstruction. None changes the resolved
-    # leaf config or table-play path. Binding the exact Git patch prevents this
-    # exception from authorizing any later leaf change.
+    # post-run mixed-table endpoint reconstruction, and the shared canonical
+    # aggregate-payload wrapper used by post-run P→E integrity checks. None changes
+    # the resolved leaf config or table-play path. Binding the exact Git patch
+    # prevents this exception from authorizing any later leaf change.
     "src/agentmemeval/experiments/campaign.py": (
-        "0a20c0e03629309282b92b4292ab28c7c04e32a71b239ff26396301f541adbf6"
+        "f2f3dbe22cdab67f781161d83219a8c16812ba2c3b915b77cc6fd79bb110d2aa"
     ),
 }
 EXECUTION_ZERO_FIELDS = (
