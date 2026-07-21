@@ -386,8 +386,94 @@ def audit_relevance_labels(pack: dict[str, Any], labels: list[dict[str, str]]) -
     }
 
 
+def audit_review_pack_nonreuse(
+    current_pack: dict[str, Any],
+    prior_packs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Fail closed if a new blind review could reuse any prior judgment unit."""
+
+    blockers: list[str] = []
+    current_keys = _review_pack_identity_sets(current_pack, blockers, "current")
+    prior_evidence = []
+    for index, prior_pack in enumerate(prior_packs, 1):
+        label = f"prior_{index}"
+        prior_blockers: list[str] = []
+        prior_keys = _review_pack_identity_sets(prior_pack, prior_blockers, label)
+        blockers.extend(prior_blockers)
+        overlaps = {
+            name: sorted(current_keys[name] & prior_keys[name])
+            for name in current_keys
+        }
+        for name, values in overlaps.items():
+            if values:
+                blockers.append(
+                    f"{label} overlaps current review on {name}: {len(values)}"
+                )
+        prior_evidence.append(
+            {
+                "prior_index": index,
+                "review_pack_content_sha256": _json_sha256(prior_pack),
+                "pair_key_count": len(prior_keys["pair_keys"]),
+                "row_id_count": len(prior_keys["row_ids"]),
+                "blind_content_count": len(prior_keys["blind_content_sha256"]),
+                "overlap_counts": {
+                    name: len(values) for name, values in overlaps.items()
+                },
+            }
+        )
+    if not prior_packs:
+        blockers.append("no prior review pack was supplied for non-reuse audit")
+    return {
+        "schema_version": "task4_retrieval_review_nonreuse_audit_v1",
+        "current_review_pack_content_sha256": _json_sha256(current_pack),
+        "current_pair_key_count": len(current_keys["pair_keys"]),
+        "current_row_id_count": len(current_keys["row_ids"]),
+        "current_blind_content_count": len(current_keys["blind_content_sha256"]),
+        "prior_review_count": len(prior_packs),
+        "prior_evidence": prior_evidence,
+        "blockers": blockers,
+        "status": "verified_no_reuse" if not blockers else "no_go",
+    }
+
+
 def _optional_float(value: Any) -> float | None:
     return None if value is None else float(value)
+
+
+def _review_pack_identity_sets(
+    pack: dict[str, Any], blockers: list[str], label: str
+) -> dict[str, set[str]]:
+    keyed_rows = pack.get("keyed_rows")
+    blind_rows = pack.get("blind_rows")
+    if not isinstance(keyed_rows, list) or not all(
+        isinstance(row, dict) for row in keyed_rows
+    ):
+        blockers.append(f"{label} keyed rows are invalid")
+        keyed_rows = []
+    if not isinstance(blind_rows, list) or not all(
+        isinstance(row, dict) for row in blind_rows
+    ):
+        blockers.append(f"{label} blind rows are invalid")
+        blind_rows = []
+    pair_keys = {str(row.get("pair_key", "")).strip() for row in keyed_rows}
+    row_ids = {str(row.get("row_id", "")).strip() for row in keyed_rows}
+    if "" in pair_keys or len(pair_keys) != len(keyed_rows):
+        blockers.append(f"{label} pair keys are missing or duplicated")
+    if "" in row_ids or len(row_ids) != len(keyed_rows):
+        blockers.append(f"{label} row ids are missing or duplicated")
+    blind_content_sha256 = {
+        _json_sha256(
+            {key: value for key, value in row.items() if key != "row_id"}
+        )
+        for row in blind_rows
+    }
+    if len(blind_content_sha256) != len(blind_rows):
+        blockers.append(f"{label} contains duplicate blind review content")
+    return {
+        "pair_keys": pair_keys,
+        "row_ids": row_ids,
+        "blind_content_sha256": blind_content_sha256,
+    }
 
 
 def _blind_record(record: dict[str, Any]) -> dict[str, Any]:

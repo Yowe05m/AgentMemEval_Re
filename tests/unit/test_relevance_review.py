@@ -8,6 +8,7 @@ import pytest
 from agentmemeval.evaluation.relevance_review import (
     REVIEW_POLICY,
     audit_relevance_labels,
+    audit_review_pack_nonreuse,
     build_relevance_review_pack,
 )
 
@@ -159,6 +160,61 @@ def test_v2_blind_review_exposes_matched_decision_without_score_or_outcome(
         "task4_retrieval_relevance_review_pack_v2"
     )
     assert audit["source_rebuild_verified"] is True
+
+
+def test_review_pack_nonreuse_accepts_fully_new_v2_judgment_units() -> None:
+    current = _nonreuse_pack("v8", "new query")
+    prior = _nonreuse_pack("v7", "old query")
+
+    audit = audit_review_pack_nonreuse(current, [prior])
+
+    assert audit["status"] == "verified_no_reuse"
+    assert audit["blockers"] == []
+    assert audit["prior_evidence"][0]["overlap_counts"] == {
+        "pair_keys": 0,
+        "row_ids": 0,
+        "blind_content_sha256": 0,
+    }
+
+
+def test_review_pack_nonreuse_rejects_prior_pair_or_blind_content() -> None:
+    prior = _nonreuse_pack("v7", "same visible judgment")
+    repeated_pair = _nonreuse_pack("v7", "different visible judgment")
+    repeated_content = _nonreuse_pack("v8", "same visible judgment")
+
+    pair_audit = audit_review_pack_nonreuse(repeated_pair, [prior])
+    content_audit = audit_review_pack_nonreuse(repeated_content, [prior])
+
+    assert pair_audit["status"] == "no_go"
+    assert any("pair_keys" in blocker for blocker in pair_audit["blockers"])
+    assert any("row_ids" in blocker for blocker in pair_audit["blockers"])
+    assert content_audit["status"] == "no_go"
+    assert any(
+        "blind_content_sha256" in blocker
+        for blocker in content_audit["blockers"]
+    )
+
+
+def _nonreuse_pack(prefix: str, query: str) -> dict[str, object]:
+    return {
+        "schema_version": "task4_retrieval_relevance_review_pack_v2",
+        "keyed_rows": [
+            {"row_id": f"{prefix}-row", "pair_key": f"{prefix}-pair"}
+        ],
+        "blind_rows": [
+            {
+                "row_id": f"{prefix}-row",
+                "mechanism": "fact",
+                "stage": "test",
+                "phase": "flop",
+                "query": query,
+                "record": {"state_summary": "state"},
+                "matched_decision": {"phase": "flop"},
+                "matched_phase": "flop",
+                "retrieval_unit": "decision_point_max_v1",
+            }
+        ],
+    }
 
 
 def _audit_pack(rows: list[dict[str, object]]) -> dict[str, object]:

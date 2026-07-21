@@ -10,6 +10,7 @@ from pathlib import Path
 
 from agentmemeval.evaluation.relevance_review import (
     audit_relevance_labels,
+    audit_review_pack_nonreuse,
     build_relevance_review_pack,
 )
 
@@ -23,6 +24,7 @@ def main() -> int:
     build.add_argument("--sample-size", type=int, default=240)
     build.add_argument("--sample-seed", type=int, default=20260717)
     build.add_argument("--review-schema-version", choices=("v1", "v2"), default="v1")
+    build.add_argument("--forbid-review-key", action="append", default=[])
     audit = sub.add_parser("audit")
     audit.add_argument("--review-key", required=True)
     audit.add_argument("--labels", required=True)
@@ -35,12 +37,30 @@ def main() -> int:
             sample_seed=args.sample_seed,
             review_schema_version=args.review_schema_version,
         )
+        prior_paths = [Path(value).resolve() for value in args.forbid_review_key]
+        prior_packs = [
+            json.loads(path.read_text(encoding="utf-8")) for path in prior_paths
+        ]
+        nonreuse = None
+        if prior_paths:
+            nonreuse = audit_review_pack_nonreuse(pack, prior_packs)
+            nonreuse["prior_review_key_evidence"] = [
+                {"path": str(path), "sha256": _sha256(path)}
+                for path in prior_paths
+            ]
+            if nonreuse["status"] != "verified_no_reuse":
+                print(json.dumps(nonreuse, ensure_ascii=False, indent=2))
+                return 2
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=False)
         key_path = output_dir / "review_key.json"
         blind_path = output_dir / "blind_review.jsonl"
         labels_path = output_dir / "human_labels.tsv"
-        key_path.write_text(json.dumps(pack, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        nonreuse_path = output_dir / "prior_review_nonreuse_audit.json"
+        key_path.write_text(
+            json.dumps(pack, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         with blind_path.open("x", encoding="utf-8") as handle:
             for row in pack["blind_rows"]:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -67,10 +87,17 @@ def main() -> int:
                         "comment": "",
                     }
                 )
+        if nonreuse is not None:
+            with nonreuse_path.open("x", encoding="utf-8") as handle:
+                json.dump(nonreuse, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
         summary = {
             "status": pack["status"],
             "output_dir": str(output_dir),
             "sampled_row_count": pack["sampled_row_count"],
+            "prior_review_nonreuse_status": (
+                nonreuse["status"] if nonreuse is not None else "not_requested"
+            ),
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
