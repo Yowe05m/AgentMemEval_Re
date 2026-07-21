@@ -1,0 +1,16 @@
+{
+  "code_sha": "PENDING_CANONICAL_COMMIT",
+  "resolved_config_sha256": "TBD_AFTER_REVIEW",
+  "prompt_sha256": "TBD_AFTER_RENDER_FREEZE",
+  "model_fingerprint": "TBD_QWEN35_9B_IMMUTABLE_FINGERPRINT",
+  "embedding_fingerprint": "TBD_BGE_M3_IMMUTABLE_FINGERPRINT",
+  "schedule_sha256": "TBD_AFTER_SEED_AND_SCHEDULE_FREEZE",
+  "git_dirty_required": false,
+  "runtime_homogeneity": {
+    "gpu": "NVIDIA GeForce RTX 5090 32GB",
+    "driver": "TBD",
+    "cuda": "TBD",
+    "image": "TBD"
+  },
+  "status": "candidate/not-frozen/not-authorized-to-run"
+}

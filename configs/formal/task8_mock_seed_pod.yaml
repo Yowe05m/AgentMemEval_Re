@@ -1,0 +1,11 @@
+schema_version: task8-mock-seed-pod-v1
+protocol_status: mock/not-for-paper/model-substituted
+execution_mode: mock_seed_pod
+seed_bundle: 101
+workers: [P01, S01]
+checkpoint_set: [1, 3, 5]
+heldout_table_set: [H01, H02, H03]
+hands_per_table: 1
+provider: mock-deterministic-v1
+embedding: mock-hash
+paper_eligible: false

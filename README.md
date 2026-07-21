@@ -537,3 +537,28 @@ embedding_hybrid_weights: [0.4, 0.2, 0.4]
 seeds、手数、roster 和并行度与 Qwen Embedding 的 Campaign P V6 相同，但输出目录
 和 embedding runtime identity 完全隔离。该 Campaign 是模型迁移对照 Pilot，
 `not_for_main_table`。
+
+## TASK8 Formal worker runner（候选）
+
+TASK8 的中央生成器从同一 experiment matrix、同一 ordered seed list 和同一 common
+identity 一次生成 `P01..P12` / `S01..S12`。候选身份默认写明
+`candidate/not-frozen/not-authorized-to-run`，因此 worker 入口会在创建正式 run 目录前拒绝
+执行；这不是长跑授权。
+
+```powershell
+agentmemeval formal-generate-manifests `
+  --matrix ..\docs\task-records\TASK8\experiment_matrix.csv `
+  --seeds 2026090101,2026090102,2026090103,2026090104,2026090105,2026090106,2026090107,2026090108,2026090109,2026090110,2026090111,2026090112 `
+  --identity configs\formal\task8_candidate_identity.json `
+  --output-dir tmp\task8_candidate_manifests
+
+agentmemeval formal-worker --manifest <worker.json> --receipt-root <pod-root>
+agentmemeval formal-worker --manifest <worker.json> --receipt-root <pod-root> --resume-existing
+agentmemeval formal-verify-receipt --receipt <receipt.json> --checkpoint-root <producer-run>
+agentmemeval formal-status --root <workers-root>
+```
+
+`formal-worker` 当前可执行路径仅为 `mock_seed_pod`，并永久标记
+`mock/not-for-paper/model-substituted`。Formal candidate 要等 canonical SHA、Prompt、Qwen、
+BGE-M3、schedule、统计计划和用户授权冻结后才能进入真实黄金短测；入口不会连接 AutoDL、
+租用实例或启动外部服务。

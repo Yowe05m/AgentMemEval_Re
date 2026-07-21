@@ -1,0 +1,16 @@
+schema_version: task8-worker-template-v1
+protocol_status: candidate/not-frozen/not-authorized-to-run
+role: primary
+execution_mode: formal_candidate
+experiment_families: [R1-E1-I, R1-E2, R1-E3]
+checkpoint_set: [30, 75, 150, 300]
+heldout_table_set: [H01, H02, H03]
+memory_modes: [Frozen]
+checkpoint_test_hands_by_checkpoint:
+  "30": 50
+  "75": 50
+  "150": 50
+  "300": 200
+notes:
+  - Generated workers must use the central manifest generator.
+  - This candidate template is not authorized to run.

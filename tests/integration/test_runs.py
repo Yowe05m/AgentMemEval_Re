@@ -149,6 +149,7 @@ def test_mixed_exp1_checkpoints_every_agent_independently() -> None:
     assert audit["checkpoint_cost_budget"] == {
         "checkpoint_count_per_seed": 2,
         "evaluation_target_count": 8,
+        "heldout_table_count": 1,
         "checkpoint_evaluations_per_seed": 16,
         "checkpoint_generalization_hands_per_seed": 16,
         "seed_count": 5,
@@ -176,6 +177,48 @@ def test_mixed_exp1_checkpoints_every_agent_independently() -> None:
     )
     assert len(result.artifacts["checkpoint_snapshots"]) == 2
     assert all(len(paths) == 8 for paths in result.artifacts["checkpoint_snapshots"].values())
+
+
+def test_task8_exact_checkpoints_and_three_heldout_tables() -> None:
+    output_root = Path("tmp") / "test_outputs" / f"task8_{uuid4().hex}"
+    config = base_config(output_root)
+    config["table"]["lifecycle"] = "continuous_rebuy"
+    config["experiment"].update(
+        {
+            "run_id": "task8_exact",
+            "train_hands": 5,
+            "test_hands": 1,
+            "checkpoint_set": [1, 3, 5],
+            "checkpoint_test_hands": 1,
+            "heldout_table_set": ["H01", "H02", "H03"],
+            "heldout_roster_identity": "task8-mock-natural-rosters-v1",
+        }
+    )
+    result = run_resolved_config(config)
+    run_dir = Path(result.artifacts["run_dir"])
+    checkpoint = json.loads(
+        (run_dir / "checkpoint_generalization.json").read_text(encoding="utf-8")
+    )
+    audit = json.loads((run_dir / "protocol_audit.json").read_text(encoding="utf-8"))
+    schedule = json.loads((run_dir / "schedule_manifest.json").read_text(encoding="utf-8"))
+
+    assert audit["checkpoint_set"] == [1, 3, 5]
+    assert audit["heldout_table_set"] == ["H01", "H02", "H03"]
+    assert audit["schedule_sha256"] == schedule["schedule_sha256"]
+    assert {row["checkpoint_hand"] for row in checkpoint["results"]} == {1, 3, 5}
+    assert {row["heldout_table_id"] for row in checkpoint["results"]} == {
+        "H01",
+        "H02",
+        "H03",
+    }
+    assert len(checkpoint["results"]) == 9
+    test_hands = [
+        json.loads(line)
+        for line in (run_dir / "hand_summaries.jsonl").read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["stage"] == "test"
+    ]
+    assert len(test_hands) == 9
+    assert all("evaluation_target_id" in hand for hand in test_hands)
 
 
 def test_rotating_20_agents_run() -> None:

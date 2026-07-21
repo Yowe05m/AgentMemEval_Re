@@ -16,7 +16,9 @@ from typing import Any
 from agentmemeval.agents.base import LLMDecisionAgent
 from agentmemeval.agents.llm_agent import build_agent
 from agentmemeval.analysis.plots import generate_audit_plots, plot_stack_curves
+from agentmemeval.config.loader import resolve_checkpoint_set, resolve_heldout_table_set
 from agentmemeval.core.domain import ExperimentResult
+from agentmemeval.core.errors import ConfigError
 from agentmemeval.core.seeds import derive_seed
 from agentmemeval.evaluation.aggregation import (
     aggregate_metrics,
@@ -30,7 +32,16 @@ from agentmemeval.evaluation.degeneracy import (
 from agentmemeval.evaluation.metrics import compute_metrics
 from agentmemeval.evaluation.reporting import build_report_text
 from agentmemeval.experiments.context import ExperimentContext
+from agentmemeval.experiments.formal_protocol import (
+    build_clone_audit,
+    build_heldout_schedule_manifest,
+    clone_memory_branches,
+    derive_formal_hand_seed,
+    sha256_json,
+    verify_schedule_manifest,
+)
 from agentmemeval.experiments.table_play import run_single_hand
+from agentmemeval.storage.snapshots import load_snapshot
 
 
 class FixedTableScenario:
@@ -78,6 +89,8 @@ class FixedTableScenario:
         table_size = len(train_ids)
         evaluation_targets = _resolve_evaluation_targets(exp, train_ids, target_id)
         checkpoint_interval = max(0, int(exp.get("checkpoint_interval", 0)))
+        checkpoint_set = resolve_checkpoint_set(exp)
+        heldout_table_set = resolve_heldout_table_set(exp)
         checkpoint_test_hands = int(exp.get("checkpoint_test_hands", test_hands))
         table_lifecycle = str(table.get("lifecycle", "tournament_elimination"))
         if table_lifecycle not in {"tournament_elimination", "continuous_rebuy"}:
@@ -89,9 +102,47 @@ class FixedTableScenario:
             target_id,
             agent_configs=agent_configs,
         )
+        clone_transform_audit = _restore_initial_memory_snapshots(agents, exp)
+        if clone_transform_audit:
+            artifacts.write_json("clone_transform_audit.json", clone_transform_audit)
         stacks = {agent_id: starting_stack for agent_id in train_ids}
         checkpoint_snapshot_paths: dict[str, dict[str, str]] = {}
         checkpoint_results: list[dict[str, Any]] = []
+        planned_checkpoints = checkpoint_set or _legacy_checkpoint_set(
+            train_hands,
+            checkpoint_interval,
+            initial_checkpoint_hand=int(exp.get("initial_checkpoint_hand", 0)),
+        )
+        hands_by_checkpoint = {
+            point: _checkpoint_test_hands(exp, point, checkpoint_test_hands)
+            for point in planned_checkpoints
+        }
+        heldout_rosters = exp.get("heldout_table_rosters")
+        default_heldout_roster = config.get(
+            "heldout_agent", config.get("opponent_agent", {})
+        )
+        roster_identities = {
+            table_id: sha256_json(
+                heldout_rosters[table_id]
+                if isinstance(heldout_rosters, dict) and table_id in heldout_rosters
+                else default_heldout_roster
+            )
+            for table_id in heldout_table_set
+        }
+        schedule_manifest = build_heldout_schedule_manifest(
+            root_seed=seed,
+            checkpoint_set=planned_checkpoints,
+            table_set=heldout_table_set,
+            hands_by_checkpoint=hands_by_checkpoint,
+            table_size=table_size,
+            roster_identity=(
+                {table_id: str(exp["heldout_roster_identity"]) for table_id in heldout_table_set}
+                if exp.get("heldout_roster_identity")
+                else roster_identities
+            ),
+        )
+        verify_schedule_manifest(schedule_manifest)
+        artifacts.write_json("schedule_manifest.json", schedule_manifest)
         rebuy_counts = {agent_id: 0 for agent_id in train_ids}
         executed_train_hands = 0
         for hand_index in range(train_hands):
@@ -134,8 +185,11 @@ class FixedTableScenario:
                     stage="train",
                 )
             checkpoint_hand = hand_index + 1
-            checkpoint_due = checkpoint_interval > 0 and (
-                checkpoint_hand % checkpoint_interval == 0 or checkpoint_hand == train_hands
+            checkpoint_due = (
+                checkpoint_hand in checkpoint_set
+                if checkpoint_set is not None
+                else checkpoint_interval > 0
+                and (checkpoint_hand % checkpoint_interval == 0 or checkpoint_hand == train_hands)
             )
             if checkpoint_due:
                 snapshots, results = _checkpoint_and_generalize(
@@ -150,16 +204,26 @@ class FixedTableScenario:
                     small_blind=small_blind,
                     big_blind=big_blind,
                     max_raises=max_raises,
-                    test_hands=checkpoint_test_hands,
+                    test_hands=_checkpoint_test_hands(
+                        exp, checkpoint_hand, checkpoint_test_hands
+                    ),
                     update_test=update_test,
                     table_lifecycle=table_lifecycle,
+                    heldout_table_set=heldout_table_set,
                 )
                 checkpoint_snapshot_paths[str(checkpoint_hand)] = snapshots
                 checkpoint_results.extend(results)
+        if checkpoint_set is not None and executed_train_hands != train_hands:
+            raise ConfigError(
+                "显式 checkpoint_set 训练提前终止，拒绝产生缺失 checkpoint 的结果"
+            )
         final_checkpoint_missing = str(executed_train_hands) not in checkpoint_snapshot_paths
-        if checkpoint_interval == 0 or final_checkpoint_missing:
+        if checkpoint_set is None and (checkpoint_interval == 0 or final_checkpoint_missing):
+            final_checkpoint_hand = int(
+                exp.get("initial_checkpoint_hand", executed_train_hands)
+            )
             snapshots, results = _checkpoint_and_generalize(
-                checkpoint_hand=executed_train_hands,
+                checkpoint_hand=final_checkpoint_hand,
                 evaluation_targets=evaluation_targets,
                 agents=agents,
                 config=config,
@@ -173,8 +237,9 @@ class FixedTableScenario:
                 test_hands=test_hands,
                 update_test=update_test,
                 table_lifecycle=table_lifecycle,
+                heldout_table_set=heldout_table_set,
             )
-            checkpoint_snapshot_paths[str(executed_train_hands)] = snapshots
+            checkpoint_snapshot_paths[str(final_checkpoint_hand)] = snapshots
             checkpoint_results.extend(results)
         train_snapshot_paths = {
             agent_id: artifacts.save_snapshot(
@@ -215,23 +280,36 @@ class FixedTableScenario:
             "memory_update_test": update_test,
             "dealer_rotation": "hand_index modulo table_size",
             "generalization_schedule": (
-                f"every_{checkpoint_interval}_train_hands_and_final"
-                if checkpoint_interval > 0
-                else "final_snapshot_only"
+                "explicit_checkpoint_set"
+                if checkpoint_set is not None
+                else (
+                    f"every_{checkpoint_interval}_train_hands_and_final"
+                    if checkpoint_interval > 0
+                    else "final_snapshot_only"
+                )
             ),
+            "checkpoint_set": planned_checkpoints,
+            "heldout_table_set": heldout_table_set,
+            "schedule_sha256": schedule_manifest["schedule_sha256"],
             "checkpoint_test_hands": checkpoint_test_hands,
             "checkpoint_cost_budget": _checkpoint_cost_budget(
                 train_hands=train_hands,
                 checkpoint_interval=checkpoint_interval,
+                checkpoint_set=planned_checkpoints,
                 evaluation_target_count=len(evaluation_targets),
+                heldout_table_count=len(heldout_table_set),
                 checkpoint_test_hands=checkpoint_test_hands,
+                hands_by_checkpoint=hands_by_checkpoint,
                 seed_count=(
                     len(exp["seeds"])
                     if isinstance(exp.get("seeds"), list)
                     else 1
                 ),
             ),
-            "heldout_seed_policy": "derive_seed(root, checkpoint, target, hand)",
+            "heldout_seed_policy": (
+                "derive_seed(root, phase, checkpoint, table, hand, rng_stream); "
+                "target/mechanism/worker excluded"
+            ),
             "table_lifecycle": table_lifecycle,
             "strategy_risk_gate": str(
                 config.get("agent", {}).get("strategy_risk_gate", "disabled")
@@ -282,6 +360,7 @@ class FixedTableScenario:
                 evaluation_targets=evaluation_targets,
                 train_ids=train_ids,
                 checkpoint_interval=checkpoint_interval,
+                checkpoint_set=planned_checkpoints,
                 agent_configs=agent_configs,
             ),
         }
@@ -291,6 +370,9 @@ class FixedTableScenario:
             "checkpoint_generalization.json",
             {
                 "checkpoint_interval": checkpoint_interval,
+                "checkpoint_set": planned_checkpoints,
+                "heldout_table_set": heldout_table_set,
+                "schedule_sha256": schedule_manifest["schedule_sha256"],
                 "checkpoint_test_hands": checkpoint_test_hands,
                 "results": checkpoint_results,
                 "summary": checkpoint_summary,
@@ -495,6 +577,7 @@ def _checkpoint_and_generalize(
     test_hands: int,
     update_test: bool,
     table_lifecycle: str,
+    heldout_table_set: list[str],
 ) -> tuple[dict[str, str], list[dict[str, Any]]]:
     """Persist every target snapshot and evaluate each against independently seeded opponents."""
 
@@ -529,91 +612,98 @@ def _checkpoint_and_generalize(
     if test_hands <= 0:
         return snapshot_paths, results
     for target_id in evaluation_targets:
-        heldout_ids = [
-            target_id,
-            *[
-                f"heldout_{target_id}_{index:02d}"
-                for index in range(table_size - 1)
-            ],
-        ]
-        heldout_agents = _build_heldout_agents(
-            heldout_ids,
-            config,
-            context,
-            target_id,
-            agents[target_id],
-        )
-        test_stacks = {agent_id: starting_stack for agent_id in heldout_ids}
-        test_rebuy_counts = {agent_id: 0 for agent_id in heldout_ids}
-        reward = 0
-        for hand_index in range(test_hands):
-            result = run_single_hand(
-                agents=heldout_agents,
-                table_id=f"generalization_cp{checkpoint_hand}_{target_id}",
-                agent_ids=heldout_ids,
-                stacks=test_stacks,
-                seed=derive_seed(
-                    seed,
-                    "fixed",
-                    "checkpoint_test",
-                    checkpoint_hand,
-                    target_id,
-                    hand_index,
-                ),
-                stage="test",
-                small_blind=small_blind,
-                big_blind=big_blind,
-                max_raises_per_street=max_raises,
-                update_memory=update_test,
-                artifacts=artifacts,
-                dealer_index=hand_index % table_size,
-                hand_number=hand_index + 1,
-                hand_metadata={
-                    "checkpoint_hand": checkpoint_hand,
-                    "evaluation_target_id": target_id,
-                },
+        for table_offset, heldout_table_id in enumerate(heldout_table_set):
+            heldout_ids = [
+                target_id,
+                *[
+                    f"heldout_{heldout_table_id}_seat{index:02d}"
+                    for index in range(1, table_size)
+                ],
+            ]
+            heldout_agents = _build_heldout_agents(
+                heldout_ids,
+                config,
+                context,
+                target_id,
+                agents[target_id],
+                heldout_table_id,
             )
-            reward += int(result.rewards.get(target_id, 0))
-            if table_lifecycle == "continuous_rebuy":
-                _rebuy_busted_agents(
-                    test_stacks,
-                    starting_stack,
-                    test_rebuy_counts,
-                    artifacts,
-                    hand_index + 1,
+            test_stacks = {agent_id: starting_stack for agent_id in heldout_ids}
+            test_rebuy_counts = {agent_id: 0 for agent_id in heldout_ids}
+            reward = 0
+            for hand_index in range(test_hands):
+                result = run_single_hand(
+                    agents=heldout_agents,
+                    table_id=f"heldout_{heldout_table_id}_cp{checkpoint_hand}",
+                    agent_ids=heldout_ids,
+                    stacks=test_stacks,
+                    seed=derive_formal_hand_seed(
+                        seed,
+                        "heldout",
+                        checkpoint_hand,
+                        heldout_table_id,
+                        hand_index,
+                        "deal_and_opponent",
+                    ),
                     stage="test",
-                    metadata={
+                    small_blind=small_blind,
+                    big_blind=big_blind,
+                    max_raises_per_street=max_raises,
+                    update_memory=update_test,
+                    artifacts=artifacts,
+                    dealer_index=(hand_index + table_offset) % table_size,
+                    hand_number=hand_index + 1,
+                    hand_metadata={
                         "checkpoint_hand": checkpoint_hand,
                         "evaluation_target_id": target_id,
+                        "heldout_table_id": heldout_table_id,
                     },
                 )
-        train_hand_count = train_hand_count_by_target[target_id]
-        train_chip_per_hand = train_chip_by_target[target_id] / max(1, train_hand_count)
-        test_chip_per_hand = reward / max(1, test_hands)
-        train_bb_per_100 = train_chip_per_hand / max(1, big_blind) * 100
-        test_bb_per_100 = test_chip_per_hand / max(1, big_blind) * 100
-        results.append(
-            {
-                "checkpoint_hand": checkpoint_hand,
-                "target_agent_id": target_id,
-                "mechanism": agents[target_id].memory_metrics().get("mechanism", "unknown"),
-                "test_hands": test_hands,
-                "chip_delta": reward,
-                "train_chip_delta_at_checkpoint": train_chip_by_target[target_id],
-                "train_hands": train_hand_count,
-                "train_chip_per_hand": train_chip_per_hand,
-                "test_chip_per_hand": test_chip_per_hand,
-                "generalization_gap_chip_delta": train_chip_per_hand - test_chip_per_hand,
-                "generalization_gap_total_chip_delta_unscaled": (
-                    train_chip_by_target[target_id] - reward
-                ),
-                "train_bb_per_100": train_bb_per_100,
-                "bb_per_100": test_bb_per_100,
-                "generalization_gap_bb_per_100": train_bb_per_100 - test_bb_per_100,
-                "snapshot_path": snapshot_paths[target_id],
-                "rebuy_counts": test_rebuy_counts,
-            }
-        )
+                reward += int(result.rewards.get(target_id, 0))
+                if table_lifecycle == "continuous_rebuy":
+                    _rebuy_busted_agents(
+                        test_stacks,
+                        starting_stack,
+                        test_rebuy_counts,
+                        artifacts,
+                        hand_index + 1,
+                        stage="test",
+                        metadata={
+                            "checkpoint_hand": checkpoint_hand,
+                            "evaluation_target_id": target_id,
+                            "heldout_table_id": heldout_table_id,
+                        },
+                    )
+            train_hand_count = train_hand_count_by_target[target_id]
+            train_chip_per_hand = train_chip_by_target[target_id] / max(1, train_hand_count)
+            test_chip_per_hand = reward / max(1, test_hands)
+            train_bb_per_100 = train_chip_per_hand / max(1, big_blind) * 100
+            test_bb_per_100 = test_chip_per_hand / max(1, big_blind) * 100
+            results.append(
+                {
+                    "checkpoint_hand": checkpoint_hand,
+                    "heldout_table_id": heldout_table_id,
+                    "target_agent_id": target_id,
+                    "mechanism": agents[target_id].memory_metrics().get(
+                        "mechanism", "unknown"
+                    ),
+                    "test_hands": test_hands,
+                    "chip_delta": reward,
+                    "train_chip_delta_at_checkpoint": train_chip_by_target[target_id],
+                    "train_hands": train_hand_count,
+                    "train_chip_per_hand": train_chip_per_hand,
+                    "test_chip_per_hand": test_chip_per_hand,
+                    "generalization_gap_chip_delta": train_chip_per_hand - test_chip_per_hand,
+                    "generalization_gap_total_chip_delta_unscaled": (
+                        train_chip_by_target[target_id] - reward
+                    ),
+                    "train_bb_per_100": train_bb_per_100,
+                    "bb_per_100": test_bb_per_100,
+                    "generalization_gap_bb_per_100": train_bb_per_100 - test_bb_per_100,
+                    "snapshot_path": snapshot_paths[target_id],
+                    "rebuy_counts": test_rebuy_counts,
+                }
+            )
     return snapshot_paths, results
 
 
@@ -704,12 +794,13 @@ def _known_protocol_gaps(
     evaluation_targets: list[str],
     train_ids: list[str],
     checkpoint_interval: int,
+    checkpoint_set: list[int],
     agent_configs: dict[str, dict[str, Any]],
 ) -> list[str]:
     gaps = []
     if set(evaluation_targets) != set(train_ids):
         gaps.append("Not every training agent is evaluated against heldout opponents.")
-    if checkpoint_interval <= 0:
+    if checkpoint_interval <= 0 and len(checkpoint_set) <= 1:
         gaps.append("Generalization runs only after the final training hand.")
     strategies = {
         str(config.get("experience_revision_strategy", "deterministic"))
@@ -725,27 +816,91 @@ def _checkpoint_cost_budget(
     *,
     train_hands: int,
     checkpoint_interval: int,
+    checkpoint_set: list[int],
     evaluation_target_count: int,
+    heldout_table_count: int,
     checkpoint_test_hands: int,
+    hands_by_checkpoint: dict[int, int],
     seed_count: int,
 ) -> dict[str, int]:
     """Precompute the heldout-hand budget implied by the checkpoint protocol."""
 
-    if train_hands <= 0:
-        checkpoint_count = 1
-    elif checkpoint_interval <= 0:
-        checkpoint_count = 1
-    else:
-        checkpoint_count = (train_hands + checkpoint_interval - 1) // checkpoint_interval
-    evaluations_per_seed = checkpoint_count * evaluation_target_count
-    hands_per_seed = evaluations_per_seed * checkpoint_test_hands
+    checkpoint_count = len(checkpoint_set)
+    evaluations_per_seed = checkpoint_count * evaluation_target_count * heldout_table_count
+    hands_per_seed = (
+        sum(int(hands_by_checkpoint[point]) for point in checkpoint_set)
+        * evaluation_target_count
+        * heldout_table_count
+    )
     return {
         "checkpoint_count_per_seed": checkpoint_count,
         "evaluation_target_count": evaluation_target_count,
+        "heldout_table_count": heldout_table_count,
         "checkpoint_evaluations_per_seed": evaluations_per_seed,
         "checkpoint_generalization_hands_per_seed": hands_per_seed,
         "seed_count": seed_count,
         "checkpoint_generalization_hands_all_seeds": hands_per_seed * seed_count,
+    }
+
+
+def _legacy_checkpoint_set(
+    train_hands: int, checkpoint_interval: int, *, initial_checkpoint_hand: int = 0
+) -> list[int]:
+    """Resolve legacy interval semantics into the exact points used for audit and scheduling."""
+
+    if train_hands <= 0:
+        return [max(0, initial_checkpoint_hand)]
+    if checkpoint_interval <= 0:
+        return [train_hands]
+    points = list(range(checkpoint_interval, train_hands + 1, checkpoint_interval))
+    if not points or points[-1] != train_hands:
+        points.append(train_hands)
+    return points
+
+
+def _checkpoint_test_hands(
+    experiment: dict[str, Any], checkpoint_hand: int, default_hands: int
+) -> int:
+    raw = experiment.get("checkpoint_test_hands_by_checkpoint")
+    if raw is None:
+        return default_hands
+    if not isinstance(raw, dict):
+        raise ValueError("checkpoint_test_hands_by_checkpoint 必须是映射")
+    value = raw.get(str(checkpoint_hand), raw.get(checkpoint_hand, default_hands))
+    hands = int(value)
+    if hands < 0:
+        raise ValueError("checkpoint test hands 不能为负数")
+    return hands
+
+
+def _restore_initial_memory_snapshots(
+    agents: dict[str, LLMDecisionAgent], experiment: dict[str, Any]
+) -> dict[str, Any] | None:
+    raw = experiment.get("initial_memory_snapshots")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("initial_memory_snapshots 必须是非空 agent_id 到路径映射")
+    mode = str(experiment.get("memory_mode", "Frozen"))
+    if mode not in {"Frozen", "Online", "Without"}:
+        raise ValueError(f"未知 memory_mode：{mode}")
+    expected_update = mode == "Online"
+    if bool(experiment.get("update_memory_test", False)) != expected_update:
+        raise ValueError(
+            f"memory_mode={mode} 要求 update_memory_test={str(expected_update).lower()}"
+        )
+    audits: dict[str, Any] = {}
+    for agent_id, snapshot_path in sorted(raw.items()):
+        if agent_id not in agents:
+            raise ValueError(f"initial memory target 不在 roster：{agent_id}")
+        parent = load_snapshot(str(snapshot_path))
+        branches = clone_memory_branches(parent)
+        agents[agent_id].restore_memory(branches[mode])
+        audits[agent_id] = build_clone_audit(parent, branches)
+    return {
+        "schema_version": "task8-memory-clone-audit-set-v1",
+        "memory_mode": mode,
+        "targets": audits,
     }
 
 
@@ -755,6 +910,7 @@ def _build_heldout_agents(
     context: ExperimentContext,
     target_id: str,
     trained_target: LLMDecisionAgent,
+    heldout_table_id: str,
 ) -> dict[str, LLMDecisionAgent]:
     """
     功能：创建泛化测试桌 Agent。
@@ -772,8 +928,12 @@ def _build_heldout_agents(
 
     provider = config["provider"]
     model = str(provider.get("model", "mock-deterministic-v1"))
+    experiment = dict(config.get("experiment", {}))
+    table_rosters = experiment.get("heldout_table_rosters")
     opponent_cfg = dict(
-        config.get(
+        table_rosters[heldout_table_id]
+        if isinstance(table_rosters, dict) and heldout_table_id in table_rosters
+        else config.get(
             "heldout_agent",
             config.get("opponent_agent", {"mechanism": "no_memory"}),
         )

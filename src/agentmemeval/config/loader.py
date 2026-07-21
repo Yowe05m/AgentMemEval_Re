@@ -90,6 +90,8 @@ def validate_config(config: dict[str, Any]) -> None:
     for field in ("train_hands", "test_hands", "checkpoint_test_hands"):
         if field in experiment and int(experiment[field]) < 0:
             raise ConfigError(f"experiment.{field} 不能为负数")
+    _validate_checkpoint_protocol(experiment)
+    _validate_heldout_table_set(experiment)
     if "table_size" in experiment and int(experiment["table_size"]) < 2:
         raise ConfigError("experiment.table_size 必须至少为 2")
     table = config.get("table", {})
@@ -267,6 +269,96 @@ def validate_config(config: dict[str, Any]) -> None:
                     raise ConfigError("experiment.agent_roster 仅支持 per_agent memory_scope")
                 if item.get("persona") and run_mode != "smoke":
                     raise ConfigError("Exp2 人格机制已延期；roster persona 只能用于 smoke")
+
+
+def resolve_checkpoint_set(experiment: dict[str, Any]) -> list[int] | None:
+    """Return a validated explicit checkpoint set, or ``None`` for interval mode."""
+
+    raw = experiment.get("checkpoint_set")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError("experiment.checkpoint_set 必须是非空整数列表")
+    if "checkpoint_interval" in experiment and int(experiment.get("checkpoint_interval", 0)) > 0:
+        raise ConfigError("checkpoint_set 与正数 checkpoint_interval 不得同时配置")
+    try:
+        points = [int(value) for value in raw]
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("experiment.checkpoint_set 必须只包含整数") from exc
+    if any(value <= 0 for value in points):
+        raise ConfigError("experiment.checkpoint_set 必须只包含正整数")
+    if points != sorted(set(points)):
+        raise ConfigError("experiment.checkpoint_set 必须严格递增且无重复")
+    train_hands = int(experiment.get("train_hands", 0))
+    if train_hands <= 0:
+        raise ConfigError("显式 checkpoint_set 要求 experiment.train_hands 为正整数")
+    if points[-1] > train_hands:
+        raise ConfigError("experiment.checkpoint_set 不得超过 train_hands")
+    if points[-1] != train_hands:
+        raise ConfigError("experiment.checkpoint_set 必须包含最终 train_hands")
+    return points
+
+
+def resolve_heldout_table_set(experiment: dict[str, Any]) -> list[str]:
+    """Return held-out table identifiers in their frozen declaration order."""
+
+    raw = experiment.get("heldout_table_set", ["H01"])
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError("experiment.heldout_table_set 必须是非空列表")
+    tables = [str(value).strip() for value in raw]
+    if any(not value for value in tables):
+        raise ConfigError("experiment.heldout_table_set 不得包含空 table_id")
+    if len(tables) != len(set(tables)):
+        raise ConfigError("experiment.heldout_table_set 不得重复")
+    return tables
+
+
+def _validate_checkpoint_protocol(experiment: dict[str, Any]) -> None:
+    checkpoint_set = resolve_checkpoint_set(experiment)
+    if "checkpoint_interval" in experiment:
+        try:
+            interval = int(experiment["checkpoint_interval"])
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("experiment.checkpoint_interval 必须是整数") from exc
+        if interval < 0:
+            raise ConfigError("experiment.checkpoint_interval 不能为负数")
+    raw_hands = experiment.get("checkpoint_test_hands_by_checkpoint")
+    if raw_hands is not None:
+        if checkpoint_set is None:
+            raise ConfigError(
+                "checkpoint_test_hands_by_checkpoint 要求显式 checkpoint_set"
+            )
+        if not isinstance(raw_hands, dict):
+            raise ConfigError("checkpoint_test_hands_by_checkpoint 必须是映射")
+        try:
+            mapped = {int(key): int(value) for key, value in raw_hands.items()}
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("checkpoint test hands 的键和值必须是整数") from exc
+        if set(mapped) - set(checkpoint_set):
+            raise ConfigError("checkpoint test hands 含未声明 checkpoint")
+        if any(value < 0 for value in mapped.values()):
+            raise ConfigError("checkpoint test hands 不能为负数")
+
+
+def _validate_heldout_table_set(experiment: dict[str, Any]) -> None:
+    tables = resolve_heldout_table_set(experiment)
+    run_mode = str(experiment.get("run_mode", "smoke"))
+    rosters = experiment.get("heldout_table_rosters")
+    if run_mode == "formal" and len(tables) > 1:
+        if experiment.get("heldout_roster_identity"):
+            raise ConfigError(
+                "Formal 多 held-out tables 禁止 scalar heldout_roster_identity 覆盖"
+            )
+        if not isinstance(rosters, dict) or set(rosters) != set(tables):
+            raise ConfigError("Formal heldout_table_rosters 必须完整覆盖 heldout_table_set")
+        if any(not isinstance(rosters[table_id], dict) for table_id in tables):
+            raise ConfigError("每个 held-out table roster 必须是配置映射")
+        identities = [
+            yaml.safe_dump(rosters[table_id], allow_unicode=True, sort_keys=True)
+            for table_id in tables
+        ]
+        if len(identities) != len(set(identities)):
+            raise ConfigError("Formal H01/H02/H03 必须使用不同的自然 roster identity")
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

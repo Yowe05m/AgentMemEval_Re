@@ -1,0 +1,15 @@
+schema_version: task8-worker-template-v1
+protocol_status: candidate/not-frozen/not-authorized-to-run
+role: secondary
+execution_mode: formal_candidate
+experiment_families: [R1-E1-M, R1-E4, R1-E5]
+checkpoint_set: [30, 75, 150, 300]
+heldout_table_set: [H01, H02, H03]
+memory_modes: [Frozen, Online, Without]
+dependency_contract:
+  producer_role: primary
+  required_checkpoint_hand: 300
+  receipt_schema_version: task8-checkpoint-receipt-v1
+notes:
+  - Consumer verifies receipt identity and every checkpoint hash before creating run evidence.
+  - This candidate template is not authorized to run.

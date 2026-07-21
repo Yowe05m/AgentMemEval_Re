@@ -21,6 +21,12 @@ from agentmemeval.evaluation.pilot import (
 )
 from agentmemeval.evaluation.reporting import rebuild_report
 from agentmemeval.experiments.campaign import aggregate_campaign, run_campaign
+from agentmemeval.experiments.formal_runner import (
+    generate_worker_manifests,
+    run_worker_manifest,
+    summarize_worker_states,
+    verify_checkpoint_receipt,
+)
 from agentmemeval.experiments.runner import run_config
 from agentmemeval.llm.router import provider_health
 
@@ -53,6 +59,14 @@ def main(argv: list[str] | None = None) -> int:
             return _pilot_freeze(args)
         if args.command == "formal-freeze":
             return _formal_freeze(args)
+        if args.command == "formal-generate-manifests":
+            return _formal_generate_manifests(args)
+        if args.command == "formal-worker":
+            return _formal_worker(args)
+        if args.command == "formal-verify-receipt":
+            return _formal_verify_receipt(args)
+        if args.command == "formal-status":
+            return _formal_status(args)
         if args.command == "report":
             return _report(args)
         parser.print_help()
@@ -145,6 +159,27 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="与 calibration Pilot 和 formal seeds 均不重叠的冻结预检 seed",
     )
+    formal_generate = sub.add_parser(
+        "formal-generate-manifests", help="从 TASK8 matrix 与 seed list 生成中央 worker manifests"
+    )
+    formal_generate.add_argument("--matrix", required=True, help="冻结或候选 experiment matrix")
+    formal_generate.add_argument("--seeds", required=True, help="逗号分隔、顺序冻结的整数 seed")
+    formal_generate.add_argument("--identity", required=True, help="common identity JSON")
+    formal_generate.add_argument("--output-dir", required=True, help="全新 manifest 输出目录")
+    formal_worker = sub.add_parser(
+        "formal-worker", help="验证并运行单个 worker manifest；candidate 默认拒绝"
+    )
+    formal_worker.add_argument("--manifest", required=True)
+    formal_worker.add_argument("--receipt-root", required=True)
+    formal_worker.add_argument("--resume-existing", action="store_true")
+    formal_receipt = sub.add_parser(
+        "formal-verify-receipt", help="只读验证 checkpoint receipt、身份与逐文件哈希"
+    )
+    formal_receipt.add_argument("--receipt", required=True)
+    formal_receipt.add_argument("--checkpoint-root", required=True)
+    formal_receipt.add_argument("--identity", help="可选 expected common identity JSON")
+    formal_status = sub.add_parser("formal-status", help="只读汇总 worker append-only state")
+    formal_status.add_argument("--root", required=True)
     report = sub.add_parser("report", help="从 run 目录重建报告")
     report.add_argument("--input", required=True, help="outputs/<run_id> 目录")
     report.add_argument("--big-blind", type=int, default=2, help="重算 BB/100 使用的大盲")
@@ -280,6 +315,49 @@ def _formal_freeze(args: argparse.Namespace) -> int:
         preflight_seed=args.preflight_seed,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _formal_generate_manifests(args: argparse.Namespace) -> int:
+    identity = json.loads(Path(args.identity).read_text(encoding="utf-8"))
+    seeds = [int(value.strip()) for value in str(args.seeds).split(",") if value.strip()]
+    result = generate_worker_manifests(
+        matrix_path=args.matrix,
+        seeds=seeds,
+        common_identity=identity,
+        output_dir=args.output_dir,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _formal_worker(args: argparse.Namespace) -> int:
+    result = run_worker_manifest(
+        args.manifest,
+        receipt_root=args.receipt_root,
+        resume_existing=bool(args.resume_existing),
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _formal_verify_receipt(args: argparse.Namespace) -> int:
+    identity = (
+        json.loads(Path(args.identity).read_text(encoding="utf-8"))
+        if args.identity
+        else None
+    )
+    result = verify_checkpoint_receipt(
+        args.receipt,
+        args.checkpoint_root,
+        expected_identity=identity,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _formal_status(args: argparse.Namespace) -> int:
+    print(json.dumps(summarize_worker_states(args.root), ensure_ascii=False, indent=2))
     return 0
 
 
