@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -18,6 +21,7 @@ def _campaign(
     name: str,
     design: str,
     scores: tuple[float, ...] = (0.1, 0.3, 0.6, 0.9),
+    query_prefix: str = "query",
 ) -> Path:
     root = tmp_path / name
     run_id = "mixed__s1__a01"
@@ -59,7 +63,7 @@ def _campaign(
                 "memory_context": {
                     "metadata": {
                         "mechanism": "fact",
-                        "query": f"query {index}",
+                        "query": f"{query_prefix} {index}",
                         "retrieval_scores": [
                             {
                                 "record_id": record_id,
@@ -192,6 +196,129 @@ def test_review_pack_nonreuse_rejects_prior_pair_or_blind_content() -> None:
     assert any(
         "blind_content_sha256" in blocker
         for blocker in content_audit["blockers"]
+    )
+
+
+def test_relevance_review_cli_builds_v2_pack_with_nonreuse_receipt(
+    tmp_path: Path,
+) -> None:
+    current_campaigns = [
+        _campaign(tmp_path, "current-p", "mixed_table", query_prefix="new"),
+        _campaign(
+            tmp_path,
+            "current-e",
+            "target_vs_seven_no_memory",
+            query_prefix="new",
+        ),
+    ]
+    prior_campaigns = [
+        _campaign(tmp_path, "prior-p", "mixed_table", query_prefix="old"),
+        _campaign(
+            tmp_path,
+            "prior-e",
+            "target_vs_seven_no_memory",
+            query_prefix="old",
+        ),
+    ]
+    prior_key = tmp_path / "prior_review_key.json"
+    prior_key.write_text(
+        json.dumps(
+            build_relevance_review_pack(
+                prior_campaigns,
+                sample_size=3,
+                sample_seed=7,
+                review_schema_version="v2",
+            )
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "new_review"
+
+    result = _run_review_cli(
+        current_campaigns,
+        output=output,
+        prior_key=prior_key,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert {path.name for path in output.iterdir()} == {
+        "review_key.json",
+        "blind_review.jsonl",
+        "human_labels.tsv",
+        "prior_review_nonreuse_audit.json",
+    }
+    audit = json.loads(
+        (output / "prior_review_nonreuse_audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["status"] == "verified_no_reuse"
+    assert audit["prior_review_key_evidence"][0]["sha256"]
+
+
+def test_relevance_review_cli_refuses_reused_review_before_output_creation(
+    tmp_path: Path,
+) -> None:
+    campaigns = [
+        _campaign(tmp_path, "same-p", "mixed_table"),
+        _campaign(tmp_path, "same-e", "target_vs_seven_no_memory"),
+    ]
+    prior_key = tmp_path / "same_review_key.json"
+    prior_key.write_text(
+        json.dumps(
+            build_relevance_review_pack(
+                campaigns,
+                sample_size=3,
+                sample_seed=7,
+                review_schema_version="v2",
+            )
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "refused_review"
+
+    result = _run_review_cli(campaigns, output=output, prior_key=prior_key)
+
+    assert result.returncode == 2
+    assert not output.exists()
+    assert '"status": "no_go"' in result.stdout
+
+
+def _run_review_cli(
+    campaigns: list[Path], *, output: Path, prior_key: Path
+) -> subprocess.CompletedProcess[str]:
+    repo = Path(__file__).resolve().parents[2]
+    command = [
+        sys.executable,
+        str(repo / "tools" / "task4" / "retrieval_relevance_review.py"),
+        "build",
+    ]
+    for campaign in campaigns:
+        command.extend(["--campaign-dir", str(campaign)])
+    command.extend(
+        [
+            "--output-dir",
+            str(output),
+            "--sample-size",
+            "3",
+            "--sample-seed",
+            "7",
+            "--review-schema-version",
+            "v2",
+            "--forbid-review-key",
+            str(prior_key),
+        ]
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(repo / "src")
+    return subprocess.run(
+        command,
+        cwd=repo,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
     )
 
 
