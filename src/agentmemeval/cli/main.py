@@ -20,6 +20,10 @@ from agentmemeval.evaluation.pilot import (
     build_pilot_power_plan,
 )
 from agentmemeval.evaluation.reporting import rebuild_report
+from agentmemeval.evaluation.task8b_analysis import (
+    build_task8b_analysis_input,
+    run_task8b_analysis,
+)
 from agentmemeval.experiments.campaign import aggregate_campaign, run_campaign
 from agentmemeval.experiments.formal_runner import (
     generate_worker_manifests,
@@ -28,6 +32,11 @@ from agentmemeval.experiments.formal_runner import (
     verify_checkpoint_receipt,
 )
 from agentmemeval.experiments.runner import run_config
+from agentmemeval.experiments.task8b_bundle import build_task8b_executable_bundle
+from agentmemeval.experiments.task8b_transport import (
+    archive_completed_worker,
+    transfer_checkpoint_bundle,
+)
 from agentmemeval.llm.router import provider_health
 
 
@@ -67,6 +76,16 @@ def main(argv: list[str] | None = None) -> int:
             return _formal_verify_receipt(args)
         if args.command == "formal-status":
             return _formal_status(args)
+        if args.command == "task8b-build-bundle":
+            return _task8b_build_bundle(args)
+        if args.command == "task8b-transfer-checkpoint":
+            return _task8b_transfer_checkpoint(args)
+        if args.command == "task8b-archive-worker":
+            return _task8b_archive_worker(args)
+        if args.command == "task8b-analyze":
+            return _task8b_analyze(args)
+        if args.command == "task8b-build-analysis-input":
+            return _task8b_build_analysis_input(args)
         if args.command == "report":
             return _report(args)
         parser.print_help()
@@ -180,6 +199,41 @@ def build_parser() -> argparse.ArgumentParser:
     formal_receipt.add_argument("--identity", help="可选 expected common identity JSON")
     formal_status = sub.add_parser("formal-status", help="只读汇总 worker append-only state")
     formal_status.add_argument("--root", required=True)
+    task8b_bundle = sub.add_parser(
+        "task8b-build-bundle", help="生成 TASK8B 可执行 canary 或 12x2 expedited bundle"
+    )
+    task8b_bundle.add_argument("--matrix", required=True)
+    task8b_bundle.add_argument("--base-config", required=True)
+    task8b_bundle.add_argument("--fleet-identity", required=True)
+    task8b_bundle.add_argument("--output-dir", required=True)
+    task8b_bundle.add_argument("--runtime-bundle-root", required=True)
+    task8b_bundle.add_argument("--canary-seed", type=int)
+    task8b_transfer = sub.add_parser(
+        "task8b-transfer-checkpoint", help="逐文件验证并以 receipt-last 传输 checkpoint"
+    )
+    task8b_transfer.add_argument("--source-receipt", required=True)
+    task8b_transfer.add_argument("--source-root", required=True)
+    task8b_transfer.add_argument("--destination-root", required=True)
+    task8b_transfer.add_argument("--destination-receipt", required=True)
+    task8b_transfer.add_argument("--expected-identity", required=True)
+    task8b_transfer.add_argument("--producer-worker-id", required=True)
+    task8b_transfer.add_argument("--seed", required=True, type=int)
+    task8b_transfer.add_argument("--checkpoint", required=True, type=int)
+    task8b_archive = sub.add_parser(
+        "task8b-archive-worker", help="门禁并封存一个已完成 TASK8B worker"
+    )
+    task8b_archive.add_argument("--run-dir", required=True)
+    task8b_archive.add_argument("--output-dir", required=True)
+    task8b_analysis = sub.add_parser("task8b-analyze", help="运行冻结的 TASK8B Phase F 确定性分析")
+    task8b_analysis.add_argument("--input-manifest", required=True)
+    task8b_analysis.add_argument("--exclusion-ledger", required=True)
+    task8b_analysis.add_argument("--output-dir", required=True)
+    task8b_analysis_input = sub.add_parser(
+        "task8b-build-analysis-input", help="从冻结 manifests 与本地回收 attempts 构建 Phase F 输入"
+    )
+    task8b_analysis_input.add_argument("--worker-manifest-dir", required=True)
+    task8b_analysis_input.add_argument("--snapshot-root", required=True)
+    task8b_analysis_input.add_argument("--output", required=True)
     report = sub.add_parser("report", help="从 run 目录重建报告")
     report.add_argument("--input", required=True, help="outputs/<run_id> 目录")
     report.add_argument("--big-blind", type=int, default=2, help="重算 BB/100 使用的大盲")
@@ -250,9 +304,7 @@ def _pilot_plan(args: argparse.Namespace) -> int:
     campaign_p = json.loads(Path(args.campaign_p).read_text(encoding="utf-8"))
     campaign_e = json.loads(Path(args.campaign_e).read_text(encoding="utf-8"))
     runtime_equivalence = (
-        json.loads(
-            Path(args.runtime_equivalence_audit).read_text(encoding="utf-8")
-        )
+        json.loads(Path(args.runtime_equivalence_audit).read_text(encoding="utf-8"))
         if args.runtime_equivalence_audit
         else None
     )
@@ -268,8 +320,7 @@ def _pilot_plan(args: argparse.Namespace) -> int:
     print(json.dumps({"output": str(output), **plan}, ensure_ascii=False, indent=2))
     return (
         0
-        if plan["status"]
-        == "power_plan_ready_requires_behavior_execution_and_runtime_freeze"
+        if plan["status"] == "power_plan_ready_requires_behavior_execution_and_runtime_freeze"
         else 2
     )
 
@@ -290,11 +341,7 @@ def _pilot_freeze(args: argparse.Namespace) -> int:
     with output.open("x", encoding="utf-8") as handle:
         json.dump(proposal, handle, ensure_ascii=False, indent=2)
     print(json.dumps({"output": str(output), **proposal}, ensure_ascii=False, indent=2))
-    return (
-        0
-        if proposal["status"] == "ready_to_generate_immutable_formal_configs"
-        else 2
-    )
+    return 0 if proposal["status"] == "ready_to_generate_immutable_formal_configs" else 2
 
 
 def _formal_freeze(args: argparse.Namespace) -> int:
@@ -343,9 +390,7 @@ def _formal_worker(args: argparse.Namespace) -> int:
 
 def _formal_verify_receipt(args: argparse.Namespace) -> int:
     identity = (
-        json.loads(Path(args.identity).read_text(encoding="utf-8"))
-        if args.identity
-        else None
+        json.loads(Path(args.identity).read_text(encoding="utf-8")) if args.identity else None
     )
     result = verify_checkpoint_receipt(
         args.receipt,
@@ -358,6 +403,61 @@ def _formal_verify_receipt(args: argparse.Namespace) -> int:
 
 def _formal_status(args: argparse.Namespace) -> int:
     print(json.dumps(summarize_worker_states(args.root), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _task8b_build_bundle(args: argparse.Namespace) -> int:
+    result = build_task8b_executable_bundle(
+        matrix_path=args.matrix,
+        base_config_path=args.base_config,
+        fleet_identity_path=args.fleet_identity,
+        output_dir=args.output_dir,
+        runtime_bundle_root=args.runtime_bundle_root,
+        canary_seed=args.canary_seed,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _task8b_transfer_checkpoint(args: argparse.Namespace) -> int:
+    identity = json.loads(Path(args.expected_identity).read_text(encoding="utf-8"))
+    result = transfer_checkpoint_bundle(
+        source_receipt=args.source_receipt,
+        source_checkpoint_root=args.source_root,
+        destination_checkpoint_root=args.destination_root,
+        destination_receipt=args.destination_receipt,
+        expected_identity=identity,
+        expected_producer_worker_id=args.producer_worker_id,
+        expected_seed_bundle=args.seed,
+        expected_checkpoint_hand=args.checkpoint,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _task8b_archive_worker(args: argparse.Namespace) -> int:
+    result = archive_completed_worker(args.run_dir, args.output_dir)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _task8b_analyze(args: argparse.Namespace) -> int:
+    result = run_task8b_analysis(
+        args.input_manifest,
+        args.exclusion_ledger,
+        args.output_dir,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _task8b_build_analysis_input(args: argparse.Namespace) -> int:
+    result = build_task8b_analysis_input(
+        args.worker_manifest_dir,
+        args.snapshot_root,
+        args.output,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 

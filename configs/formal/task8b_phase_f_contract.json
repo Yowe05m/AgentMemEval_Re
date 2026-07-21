@@ -1,0 +1,49 @@
+{
+  "analysis_contract_id": "task8b-phase-f-v1",
+  "attempt_selection": "first_numerically_ordered_complete_valid_eligible_attempt_multiple_valid_fail_closed",
+  "bootstrap": {
+    "level": 0.95,
+    "method": "seed_cluster_percentile",
+    "prng": "PCG64",
+    "replicates": 10000,
+    "seed": 2026090199
+  },
+  "checkpoints": [30, 75, 150, 300],
+  "exclusion_codes": [
+    "IDENTITY_MISMATCH",
+    "CRN_MISMATCH",
+    "FALLBACK_NONZERO",
+    "REVISION_FALLBACK_NONZERO",
+    "REWARD_CONSERVATION_VIOLATION",
+    "STACK_CONSERVATION_VIOLATION",
+    "ARTIFACT_INCOMPLETE_OR_HASH_MISMATCH",
+    "OUTPUT_PATH_COLLISION",
+    "INVALID_RECEIPT_OR_DEPENDENCY",
+    "EXECUTION_INVALID",
+    "ELIGIBLE_INFRA_FAILURE"
+  ],
+  "heldout_tables": ["H01", "H02", "H03"],
+  "holm_family": ["Expr_vs_Fact", "Async_vs_Fact"],
+  "n_planned": 12,
+  "n_source": "User-approved expedited protocol amendment before result unblinding",
+  "new_power_pilot_run": false,
+  "primary_checkpoint": 300,
+  "primary_endpoint": "final_test_bb_per_100",
+  "primary_mode": "Frozen",
+  "schema_version": "task8b-phase-f-frozen-contract-v1",
+  "seeds": [
+    2026090101,
+    2026090102,
+    2026090103,
+    2026090104,
+    2026090105,
+    2026090106,
+    2026090107,
+    2026090108,
+    2026090109,
+    2026090110,
+    2026090111,
+    2026090112
+  ],
+  "statistical_unit": "seed"
+}

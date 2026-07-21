@@ -1,0 +1,97 @@
+extends: ../experiments/task6_real_pilot_base_v7_bgem3_native_528.yaml
+
+# TASK8B expedited protocol base. The user froze n=12 before result unblinding and
+# explicitly waived R1-E0 and the new Power Pilot; this does not claim power verification.
+provider:
+  max_output_tokens: 512
+  experience_max_output_tokens: 512
+  experience_repair_max_output_tokens: 384
+
+agent:
+  minimum_retrieval_score: 0.0
+  retrieval_threshold_status: frozen
+  retrieval_threshold_policy: explicit_no_numeric_filter_carried_from_golden_v7
+
+table:
+  starting_stack: 1000
+  small_blind: 1
+  big_blind: 2
+  max_raises_per_street: 4
+  lifecycle: continuous_rebuy
+
+experiment:
+  run_mode: formal
+  scenario: fixed_evolving_table
+  table_size: 8
+  train_hands: 300
+  test_hands: 200
+  checkpoint_test_hands: 200
+  checkpoint_test_hands_by_checkpoint:
+    30: 50
+    75: 50
+    150: 50
+    300: 200
+  protocol_variant: task8b_expedited_route1_v2
+  protocol_readiness: ready
+  behavior_threshold_status: frozen
+  statistical_plan_status: frozen
+  primary_endpoint: final_test_bb_per_100
+  primary_estimand: same_seed_cross_condition_target_effect_vs_no_memory
+  cross_condition_aggregation: paired_by_seed
+  task8b_paired_interaction: heldout_minus_source_mechanism_minus_fact
+  primary_baseline_mechanism: no_memory
+  within_table_mechanism_aggregation: single_target_condition
+  target_agent_id: target_00
+  evaluation_target_ids: [target_00]
+  multiple_comparison_method: holm
+  required_seed_pairs: 12
+  checkpoint_set: [30, 75, 150, 300]
+  heldout_table_set: [H01, H02, H03]
+  heldout_table_rosters:
+    H01:
+      mechanism: no_memory
+      memory_scope: per_agent
+      raise_sizing_policy: local_discrete
+      strategy_risk_gate: disabled
+      natural_roster_id: task8b_h01_baseline_pool_a
+    H02:
+      mechanism: no_memory
+      memory_scope: per_agent
+      raise_sizing_policy: local_discrete
+      strategy_risk_gate: disabled
+      natural_roster_id: task8b_h02_baseline_pool_b
+    H03:
+      mechanism: no_memory
+      memory_scope: per_agent
+      raise_sizing_policy: local_discrete
+      strategy_risk_gate: disabled
+      natural_roster_id: task8b_h03_baseline_pool_c
+  runtime_verification:
+    decision_service_smoke_passed: true
+    embedding_service_smoke_passed: true
+    uniform_hardware_verified: true
+  formal_runtime_lock:
+    gpu_name: NVIDIA GeForce RTX 5090
+    gpu_driver: 595.58.03
+    service_torch_cuda_version: "13.0"
+    vllm_version: 0.23.1rc1.dev1032+g4a6440ace
+    decision_model_name: qwen/qwen3.5-9b
+    decision_model_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+    decision_weights_hash: 250e641cf3762c622c5e74761cd6ad8b407bc4f1da86b7587bcfb44422b9baeb
+    decision_served_name: qwen/qwen3.5-9b
+    decision_startup_parameters_sha256: d20c77ced96dadde4bfe51664074e0dd76178d78ab496ee741445ccbada14d17
+    embedding_backend: bgem3_hybrid_http
+    embedding_model_name: BAAI/bge-m3
+    embedding_model_revision: 5617a9f61b028005a4858fdac845db406aefb181
+    embedding_weights_hash: b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38
+    embedding_startup_parameters_sha256: 2a85b9bdb323b04ba44782db582f109bbf7766689e84c001e227e8362d4bb8a2
+    decision_prompt_version: 2026-07-19-v6-counterfactual-calibrated-memory
+    decision_system_sha256: 9cd2f157225e14bfee9113c3af01a2ff4fff839aeb68dcfd8f11740bd8647800
+    experience_update_sha256: 7788fa2f85adca9710cf20f2fc95769db1b2b93ee60f9a5236a430b87d4ad382
+  expedited_protocol_amendment:
+    seed_count: 12
+    seeds: [2026090101, 2026090102, 2026090103, 2026090104, 2026090105, 2026090106, 2026090107, 2026090108, 2026090109, 2026090110, 2026090111, 2026090112]
+    r1_e0_waived: true
+    new_power_pilot_waived: true
+    power_verified: false
+    status: approved_before_result_unblinding

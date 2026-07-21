@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import hashlib
 import json
@@ -23,12 +24,35 @@ from agentmemeval.experiments.formal_protocol import (
 WORKER_SCHEMA_VERSION = "task8-worker-manifest-v1"
 RECEIPT_SCHEMA_VERSION = "task8-checkpoint-receipt-v1"
 STATE_SCHEMA_VERSION = "task8-worker-state-v1"
-REQUIRED_IDENTITY_FIELDS = (
+TASK8B_EXPEDITED_STATUS = "frozen/expedited-formal-candidate"
+TASK8B_FORMAL_SEEDS = tuple(range(2026090101, 2026090113))
+TASK8B_FORMAL_TASKS = {
+    "primary": {
+        f"isolation_{mechanism}": (1350, {"R1-E1-I", "R1-E2", "R1-E3"})
+        for mechanism in ("no_memory", "fact", "expr", "sync", "async")
+    },
+    "secondary": {
+        "mixed_ecological": (2700, {"R1-E1-M"}),
+        "expr_online": (600, {"R1-E4"}),
+        "expr_without": (600, {"R1-E5"}),
+        "async_online": (600, {"R1-E4"}),
+        "async_without": (600, {"R1-E5"}),
+    },
+}
+FLEET_COMMON_IDENTITY_FIELDS = (
     "code_sha",
-    "resolved_config_sha256",
     "prompt_sha256",
     "model_fingerprint",
     "embedding_fingerprint",
+)
+TASK8B_FLEET_LOCK_FIELDS = (
+    *FLEET_COMMON_IDENTITY_FIELDS,
+    "protocol_sha256",
+    "runtime_image_fingerprint",
+)
+REQUIRED_IDENTITY_FIELDS = (
+    *FLEET_COMMON_IDENTITY_FIELDS,
+    "resolved_config_sha256",
     "schedule_sha256",
 )
 REQUIRED_RECEIPT_FIELDS = (
@@ -64,6 +88,10 @@ def generate_worker_manifests(
     cache_root: str = "task8",
     protocol_status: str = "candidate/not-frozen/not-authorized-to-run",
     execution_mode: str = "formal_candidate",
+    canary_total_hands: int | None = None,
+    task_configs_by_worker: dict[str, list[dict[str, Any]]] | None = None,
+    receipt_identities_by_worker: dict[str, dict[str, Any]] | None = None,
+    seed_pod_identities: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Generate stable Pxx/Sxx seed pods from one matrix and one ordered seed list."""
 
@@ -73,7 +101,19 @@ def generate_worker_manifests(
     _validate_task8_matrix(matrix)
     if not seeds or len(seeds) != len(set(seeds)):
         raise ConfigError("seed list 必须非空且无重复")
-    if not protocol_status.startswith("mock/") and len(seeds) != 12:
+    if protocol_status == TASK8B_EXPEDITED_STATUS and tuple(seeds) != TASK8B_FORMAL_SEEDS:
+        raise ConfigError("TASK8B expedited seeds 必须严格为 2026090101–2026090112 且顺序不变")
+    if protocol_status == "canary/not-for-paper" and len(seeds) != 1:
+        raise ConfigError("TASK8B canary manifest generator 要求恰好 1 个非 Formal seed")
+    if protocol_status == "canary/not-for-paper" and (
+        execution_mode != "experiment_configs" or not task_configs_by_worker
+    ):
+        raise ConfigError("TASK8B real canary 必须生成非空 experiment_configs bundle")
+    if (
+        not protocol_status.startswith("mock/")
+        and protocol_status != "canary/not-for-paper"
+        and len(seeds) != 12
+    ):
         raise ConfigError("TASK8 Formal/candidate manifest generator 要求恰好 12 seeds")
     _validate_common_identity(
         common_identity, allow_pending=protocol_status.startswith("candidate/")
@@ -89,6 +129,15 @@ def generate_worker_manifests(
         pod_id = f"pod{index:0{width}d}"
         primary_id = f"P{index:0{width}d}"
         secondary_id = f"S{index:0{width}d}"
+        primary_tasks = (task_configs_by_worker or {}).get(primary_id)
+        secondary_tasks = (task_configs_by_worker or {}).get(secondary_id)
+        pod_identity = (seed_pod_identities or {}).get(int(seed))
+        if protocol_status == TASK8B_EXPEDITED_STATUS:
+            pod_identity = _task_schedule_bundle_identity(
+                seed=int(seed),
+                primary_tasks=primary_tasks,
+                secondary_tasks=secondary_tasks,
+            )
         primary = _worker_manifest(
             worker_id=primary_id,
             role="primary",
@@ -100,6 +149,10 @@ def generate_worker_manifests(
             cache_root=cache_root,
             protocol_status=protocol_status,
             execution_mode=execution_mode,
+            canary_total_hands=canary_total_hands,
+            task_configs=primary_tasks,
+            receipt_identity=(receipt_identities_by_worker or {}).get(primary_id),
+            seed_pod_identity=pod_identity,
         )
         secondary = _worker_manifest(
             worker_id=secondary_id,
@@ -113,7 +166,19 @@ def generate_worker_manifests(
             protocol_status=protocol_status,
             execution_mode=execution_mode,
             depends_on=primary_id,
+            canary_total_hands=canary_total_hands,
+            task_configs=secondary_tasks,
+            dependency_receipt_identity=(receipt_identities_by_worker or {}).get(primary_id),
+            seed_pod_identity=pod_identity,
         )
+        if protocol_status == TASK8B_EXPEDITED_STATUS:
+            final_pod_identity = _task_schedule_bundle_identity(
+                seed=int(seed),
+                primary_tasks=primary.get("task_configs"),
+                secondary_tasks=secondary.get("task_configs"),
+            )
+            primary["seed_pod_identity"] = final_pod_identity
+            secondary["seed_pod_identity"] = final_pod_identity
         manifests.extend((primary, secondary))
     validate_worker_manifest_set(manifests, expected_seed_count=len(seeds))
     for manifest in manifests:
@@ -134,8 +199,41 @@ def generate_worker_manifests(
             for item in manifests
         ],
     }
+    index_body["bundle_sha256"] = sha256_json(index_body)
     _write_json_new(destination / "manifest_index.json", index_body)
     return index_body
+
+
+def _task_schedule_bundle_identity(
+    *,
+    seed: int,
+    primary_tasks: list[dict[str, Any]] | None,
+    secondary_tasks: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if not primary_tasks or not secondary_tasks:
+        raise ConfigError(f"seed {seed} expedited pod 缺 executable task configs")
+    rows = [
+        {
+            "worker_role": role,
+            "task_id": str(task.get("task_id", "")),
+            "schedule_sha256": str(task.get("expected_identity", {}).get("schedule_sha256", "")),
+        }
+        for role, tasks in (("primary", primary_tasks), ("secondary", secondary_tasks))
+        for task in tasks
+    ]
+    if any(not row["task_id"] or not row["schedule_sha256"] for row in rows):
+        raise ConfigError(f"seed {seed} task schedule identity 非法")
+    return {
+        "seed_bundle": seed,
+        "schedule_sha256": sha256_json(
+            {
+                "schema_version": "task8b-seed-pod-schedule-bundle-v1",
+                "seed_bundle": seed,
+                "task_schedules": rows,
+            }
+        ),
+        "task_schedules": rows,
+    }
 
 
 def _worker_manifest(
@@ -151,15 +249,24 @@ def _worker_manifest(
     protocol_status: str,
     execution_mode: str,
     depends_on: str | None = None,
+    canary_total_hands: int | None = None,
+    task_configs: list[dict[str, Any]] | None = None,
+    receipt_identity: dict[str, Any] | None = None,
+    dependency_receipt_identity: dict[str, Any] | None = None,
+    seed_pod_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    checkpoint_set = [1, 3, 5] if execution_mode == "mock_seed_pod" else [30, 75, 150, 300]
+    checkpoint_set = (
+        [1, 3, 5]
+        if execution_mode == "mock_seed_pod" or protocol_status == "canary/not-for-paper"
+        else [30, 75, 150, 300]
+    )
     table_set = ["H01", "H02", "H03"]
     output_path = f"{output_root}/{worker_id}/{seed}"
     cache_namespace = f"{cache_root}/{worker_id}/{seed}"
     dependency_output_path = (
         f"{output_root}/{depends_on}/{seed}" if role == "secondary" and depends_on else None
     )
-    return {
+    manifest = {
         "schema_version": WORKER_SCHEMA_VERSION,
         "protocol_status": protocol_status,
         "execution_mode": execution_mode,
@@ -168,9 +275,7 @@ def _worker_manifest(
         "pod_id": pod_id,
         "seed_bundle": int(seed),
         "experiment_families": (
-            ["R1-E1-I", "R1-E2", "R1-E3"]
-            if role == "primary"
-            else ["R1-E1-M", "R1-E4", "R1-E5"]
+            ["R1-E1-I", "R1-E2", "R1-E3"] if role == "primary" else ["R1-E1-M", "R1-E4", "R1-E5"]
         ),
         "checkpoint_set": checkpoint_set,
         "heldout_table_set": table_set,
@@ -186,11 +291,45 @@ def _worker_manifest(
         "dependency_output_path": dependency_output_path,
         "receipt_relative_path": f"receipts/{worker_id if role == 'primary' else depends_on}.json",
         "identity_classification": {
-            "cross_instance_same": list(REQUIRED_IDENTITY_FIELDS),
+            "fleet_common": list(
+                TASK8B_FLEET_LOCK_FIELDS
+                if protocol_status in {TASK8B_EXPEDITED_STATUS, "canary/not-for-paper"}
+                else FLEET_COMMON_IDENTITY_FIELDS
+            ),
+            "seed_pod": ["seed_bundle", "schedule_sha256"],
+            "task_specific": ["resolved_config_sha256", "schedule_sha256"],
             "instance_specific": ["worker_id", "host_id", "started_at_utc"],
             "must_be_unique": ["worker_id", "cache_namespace", "output_path"],
         },
     }
+    if protocol_status == TASK8B_EXPEDITED_STATUS:
+        legacy_schedule = manifest["common_identity"].pop("schedule_sha256", None)
+        manifest["common_identity"].pop("resolved_config_sha256", None)
+        manifest["seed_pod_identity"] = seed_pod_identity or {
+            "seed_bundle": int(seed),
+            "schedule_sha256": sha256_json(
+                {
+                    "schema_version": "task8b-seed-pod-schedule-v1",
+                    "seed_bundle": int(seed),
+                    "checkpoint_set": checkpoint_set,
+                    "heldout_table_set": table_set,
+                    "legacy_source_schedule_sha256": legacy_schedule,
+                }
+            ),
+        }
+    if protocol_status == "canary/not-for-paper":
+        manifest["canary_total_hands"] = canary_total_hands
+        if task_configs is not None:
+            manifest["worker_planned_hands"] = sum(
+                int(task.get("planned_hands", 0)) for task in task_configs
+            )
+    if task_configs is not None:
+        manifest["task_configs"] = copy.deepcopy(task_configs)
+    if receipt_identity is not None:
+        manifest["receipt_identity"] = receipt_identity
+    if dependency_receipt_identity is not None:
+        manifest["dependency_receipt_identity"] = dependency_receipt_identity
+    return manifest
 
 
 def validate_worker_manifest_set(
@@ -230,6 +369,85 @@ def validate_worker_manifest_set(
     identities = [sha256_json(item["common_identity"]) for item in manifests]
     if len(set(identities)) != 1:
         raise ConfigError("跨 worker common identity 不一致")
+    for seed, pod in by_seed.items():
+        roles = {str(item["role"]): item for item in pod}
+        pod_identities = [item.get("seed_pod_identity") for item in pod]
+        if any(identity is not None for identity in pod_identities):
+            if not all(isinstance(identity, dict) for identity in pod_identities):
+                raise ConfigError(f"seed {seed} seed-pod identity 不完整")
+            schedule_hashes = {
+                str(identity.get("schedule_sha256", "")) for identity in pod_identities
+            }
+            identity_seeds = {int(identity.get("seed_bundle", -1)) for identity in pod_identities}
+            if len(schedule_hashes) != 1 or "" in schedule_hashes or identity_seeds != {seed}:
+                raise ConfigError(f"seed {seed} seed-pod schedule identity 不匹配")
+        statuses = {str(item["protocol_status"]) for item in pod}
+        if statuses == {"canary/not-for-paper"}:
+            pod_totals = {int(item.get("canary_total_hands", 0)) for item in pod}
+            worker_total = sum(int(item.get("worker_planned_hands", 0)) for item in pod)
+            if len(pod_totals) != 1 or worker_total != next(iter(pod_totals)):
+                raise ConfigError(f"seed {seed} canary P/S planned hands 未闭合")
+        if statuses == {TASK8B_EXPEDITED_STATUS} and {
+            str(item.get("execution_mode")) for item in pod
+        } == {"experiment_configs"}:
+            expected_hands = {"primary": 6750, "secondary": 5100}
+            expected_families = {
+                "primary": {"R1-E1-I", "R1-E2", "R1-E3"},
+                "secondary": {"R1-E1-M", "R1-E4", "R1-E5"},
+            }
+            for role, item in roles.items():
+                tasks = item.get("task_configs")
+                if not isinstance(tasks, list) or not tasks:
+                    raise ConfigError(f"seed {seed} {role} 缺少 executable task_configs")
+                try:
+                    hands = sum(int(task["planned_hands"]) for task in tasks)
+                    covers = {str(family) for task in tasks for family in task.get("covers", [])}
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ConfigError(f"seed {seed} {role} task budget/covers 非法") from exc
+                if hands != expected_hands[role]:
+                    raise ConfigError(
+                        f"seed {seed} {role} planned hands 必须为 {expected_hands[role]}"
+                    )
+                if covers != expected_families[role]:
+                    raise ConfigError(f"seed {seed} {role} frozen family coverage 不闭合")
+                by_task_id = {
+                    str(task.get("task_id", "")): task for task in tasks if isinstance(task, dict)
+                }
+                expected_tasks = TASK8B_FORMAL_TASKS[role]
+                if len(by_task_id) != len(tasks) or set(by_task_id) != set(expected_tasks):
+                    raise ConfigError(f"seed {seed} {role} 精确 task topology 不匹配")
+                for task_id, (task_hands, task_covers) in expected_tasks.items():
+                    task = by_task_id[task_id]
+                    if (
+                        int(task.get("planned_hands", -1)) != task_hands
+                        or {str(value) for value in task.get("covers", [])} != task_covers
+                        or not str(task.get("schedule_sha256", ""))
+                        or task.get("schedule_sha256")
+                        != task.get("expected_identity", {}).get("schedule_sha256")
+                    ):
+                        raise ConfigError(f"seed {seed} {role} task {task_id} freeze 不匹配")
+            schedule_rows = [
+                {
+                    "worker_role": role,
+                    "task_id": str(task["task_id"]),
+                    "schedule_sha256": str(task["expected_identity"]["schedule_sha256"]),
+                }
+                for role in ("primary", "secondary")
+                for task in roles[role]["task_configs"]
+            ]
+            expected_pod_identity = {
+                "seed_bundle": seed,
+                "schedule_sha256": sha256_json(
+                    {
+                        "schema_version": "task8b-seed-pod-schedule-bundle-v1",
+                        "seed_bundle": seed,
+                        "task_schedules": schedule_rows,
+                    }
+                ),
+                "task_schedules": schedule_rows,
+            }
+            if any(item.get("seed_pod_identity") != expected_pod_identity for item in pod):
+                raise ConfigError(f"seed {seed} seed-pod identity 未与 task schedules 绑定")
     _reject_dependency_cycles(manifests)
 
 
@@ -259,7 +477,7 @@ def validate_worker_manifest(
         raise ConfigError("worker role 必须是 primary 或 secondary")
     expected_checkpoints = (
         [1, 3, 5]
-        if str(manifest["protocol_status"]).startswith("mock/")
+        if str(manifest["protocol_status"]).startswith(("mock/", "canary/"))
         else [30, 75, 150, 300]
     )
     if manifest["checkpoint_set"] != expected_checkpoints:
@@ -267,11 +485,48 @@ def validate_worker_manifest(
     if manifest["heldout_table_set"] != ["H01", "H02", "H03"]:
         raise ConfigError("TASK8 worker heldout_table_set 必须为 H01/H02/H03")
     status = str(manifest["protocol_status"])
-    if status.startswith("candidate/") and not allow_candidate:
-        raise ConfigError("candidate/not-frozen manifest 未获运行授权")
+    if status.startswith("candidate/"):
+        if not allow_candidate:
+            raise ConfigError("candidate/not-frozen manifest 未获运行授权")
+    elif status.startswith("mock/"):
+        pass
+    elif status == "canary/not-for-paper":
+        try:
+            canary_total_hands = int(manifest.get("canary_total_hands", 0))
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("canary_total_hands 必须是整数") from exc
+        if not 1 <= canary_total_hands <= 100:
+            raise ConfigError("canary total hands 必须在 1–100")
+        tasks = manifest.get("task_configs")
+        if isinstance(tasks, list) and tasks:
+            try:
+                planned_hands = sum(int(task["planned_hands"]) for task in tasks)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ConfigError("canary task_configs 必须逐项声明 planned_hands") from exc
+            worker_planned = int(manifest.get("worker_planned_hands", planned_hands))
+            if planned_hands != worker_planned or not 1 <= worker_planned <= 100:
+                raise ConfigError("canary worker task planned hands 不一致或超过 100")
+    elif status != TASK8B_EXPEDITED_STATUS:
+        raise ConfigError("仅显式 frozen/expedited-formal-candidate 可获 Formal 准入")
+    if status in {TASK8B_EXPEDITED_STATUS, "canary/not-for-paper"}:
+        missing_lock = [
+            field
+            for field in TASK8B_FLEET_LOCK_FIELDS
+            if not manifest["common_identity"].get(field)
+        ]
+        if missing_lock:
+            raise ConfigError(f"TASK8B fleet lock 缺字段：{', '.join(missing_lock)}")
     _validate_common_identity(
         dict(manifest["common_identity"]), allow_pending=status.startswith("candidate/")
     )
+    seed_pod_identity = manifest.get("seed_pod_identity")
+    if seed_pod_identity is not None:
+        if not isinstance(seed_pod_identity, dict):
+            raise ConfigError("seed_pod_identity 必须是映射")
+        if int(seed_pod_identity.get("seed_bundle", -1)) != int(manifest["seed_bundle"]):
+            raise ConfigError("seed_pod_identity.seed_bundle 不匹配")
+        if not str(seed_pod_identity.get("schedule_sha256", "")).strip():
+            raise ConfigError("seed_pod_identity.schedule_sha256 不能为空")
     instance = manifest["instance_identity"]
     if not isinstance(instance, dict):
         raise ConfigError("instance_identity 必须是映射")
@@ -290,7 +545,30 @@ def validate_worker_manifest(
         tasks = manifest.get("task_configs")
         if not isinstance(tasks, list) or not tasks:
             raise ConfigError("experiment_configs worker 缺少 task_configs")
+        if not status.startswith("mock/"):
+            _validate_receipt_identity(
+                _receipt_identity(manifest, consumer=manifest["role"] == "secondary")
+            )
     return manifest
+
+
+def _receipt_identity(manifest: dict[str, Any], *, consumer: bool = False) -> dict[str, Any]:
+    field = "dependency_receipt_identity" if consumer else "receipt_identity"
+    explicit = manifest.get(field)
+    if explicit is not None:
+        if not isinstance(explicit, dict):
+            raise ConfigError(f"{field} 必须是映射")
+        return dict(explicit)
+    return dict(manifest["common_identity"])
+
+
+def _validate_receipt_identity(identity: dict[str, Any]) -> None:
+    missing = [field for field in REQUIRED_IDENTITY_FIELDS if field not in identity]
+    if missing:
+        raise ConfigError(f"receipt identity 缺字段：{', '.join(missing)}")
+    for field in REQUIRED_IDENTITY_FIELDS:
+        if not str(identity[field]).strip():
+            raise ConfigError(f"receipt identity.{field} 不能为空")
 
 
 def publish_checkpoint_receipt(
@@ -305,7 +583,7 @@ def publish_checkpoint_receipt(
 ) -> dict[str, Any]:
     """Hash every closed checkpoint file before exclusively publishing complete receipt."""
 
-    _validate_common_identity(identity, allow_pending=False)
+    _validate_receipt_identity(identity)
     root = Path(checkpoint_root).resolve()
     if not root.is_dir() or not checkpoint_files:
         raise ConfigError("checkpoint root/files 不完整")
@@ -366,9 +644,7 @@ def verify_checkpoint_receipt(
     rows = receipt["checkpoint_files"]
     if not isinstance(rows, list) or not rows:
         raise ConfigError("checkpoint receipt checkpoint_files 为空")
-    relative_paths = [
-        str(row.get("relative_path", "")) for row in rows if isinstance(row, dict)
-    ]
+    relative_paths = [str(row.get("relative_path", "")) for row in rows if isinstance(row, dict)]
     if len(relative_paths) != len(rows) or len(relative_paths) != len(set(relative_paths)):
         raise ConfigError("checkpoint receipt checkpoint_files 路径重复或非法")
     for row in rows:
@@ -478,7 +754,7 @@ def run_worker_manifest(
         verified_receipt = verify_checkpoint_receipt(
             receipt_path,
             producer_root,
-            expected_identity=dict(manifest["common_identity"]),
+            expected_identity=_receipt_identity(manifest, consumer=True),
             expected_producer_worker_id=producer,
             expected_seed_bundle=int(manifest["seed_bundle"]),
             expected_checkpoint_hand=int(manifest["checkpoint_set"][-1]),
@@ -511,7 +787,7 @@ def run_worker_manifest(
                     producer_worker_id=str(manifest["worker_id"]),
                     seed_bundle=int(manifest["seed_bundle"]),
                     checkpoint_hand=int(manifest["checkpoint_set"][-1]),
-                    identity=dict(manifest["common_identity"]),
+                    identity=_receipt_identity(manifest),
                 )
             else:
                 _write_mock_secondary_branches(run_dir)
@@ -627,29 +903,43 @@ def _run_experiment_tasks(
             experiment["checkpoint_set"] = list(manifest["checkpoint_set"])
         if manifest["role"] == "secondary":
             mode = str(raw_task.get("memory_mode", ""))
-            bindings = raw_task.get("checkpoint_bindings")
-            if mode not in {"Frozen", "Online", "Without"}:
-                raise ConfigError(f"secondary task {task_id} memory_mode 非法")
-            if not isinstance(bindings, dict) or not bindings:
-                raise ConfigError(f"secondary task {task_id} 缺少 checkpoint_bindings")
-            experiment["train_hands"] = 0
-            experiment.pop("checkpoint_set", None)
-            experiment.pop("checkpoint_interval", None)
-            experiment.pop("checkpoint_test_hands_by_checkpoint", None)
-            experiment["initial_checkpoint_hand"] = int(manifest["checkpoint_set"][-1])
-            experiment["memory_mode"] = mode
-            experiment["update_memory_test"] = mode == "Online"
-            resolved_bindings = {}
-            for agent_id, relative in bindings.items():
-                relative_text = str(relative)
-                if relative_text not in allowed_checkpoint_files:
-                    raise ConfigError(
-                        f"secondary task {task_id} 引用了 receipt 外 checkpoint：{relative_text}"
+            dependency_mode = str(raw_task.get("dependency_mode", "checkpoint"))
+            if dependency_mode not in {"checkpoint", "standalone"}:
+                raise ConfigError(f"secondary task {task_id} dependency_mode 非法")
+            if dependency_mode == "standalone":
+                if int(experiment.get("train_hands", 0)) <= 0:
+                    raise ConfigError(f"secondary standalone task {task_id} 必须包含训练")
+                experiment.pop("checkpoint_interval", None)
+                task_checkpoints = list(raw_task.get("checkpoint_set", manifest["checkpoint_set"]))
+                experiment["checkpoint_set"] = task_checkpoints
+                mode = str(raw_task.get("memory_mode", "Frozen"))
+                experiment["memory_mode"] = mode
+                experiment["update_memory_test"] = mode == "Online"
+            else:
+                bindings = raw_task.get("checkpoint_bindings")
+                if mode not in {"Frozen", "Online", "Without"}:
+                    raise ConfigError(f"secondary task {task_id} memory_mode 非法")
+                if not isinstance(bindings, dict) or not bindings:
+                    raise ConfigError(f"secondary task {task_id} 缺少 checkpoint_bindings")
+                experiment["train_hands"] = 0
+                experiment.pop("checkpoint_set", None)
+                experiment.pop("checkpoint_interval", None)
+                experiment.pop("checkpoint_test_hands_by_checkpoint", None)
+                experiment["initial_checkpoint_hand"] = int(manifest["checkpoint_set"][-1])
+                experiment["memory_mode"] = mode
+                experiment["update_memory_test"] = mode == "Online"
+                resolved_bindings = {}
+                for agent_id, relative in bindings.items():
+                    relative_text = str(relative)
+                    if relative_text not in allowed_checkpoint_files:
+                        raise ConfigError(
+                            f"secondary task {task_id} 引用了 receipt 外 checkpoint："
+                            f"{relative_text}"
+                        )
+                    resolved_bindings[str(agent_id)] = str(
+                        _resolve_inside(producer_root, relative_text)
                     )
-                resolved_bindings[str(agent_id)] = str(
-                    _resolve_inside(producer_root, relative_text)
-                )
-            experiment["initial_memory_snapshots"] = resolved_bindings
+                experiment["initial_memory_snapshots"] = resolved_bindings
         child_root = run_dir / "runs"
         child_run = child_root / task_id
         marker_path = run_dir / "task_receipts" / f"{task_id}.json"
@@ -709,10 +999,11 @@ def _run_experiment_tasks(
             and not receipt_published
         ):
             if not str(manifest["protocol_status"]).startswith("mock/"):
+                receipt_identity = _receipt_identity(manifest)
                 for field in REQUIRED_IDENTITY_FIELDS:
-                    if identity_audit[field] != manifest["common_identity"].get(field):
+                    if identity_audit[field] != receipt_identity.get(field):
                         raise ConfigError(
-                            f"checkpoint producer 与 common identity 不匹配：{field}"
+                            f"checkpoint producer 与 receipt identity 不匹配：{field}"
                         )
             files = _primary_checkpoint_files(run_dir, manifest)
             publish_checkpoint_receipt(
@@ -722,7 +1013,7 @@ def _run_experiment_tasks(
                 producer_worker_id=str(manifest["worker_id"]),
                 seed_bundle=int(manifest["seed_bundle"]),
                 checkpoint_hand=int(manifest["checkpoint_set"][-1]),
-                identity=dict(manifest["common_identity"]),
+                identity=_receipt_identity(manifest),
             )
             receipt_published = True
     if manifest["role"] == "primary" and not receipt_published:
@@ -734,7 +1025,7 @@ def _run_experiment_tasks(
             producer_worker_id=str(manifest["worker_id"]),
             seed_bundle=int(manifest["seed_bundle"]),
             checkpoint_hand=int(manifest["checkpoint_set"][-1]),
-            identity=dict(manifest["common_identity"]),
+            identity=_receipt_identity(manifest),
         )
     _write_json_same_or_new(
         run_dir / "task_results.json",
@@ -768,8 +1059,11 @@ def _preflight_experiment_tasks(manifest: dict[str, Any]) -> None:
         config = load_config(config_path)
         experiment = dict(config["experiment"])
         table = dict(config.get("table", {}))
+        dependency_mode = str(raw_task.get("dependency_mode", "checkpoint"))
         if manifest["role"] == "primary" and int(experiment.get("train_hands", 0)) > 0:
             checkpoints = list(manifest["checkpoint_set"])
+        elif manifest["role"] == "secondary" and dependency_mode == "standalone":
+            checkpoints = list(raw_task.get("checkpoint_set", manifest["checkpoint_set"]))
         else:
             checkpoints = [int(manifest["checkpoint_set"][-1])]
         default_hands = int(
@@ -786,9 +1080,7 @@ def _preflight_experiment_tasks(manifest: dict[str, Any]) -> None:
         }
         table_rosters = experiment.get("heldout_table_rosters")
         if experiment.get("heldout_roster_identity"):
-            roster_identity: str | dict[str, str] = str(
-                experiment["heldout_roster_identity"]
-            )
+            roster_identity: str | dict[str, str] = str(experiment["heldout_roster_identity"])
         elif isinstance(table_rosters, dict):
             roster_identity: str | dict[str, str] = {
                 table_id: sha256_json(table_rosters[table_id])
@@ -797,9 +1089,7 @@ def _preflight_experiment_tasks(manifest: dict[str, Any]) -> None:
         else:
             roster_identity = str(
                 experiment.get("heldout_roster_identity")
-                or sha256_json(
-                    config.get("heldout_agent", config.get("opponent_agent", {}))
-                )
+                or sha256_json(config.get("heldout_agent", config.get("opponent_agent", {})))
             )
         schedule = build_heldout_schedule_manifest(
             root_seed=int(manifest["seed_bundle"]),
@@ -1054,9 +1344,7 @@ def _verify_existing_files_manifest(run_dir: Path) -> None:
                 raise ConfigError(f"resume artifact integrity mismatch：{row['relative_path']}")
 
 
-def _verify_completion_receipt(
-    run_dir: Path, *, expected_worker_id: str | None = None
-) -> None:
+def _verify_completion_receipt(run_dir: Path, *, expected_worker_id: str | None = None) -> None:
     completion_path = run_dir / "completion_receipt.json"
     if not completion_path.exists():
         return
@@ -1106,10 +1394,12 @@ def _last_state_and_hash(path: Path) -> tuple[str | None, str | None]:
 
 
 def _validate_common_identity(identity: dict[str, Any], *, allow_pending: bool) -> None:
-    missing = [field for field in REQUIRED_IDENTITY_FIELDS if field not in identity]
+    layered = "schedule_sha256" not in identity
+    required_fields = FLEET_COMMON_IDENTITY_FIELDS if layered else REQUIRED_IDENTITY_FIELDS
+    missing = [field for field in required_fields if field not in identity]
     if missing:
         raise ConfigError(f"common identity 缺字段：{', '.join(missing)}")
-    for field in REQUIRED_IDENTITY_FIELDS:
+    for field in required_fields:
         value = str(identity[field]).strip()
         if not value:
             raise ConfigError(f"common identity.{field} 不能为空")
@@ -1191,9 +1481,7 @@ def _read_json_object(path: Path) -> dict[str, Any]:
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode(
-        "utf-8"
-    )
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
 
 def _write_json_new(path: Path, value: Any) -> None:
