@@ -1,0 +1,24 @@
+extends: task4_real_pilot_base.yaml
+
+agent:
+  mechanism: fact_expr_async
+  retrieval_unit: decision_point_max_v1
+  top_k: 6
+  window_size: 6
+  sweep_every: 2
+  evidence_k: 6
+
+experiment:
+  run_mode: smoke
+  protocol_variant: task4_async_decision_point_metadata_true_service_smoke_not_for_paper
+  seed: 2026072493
+  train_hands: 12
+  test_hands: 4
+  checkpoint_interval: 12
+  checkpoint_test_hands: 4
+  table_size: 4
+  target_agent_id: agent_00
+  evaluate_all_train_agents: false
+  protocol_readiness: not_for_paper_smoke
+  behavior_threshold_status: not_for_paper_smoke
+  statistical_plan_status: not_for_paper_smoke

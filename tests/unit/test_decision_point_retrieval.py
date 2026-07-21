@@ -162,12 +162,25 @@ def test_config_rejects_unknown_retrieval_unit() -> None:
         "configs/experiments/task4_campaign_p_pilot_v8_decision_point.yaml",
         "configs/experiments/task4_campaign_e_pilot_v8_decision_point.yaml",
         "configs/experiments/task4_campaign_p_smoke_v8_decision_point.yaml",
+        "configs/experiments/task4_async_decision_point_smoke.yaml",
     ],
 )
 def test_v8_decision_point_configs_resolve_and_validate(config_path: str) -> None:
     config = load_config(config_path)
 
     assert config["agent"]["retrieval_unit"] == "decision_point_max_v1"
+
+
+def test_async_decision_point_smoke_is_minimal_and_not_for_paper() -> None:
+    config = load_config(
+        "configs/experiments/task4_async_decision_point_smoke.yaml"
+    )
+
+    assert config["agent"]["mechanism"] == "fact_expr_async"
+    assert config["agent"]["embedding_backend"] == "openai_compatible"
+    assert config["experiment"]["train_hands"] == 12
+    assert config["experiment"]["test_hands"] == 4
+    assert config["experiment"]["protocol_readiness"] == "not_for_paper_smoke"
 
 
 @pytest.mark.parametrize(
