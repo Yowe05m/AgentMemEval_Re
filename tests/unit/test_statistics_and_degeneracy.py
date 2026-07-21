@@ -299,3 +299,31 @@ def test_runtime_homogeneity_uses_model_service_cuda_and_vllm() -> None:
     )
     assert audit["homogeneous"] is False
     assert audit["mismatches"] == {"vllm_runtime": ["0.23.1", "0.23.2"]}
+
+
+def test_runtime_homogeneity_ignores_run_local_embedding_cache_namespace() -> None:
+    def manifest(run_id: str) -> dict[str, object]:
+        return {
+            "metadata": {
+                "code": {"commit": "sha", "dirty": False},
+                "gpu": {"devices": [{"name": "gpu", "driver": "1"}]},
+                "model_service_runtime": {
+                    "torch_cuda_version": "12.8",
+                    "vllm_version": "vllm",
+                },
+                "model": {"name": "m", "revision": "r"},
+                "service": {"port": 8000},
+                "embedding": {
+                    "name": "e",
+                    "revision": "r",
+                    "cache_namespace_template": (
+                        f"/campaign/runs/{run_id}/embedding_cache/"
+                        "{agent_id}.json"
+                    ),
+                },
+            }
+        }
+
+    audit = validate_runtime_homogeneity([manifest("run-a"), manifest("run-b")])
+    assert audit["homogeneous"] is True
+    assert audit["formal_aggregation_allowed"] is True

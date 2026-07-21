@@ -272,6 +272,21 @@ def build_gate(
             )
         runtime = _runtime_identity(run_manifest)
         runtime_identities.append(runtime)
+        embedding_metadata = dict(
+            run_manifest.get("metadata", {}).get("embedding", {})
+        )
+        observed_cache_namespace = embedding_metadata.get(
+            "cache_namespace_template"
+        )
+        if observed_cache_namespace is not None:
+            expected_cache_namespace = str(
+                run_dir / "embedding_cache" / "{agent_id}.json"
+            )
+            if str(observed_cache_namespace) != expected_cache_namespace:
+                blockers.append(
+                    f"{row['run_id']} embedding cache namespace mismatch: "
+                    f"{observed_cache_namespace}/{expected_cache_namespace}"
+                )
         observed_code = dict(runtime.get("code", {})).get("commit")
         if str(observed_code) != expected_code_sha:
             blockers.append(
@@ -608,6 +623,8 @@ def _safe_int(value: Any) -> int | None:
 
 def _runtime_identity(manifest: dict[str, Any]) -> dict[str, Any]:
     metadata = manifest.get("metadata", {})
+    embedding = dict(metadata.get("embedding", {}))
+    embedding.pop("cache_namespace_template", None)
     return {
         "code": metadata.get("code", {}),
         "gpu": metadata.get("gpu", {}),
@@ -617,7 +634,7 @@ def _runtime_identity(manifest: dict[str, Any]) -> dict[str, Any]:
             metadata.get("service", {}), ensure_ascii=False, sort_keys=True
         ),
         "embedding": json.dumps(
-            metadata.get("embedding", {}), ensure_ascii=False, sort_keys=True
+            embedding, ensure_ascii=False, sort_keys=True
         ),
         "prompts": metadata.get("prompts", {}),
     }

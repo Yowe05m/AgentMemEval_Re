@@ -244,6 +244,13 @@ def aggregate_table_run_units(
 def validate_runtime_homogeneity(manifests: list[dict[str, Any]]) -> dict[str, Any]:
     """Compare hardware and service identities before any cross-run formal aggregation."""
 
+    def embedding_identity(item: dict[str, Any]) -> str:
+        embedding = dict(item.get("metadata", {}).get("embedding", {}))
+        # This namespace must be run-local to prevent cache leakage. Its absolute
+        # run directory therefore differs by design and is not a runtime drift.
+        embedding.pop("cache_namespace_template", None)
+        return repr(embedding)
+
     fields = {
         "code": lambda item: tuple(
             sorted(item.get("metadata", {}).get("code", {}).items())
@@ -267,9 +274,7 @@ def validate_runtime_homogeneity(manifests: list[dict[str, Any]]) -> dict[str, A
             sorted(item.get("metadata", {}).get("model", {}).items())
         ),
         "service": lambda item: repr(item.get("metadata", {}).get("service", {})),
-        "embedding": lambda item: repr(
-            item.get("metadata", {}).get("embedding", {})
-        ),
+        "embedding": embedding_identity,
         "prompts": lambda item: tuple(
             sorted(item.get("metadata", {}).get("prompts", {}).items())
         ),

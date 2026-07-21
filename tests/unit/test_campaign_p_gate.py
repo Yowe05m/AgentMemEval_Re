@@ -158,7 +158,13 @@ def _campaign(
                     "provider": "openai_compatible",
                     "service_startup_parameters": {"max_model_len": 16384},
                 },
-                "embedding": {"name": "embedding", "revision": "revision"},
+                "embedding": {
+                    "name": "embedding",
+                    "revision": "revision",
+                    "cache_namespace_template": str(
+                        run_dir / "embedding_cache" / "{agent_id}.json"
+                    ),
+                },
                 "prompts": {
                     "decision_version": "version",
                     "decision_system_sha256": "decision-hash",
@@ -273,6 +279,36 @@ def test_campaign_p_gate_accepts_complete_clean_homogeneous_evidence(
     assert (
         audit["observed_runtime_homogeneity_sha256"]
         == audit["rebuilt_runtime_homogeneity_sha256"]
+    )
+
+
+def test_campaign_p_gate_rejects_noncanonical_embedding_cache_namespace(
+    tmp_path: Path,
+) -> None:
+    campaign, aggregate = _campaign(tmp_path)
+    manifest_path = campaign / "runs" / "mixed__s2__a01" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["metadata"]["embedding"]["cache_namespace_template"] = (
+        "/shared/embedding_cache/{agent_id}.json"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    audit = _gate_module().build_gate(
+        campaign,
+        aggregate_path=aggregate,
+        expected_code_sha="expected-sha",
+        expected_max_model_len=16384,
+        expected_prompts={
+            "decision_version": "version",
+            "decision_system_sha256": "decision-hash",
+            "experience_update_sha256": "experience-hash",
+        },
+    )
+
+    assert audit["status"] == "no_go"
+    assert any(
+        "embedding cache namespace mismatch" in blocker
+        for blocker in audit["blockers"]
     )
 
 
@@ -610,6 +646,9 @@ def _copy_attempt(campaign: Path, *, seed: int, attempt: int) -> Path:
     manifest["run_id"] = run_id
     manifest["output_dir"] = str(destination)
     manifest["config_snapshot_path"] = str(destination / "resolved_config.yaml")
+    manifest["metadata"]["embedding"]["cache_namespace_template"] = str(
+        destination / "embedding_cache" / "{agent_id}.json"
+    )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     config_path = destination / "resolved_config.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
