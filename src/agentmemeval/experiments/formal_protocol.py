@@ -30,6 +30,15 @@ def sha256_json(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def task8b_embedding_fingerprint(embedding_metadata: Any) -> str:
+    """Hash fleet-common embedding identity without its task-local cache path."""
+
+    normalized = copy.deepcopy(embedding_metadata)
+    if isinstance(normalized, dict):
+        normalized.pop("cache_namespace_template", None)
+    return sha256_json(normalized)
+
+
 def derive_formal_hand_seed(
     root_seed: int,
     phase: str,

@@ -19,6 +19,7 @@ from agentmemeval.experiments.formal_protocol import (
     build_heldout_schedule_manifest,
     clone_memory_branches,
     sha256_json,
+    task8b_embedding_fingerprint,
 )
 
 WORKER_SCHEMA_VERSION = "task8-worker-manifest-v1"
@@ -1139,7 +1140,9 @@ def _verify_completed_task_identity(
         "resolved_config_sha256": sha256_json(_semantic_config(config)),
         "prompt_sha256": sha256_json(metadata.get("prompts", {})),
         "model_fingerprint": sha256_json(metadata.get("model", {})),
-        "embedding_fingerprint": sha256_json(metadata.get("embedding", {})),
+        "embedding_fingerprint": task8b_embedding_fingerprint(
+            metadata.get("embedding", {})
+        ),
         "schedule_sha256": schedule.get("schedule_sha256"),
     }
     if not str(manifest["protocol_status"]).startswith("mock/"):

@@ -22,6 +22,7 @@ from agentmemeval.evaluation.pilot import (
 from agentmemeval.evaluation.reporting import rebuild_report
 from agentmemeval.evaluation.task8b_analysis import (
     build_task8b_analysis_input,
+    build_task8b_preunlock_manifest,
     run_task8b_analysis,
 )
 from agentmemeval.experiments.campaign import aggregate_campaign, run_campaign
@@ -84,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
             return _task8b_archive_worker(args)
         if args.command == "task8b-analyze":
             return _task8b_analyze(args)
+        if args.command == "task8b-freeze-phase-f":
+            return _task8b_freeze_phase_f(args)
         if args.command == "task8b-build-analysis-input":
             return _task8b_build_analysis_input(args)
         if args.command == "report":
@@ -228,11 +231,20 @@ def build_parser() -> argparse.ArgumentParser:
     task8b_analysis.add_argument("--input-manifest", required=True)
     task8b_analysis.add_argument("--exclusion-ledger", required=True)
     task8b_analysis.add_argument("--output-dir", required=True)
+    task8b_freeze = sub.add_parser(
+        "task8b-freeze-phase-f", help="在正式结果揭盲前冻结 Phase F 文件、代码和依赖锁"
+    )
+    task8b_freeze.add_argument("--phase-f-dir", required=True)
+    task8b_freeze.add_argument("--dependency-lock", required=True)
+    task8b_freeze.add_argument("--output", required=True)
+    task8b_freeze.add_argument("--repository-root")
+    task8b_freeze.add_argument("--frozen-at-utc")
     task8b_analysis_input = sub.add_parser(
         "task8b-build-analysis-input", help="从冻结 manifests 与本地回收 attempts 构建 Phase F 输入"
     )
     task8b_analysis_input.add_argument("--worker-manifest-dir", required=True)
     task8b_analysis_input.add_argument("--snapshot-root", required=True)
+    task8b_analysis_input.add_argument("--pre-unlock-manifest", required=True)
     task8b_analysis_input.add_argument("--output", required=True)
     report = sub.add_parser("report", help="从 run 目录重建报告")
     report.add_argument("--input", required=True, help="outputs/<run_id> 目录")
@@ -451,11 +463,24 @@ def _task8b_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _task8b_freeze_phase_f(args: argparse.Namespace) -> int:
+    result = build_task8b_preunlock_manifest(
+        args.phase_f_dir,
+        args.dependency_lock,
+        args.output,
+        repository_root=args.repository_root,
+        frozen_at_utc=args.frozen_at_utc,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _task8b_build_analysis_input(args: argparse.Namespace) -> int:
     result = build_task8b_analysis_input(
         args.worker_manifest_dir,
         args.snapshot_root,
         args.output,
+        args.pre_unlock_manifest,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

@@ -8,6 +8,7 @@ import hashlib
 import json
 import platform
 import re
+import subprocess
 from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
@@ -93,11 +94,190 @@ LINEAGE_FIELDS = (
     "display_value",
 )
 
+PHASE_F_REQUIRED_FILES = (
+    "README.md",
+    "analysis_contract.md",
+    "analysis_manifest_template.json",
+    "data_lineage.schema.json",
+    "data_lineage_template.csv",
+    "exclusion_ledger_template.csv",
+    "figure_specifications.md",
+    "independent_review_report_template.md",
+    "phase_f_generation_record.md",
+    "pre_unlock_manifest_template.json",
+    "table_field_dictionary.md",
+    "table_templates/table1_protocol_identity.csv",
+    "table_templates/table2_core_adaptation_generalization.csv",
+    "table_templates/table3_checkpoint_scan.csv",
+    "table_templates/table4_frozen_online_without.csv",
+    "table_templates/table5_behavior_robustness.csv",
+)
+PHASE_F_ANALYSIS_CODE_FILES = (
+    "src/agentmemeval/evaluation/task8b_analysis.py",
+    "configs/formal/task8b_phase_f_contract.json",
+)
+DEPENDENCY_LOCK_NAMES = {"uv.lock", "poetry.lock", "pdm.lock", "pipfile.lock"}
+
+
+def build_task8b_preunlock_manifest(
+    phase_f_dir: str | Path,
+    dependency_lock_path: str | Path,
+    output_path: str | Path,
+    *,
+    repository_root: str | Path | None = None,
+    frozen_at_utc: str | None = None,
+) -> dict[str, Any]:
+    """Freeze Phase F files and code identity without loading any Formal result."""
+
+    phase_root = Path(phase_f_dir).resolve()
+    dependency_lock = Path(dependency_lock_path).resolve()
+    destination = Path(output_path).absolute()
+    repo = (
+        Path(repository_root).resolve()
+        if repository_root is not None
+        else Path(__file__).parents[3].resolve()
+    )
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(destination)
+    if not phase_root.is_dir():
+        raise ConfigError(f"Phase F 冻结目录不存在：{phase_root}")
+    missing = [name for name in PHASE_F_REQUIRED_FILES if not (phase_root / name).is_file()]
+    if missing:
+        raise ConfigError(f"Phase F 冻结文件不完整：{','.join(missing)}")
+    lock_name = dependency_lock.name.lower()
+    if not dependency_lock.is_file() or (
+        lock_name not in DEPENDENCY_LOCK_NAMES and dependency_lock.suffix.lower() != ".lock"
+    ):
+        raise ConfigError(
+            "Phase F F0 要求真实依赖锁文件（uv/poetry/pdm/Pipfile 或 .lock）；"
+            "pyproject.toml/requirements.txt 不得冒充 dependency lock"
+        )
+    frozen_at = frozen_at_utc or dt.datetime.now(dt.timezone.utc).isoformat()
+    try:
+        parsed_frozen_at = dt.datetime.fromisoformat(frozen_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ConfigError("frozen_at_utc 必须为带时区 ISO-8601") from exc
+    if parsed_frozen_at.tzinfo is None:
+        raise ConfigError("frozen_at_utc 必须为带时区 ISO-8601")
+    analysis_code_sha = _git_clean_head(repo)
+    code_files = []
+    for relative_path in PHASE_F_ANALYSIS_CODE_FILES:
+        path = repo / relative_path
+        if not path.is_file():
+            raise ConfigError(f"Phase F analysis code file 缺失：{relative_path}")
+        code_files.append(
+            {
+                "relative_path": relative_path,
+                "size": path.stat().st_size,
+                "sha256": _sha256(path),
+            }
+        )
+    phase_files = [
+        {
+            "relative_path": path.relative_to(phase_root).as_posix(),
+            "size": path.stat().st_size,
+            "sha256": _sha256(path),
+        }
+        for path in sorted(phase_root.rglob("*"))
+        if path.is_file() and path.resolve() != destination.resolve()
+    ]
+    payload = {
+        "schema_version": "task8b-phase-f-pre-unlock-v1",
+        "analysis_contract_id": "task8b-phase-f-v1",
+        "manifest_status": "FROZEN_BEFORE_FORMAL_RESULT",
+        "frozen_at_utc": frozen_at,
+        "formal_result_loaded": False,
+        "analysis_code_sha": analysis_code_sha,
+        "analysis_code_dirty": False,
+        "analysis_code_files": code_files,
+        "dependency_lock": {
+            "name": dependency_lock.name,
+            "size": dependency_lock.stat().st_size,
+            "sha256": _sha256(dependency_lock),
+            "verified_real_lock": True,
+        },
+        "phase_f_files": phase_files,
+    }
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _write_bytes_new(destination, _json_bytes(payload))
+    return payload
+
+
+def _git_clean_head(repository_root: Path) -> str:
+    if not (repository_root / ".git").exists():
+        raise ConfigError(f"Phase F repository 不是 Git worktree：{repository_root}")
+    base = ["git", "-c", f"safe.directory={repository_root.as_posix()}"]
+    head = subprocess.run(
+        [*base, "rev-parse", "HEAD"],
+        cwd=repository_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if head.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", head.stdout.strip()):
+        raise ConfigError("Phase F 无法取得完整 canonical Git SHA")
+    status = subprocess.run(
+        [*base, "status", "--porcelain=v1", "--untracked-files=no"],
+        cwd=repository_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if status.returncode != 0 or status.stdout.strip():
+        raise ConfigError("Phase F analysis repository 必须 tracked clean")
+    return head.stdout.strip()
+
+
+def _validate_preunlock_manifest(path: Path) -> dict[str, Any]:
+    value = _read_json(path)
+    if (
+        value.get("schema_version") != "task8b-phase-f-pre-unlock-v1"
+        or value.get("analysis_contract_id") != "task8b-phase-f-v1"
+        or value.get("manifest_status") != "FROZEN_BEFORE_FORMAL_RESULT"
+        or value.get("formal_result_loaded") is not False
+        or value.get("analysis_code_dirty") is not False
+        or not re.fullmatch(r"[0-9a-f]{40}", str(value.get("analysis_code_sha", "")))
+    ):
+        raise ConfigError("Phase F pre-unlock manifest 未满足揭盲前冻结门禁")
+    dependency_lock = value.get("dependency_lock")
+    if (
+        not isinstance(dependency_lock, dict)
+        or dependency_lock.get("verified_real_lock") is not True
+    ):
+        raise ConfigError("Phase F pre-unlock manifest 缺真实 dependency lock 证明")
+    lock_name = str(dependency_lock.get("name", "")).lower()
+    if lock_name not in DEPENDENCY_LOCK_NAMES and Path(lock_name).suffix != ".lock":
+        raise ConfigError("Phase F pre-unlock manifest dependency lock 类型非法")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(dependency_lock.get("sha256", ""))):
+        raise ConfigError("Phase F dependency lock SHA-256 非法")
+    phase_files = value.get("phase_f_files")
+    code_files = value.get("analysis_code_files")
+    if not isinstance(phase_files, list) or not phase_files:
+        raise ConfigError("Phase F pre-unlock manifest 缺文件 SHA 清单")
+    phase_paths = {
+        str(row.get("relative_path", "")) for row in phase_files if isinstance(row, dict)
+    }
+    if not set(PHASE_F_REQUIRED_FILES).issubset(phase_paths):
+        raise ConfigError("Phase F pre-unlock manifest 必需文件 SHA 清单不完整")
+    if not isinstance(code_files, list) or {
+        str(row.get("relative_path", "")) for row in code_files if isinstance(row, dict)
+    } != set(PHASE_F_ANALYSIS_CODE_FILES):
+        raise ConfigError("Phase F pre-unlock manifest analysis code SHA 清单不完整")
+    for row in [*phase_files, *code_files]:
+        if not isinstance(row, dict) or not re.fullmatch(
+            r"[0-9a-f]{64}", str(row.get("sha256", ""))
+        ):
+            raise ConfigError("Phase F pre-unlock manifest 文件 SHA-256 非法")
+    return value
+
 
 def build_task8b_analysis_input(
     worker_manifest_dir: str | Path,
     snapshot_root: str | Path,
     output_path: str | Path,
+    pre_unlock_manifest_path: str | Path,
 ) -> dict[str, Any]:
     """Build the formal Phase F input manifest from frozen manifests and recovered attempts."""
 
@@ -117,6 +297,12 @@ def build_task8b_analysis_input(
     expected_worker_ids = {f"{role}{index:02d}" for role in ("P", "S") for index in range(1, 13)}
     if {str(row.get("worker_id", "")) for row in worker_manifests} != expected_worker_ids:
         raise ConfigError("Phase F input builder worker IDs 必须为 P01-P12/S01-S12")
+    pre_unlock_path = Path(pre_unlock_manifest_path).resolve()
+    pre_unlock = _validate_preunlock_manifest(pre_unlock_path)
+    if {
+        str(row.get("common_identity", {}).get("code_sha", "")) for row in worker_manifests
+    } != {str(pre_unlock["analysis_code_sha"])}:
+        raise ConfigError("Phase F pre-unlock analysis code SHA 与 worker canonical SHA 不一致")
     workers = []
     for manifest in sorted(worker_manifests, key=lambda row: str(row["worker_id"])):
         worker_id = str(manifest["worker_id"])
@@ -156,9 +342,7 @@ def build_task8b_analysis_input(
         "input_snapshot_id": _sha256(manifest_dir / "manifest_index.json"),
         "unlocked_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "unlocked_by": "task8b-build-analysis-input",
-        "pre_unlock_manifest_sha256": _sha256(
-            Path(__file__).parents[3] / "configs" / "formal" / "task8b_phase_f_contract.json"
-        ),
+        "pre_unlock_manifest_sha256": _sha256(pre_unlock_path),
         "workers": workers,
     }
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -323,7 +507,7 @@ def run_task8b_analysis(
                 "statistical_unit": "seed",
                 "n_planned": 12,
                 "n_effective": n_effective,
-                "verification_status": "SOURCE_VERIFIED",
+                "verification_status": "VERIFIED",
             }
         )
     _write_csv(destination / "selected_attempts.csv", selected_rows)

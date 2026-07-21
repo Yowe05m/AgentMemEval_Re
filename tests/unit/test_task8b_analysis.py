@@ -10,8 +10,11 @@ from typing import Any
 import pytest
 
 from agentmemeval.core.errors import ConfigError
+from agentmemeval.evaluation import task8b_analysis as task8b_analysis_module
 from agentmemeval.evaluation.task8b_analysis import (
+    PHASE_F_REQUIRED_FILES,
     build_task8b_analysis_input,
+    build_task8b_preunlock_manifest,
     run_task8b_analysis,
 )
 
@@ -69,7 +72,81 @@ def test_phase_f_input_builder_explicitly_rejects_canary_protocol(
             manifests,
             tmp_path / "snapshots",
             tmp_path / "phase-f-input.json",
+            tmp_path / "pre-unlock.json",
         )
+
+
+def _write_phase_f_files(root: Path) -> None:
+    for relative_path in PHASE_F_REQUIRED_FILES:
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"frozen:{relative_path}\n", encoding="utf-8", newline="")
+
+
+def test_phase_f_preunlock_manifest_rejects_pyproject_as_dependency_lock(
+    tmp_path: Path,
+) -> None:
+    phase_f = tmp_path / "phase_f"
+    _write_phase_f_files(phase_f)
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\nname='not-a-lock'\n", encoding="utf-8", newline="")
+
+    with pytest.raises(ConfigError, match="真实依赖锁文件"):
+        build_task8b_preunlock_manifest(
+            phase_f,
+            pyproject,
+            tmp_path / "pre-unlock.json",
+            repository_root=tmp_path / "repo",
+            frozen_at_utc="2026-07-22T00:00:00+00:00",
+        )
+
+
+def test_phase_f_preunlock_manifest_hashes_files_code_and_real_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    phase_f = tmp_path / "phase_f"
+    repo = tmp_path / "repo"
+    _write_phase_f_files(phase_f)
+    for relative_path in task8b_analysis_module.PHASE_F_ANALYSIS_CODE_FILES:
+        path = repo / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"code:{relative_path}\n", encoding="utf-8", newline="")
+    lock = repo / "uv.lock"
+    lock.write_text("version = 1\n", encoding="utf-8", newline="")
+    monkeypatch.setattr(
+        task8b_analysis_module,
+        "_git_clean_head",
+        lambda _repo: "a" * 40,
+    )
+
+    preunlock_path = tmp_path / "pre-unlock.json"
+    payload = build_task8b_preunlock_manifest(
+        phase_f,
+        lock,
+        preunlock_path,
+        repository_root=repo,
+        frozen_at_utc="2026-07-22T00:00:00+00:00",
+    )
+
+    assert payload["formal_result_loaded"] is False
+    assert payload["analysis_code_dirty"] is False
+    assert payload["analysis_code_sha"] == "a" * 40
+    assert payload["dependency_lock"]["verified_real_lock"] is True
+    assert payload["dependency_lock"]["sha256"] == _sha256(lock)
+    assert {row["relative_path"] for row in payload["phase_f_files"]} == set(
+        PHASE_F_REQUIRED_FILES
+    )
+    assert {row["relative_path"] for row in payload["analysis_code_files"]} == set(
+        task8b_analysis_module.PHASE_F_ANALYSIS_CODE_FILES
+    )
+    assert task8b_analysis_module._validate_preunlock_manifest(preunlock_path) == payload
+
+    payload["formal_result_loaded"] = True
+    tampered = tmp_path / "pre-unlock-tampered.json"
+    _write_json(tampered, payload)
+    with pytest.raises(ConfigError, match="揭盲前冻结门禁"):
+        task8b_analysis_module._validate_preunlock_manifest(tampered)
 
 
 def _metric_records() -> list[dict[str, object]]:
@@ -504,7 +581,8 @@ def test_phase_f_lineage_and_inference_outputs_cover_frozen_schema(tmp_path: Pat
     run_task8b_analysis(manifest, ledger, output)
 
     with (output / "data_lineage.csv").open("r", encoding="utf-8", newline="") as handle:
-        lineage_fields = set(next(csv.reader(handle)))
+        lineage_rows = list(csv.DictReader(handle))
+    lineage_fields = set(lineage_rows[0])
     assert {
         "analysis_contract_id",
         "analysis_code_sha",
@@ -523,6 +601,9 @@ def test_phase_f_lineage_and_inference_outputs_cover_frozen_schema(tmp_path: Pat
         "exclusion_ledger_sha256",
         "verification_status",
     }.issubset(lineage_fields)
+    lineage_statuses = {row["verification_status"] for row in lineage_rows}
+    assert lineage_statuses <= {"UNVERIFIED", "VERIFIED", "REJECTED"}
+    assert "VERIFIED" in lineage_statuses
     with (output / "primary_inference.csv").open("r", encoding="utf-8", newline="") as handle:
         inference_fields = set(next(csv.reader(handle)))
     assert {

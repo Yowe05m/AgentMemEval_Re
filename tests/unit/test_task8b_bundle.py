@@ -11,7 +11,11 @@ from agentmemeval.evaluation.aggregation import (
 )
 from agentmemeval.evaluation.runtime_lock import runtime_identity_from_metadata
 from agentmemeval.experiments.admission import _runtime_lock_blockers
-from agentmemeval.experiments.formal_protocol import sha256_json
+from agentmemeval.experiments.formal_protocol import (
+    sha256_json,
+    task8b_embedding_fingerprint,
+)
+from agentmemeval.experiments.formal_runner import _verify_completed_task_identity
 from agentmemeval.experiments.task8b_bundle import build_task8b_executable_bundle
 from tests.unit.test_formal_freeze import _runtime_manifest
 
@@ -48,6 +52,93 @@ def _matrix(path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def test_task8b_embedding_fingerprint_excludes_only_task_local_namespace() -> None:
+    common = {
+        "backend": "sentence_transformers",
+        "name": "BAAI/bge-m3",
+        "revision": "frozen-revision",
+        "weights_hash": "a" * 64,
+        "cache_schema_version": "task8b-v1",
+        "service_startup_parameters": {"device": "cuda", "batch_size": 32},
+    }
+    primary = {
+        **common,
+        "cache_namespace_template": "task8b/P01/isolation_async/{agent_id}",
+    }
+    secondary = {
+        **common,
+        "cache_namespace_template": "task8b/S01/async_online/{agent_id}",
+    }
+
+    assert task8b_embedding_fingerprint(primary) == task8b_embedding_fingerprint(
+        secondary
+    )
+    assert task8b_embedding_fingerprint(primary) != task8b_embedding_fingerprint(
+        {**secondary, "revision": "drifted-revision"}
+    )
+
+
+def test_completed_primary_and_secondary_tasks_accept_distinct_cache_namespaces(
+    tmp_path: Path,
+) -> None:
+    config = {"experiment": {}, "agent": {}}
+    prompts = {"decision_version": "task8b-v1"}
+    model = {"name": "Qwen/Qwen3.5-9B", "revision": "frozen-revision"}
+    embedding = {
+        "backend": "sentence_transformers",
+        "name": "BAAI/bge-m3",
+        "revision": "frozen-revision",
+        "weights_hash": "a" * 64,
+    }
+    schedule_sha256 = "b" * 64
+    expected = {
+        "code_sha": "c" * 40,
+        "code_dirty": False,
+        "resolved_config_sha256": sha256_json(config),
+        "prompt_sha256": sha256_json(prompts),
+        "model_fingerprint": sha256_json(model),
+        "embedding_fingerprint": task8b_embedding_fingerprint(embedding),
+        "schedule_sha256": schedule_sha256,
+    }
+
+    actual_fingerprints = []
+    for worker_id, namespace in (
+        ("P01", "task8b/P01/isolation_async/{agent_id}"),
+        ("S01", "task8b/S01/async_online/{agent_id}"),
+    ):
+        child_run = tmp_path / worker_id
+        child_run.mkdir()
+        (child_run / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "metadata": {
+                        "code": {"commit": expected["code_sha"], "dirty": False},
+                        "prompts": prompts,
+                        "model": model,
+                        "embedding": {
+                            **embedding,
+                            "cache_namespace_template": namespace,
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        (child_run / "schedule_manifest.json").write_text(
+            json.dumps({"schedule_sha256": schedule_sha256}),
+            encoding="utf-8",
+        )
+        actual = _verify_completed_task_identity(
+            manifest={"protocol_status": "frozen/expedited-formal-candidate"},
+            raw_task={"task_id": f"task-{worker_id}", "expected_identity": expected},
+            config=config,
+            child_run=child_run,
+        )
+        actual_fingerprints.append(actual["embedding_fingerprint"])
+
+    assert actual_fingerprints == [expected["embedding_fingerprint"]] * 2
 
 
 def test_task8b_runtime_driver_is_informational_but_required_for_health_audit() -> None:
