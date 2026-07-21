@@ -48,6 +48,7 @@ def build_memory(
     retrieval_backend = str(config.get("retrieval_backend", "hybrid_rag"))
     raw_minimum_score = config.get("minimum_retrieval_score")
     fact_options = {
+        "retrieval_unit": str(config.get("retrieval_unit", "hand_terminal_v1")),
         "minimum_retrieval_score": (
             None if raw_minimum_score is None else float(raw_minimum_score)
         ),

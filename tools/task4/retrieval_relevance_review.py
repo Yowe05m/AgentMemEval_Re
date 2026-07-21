@@ -22,6 +22,7 @@ def main() -> int:
     build.add_argument("--output-dir", required=True)
     build.add_argument("--sample-size", type=int, default=240)
     build.add_argument("--sample-seed", type=int, default=20260717)
+    build.add_argument("--review-schema-version", choices=("v1", "v2"), default="v1")
     audit = sub.add_parser("audit")
     audit.add_argument("--review-key", required=True)
     audit.add_argument("--labels", required=True)
@@ -29,7 +30,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "build":
         pack = build_relevance_review_pack(
-            args.campaign_dir, sample_size=args.sample_size, sample_seed=args.sample_seed
+            args.campaign_dir,
+            sample_size=args.sample_size,
+            sample_seed=args.sample_seed,
+            review_schema_version=args.review_schema_version,
         )
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=False)

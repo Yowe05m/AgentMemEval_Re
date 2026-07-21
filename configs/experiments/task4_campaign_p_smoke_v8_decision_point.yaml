@@ -1,0 +1,13 @@
+extends: task4_campaign_p_pilot_v8_decision_point.yaml
+
+experiment:
+  run_mode: smoke
+  protocol_variant: true_service_smoke_campaign_p_decision_point_max_v1_not_for_paper
+  seed: 2026072491
+  train_hands: 20
+  test_hands: 10
+  checkpoint_interval: 20
+  checkpoint_test_hands: 10
+  protocol_readiness: not_for_paper_smoke
+  behavior_threshold_status: not_for_paper_smoke
+  statistical_plan_status: not_for_paper_smoke

@@ -66,6 +66,9 @@ def _campaign(
                                 "semantic": score,
                                 "feature": 0.0,
                                 "salience": 1.0,
+                                "retrieval_unit": "decision_point_max_v1",
+                                "matched_decision_index": 0,
+                                "matched_phase": "flop",
                             }
                         ],
                     },
@@ -81,6 +84,21 @@ def _campaign(
                             "action_summary": "call",
                             "features": ["phase:flop"],
                             "final_reward": 999,
+                            "source": {
+                                "decisions": [
+                                    {
+                                        "phase": "flop",
+                                        "board": ["2c", "3d", "4h"],
+                                        "hole": ["As", "Ad"],
+                                        "pot_before": 10,
+                                        "to_call": 2,
+                                        "action_type": "call",
+                                        "retrieval_query": "query decision point",
+                                        "features": ["phase:flop", "to_call:small"],
+                                        "fallback_used": False,
+                                    }
+                                ]
+                            },
                         }
                     ],
                 },
@@ -110,6 +128,37 @@ def test_build_relevance_review_pack_is_deterministic_and_score_blind(tmp_path: 
     assert "showdown_visible_agent_ids" not in blind_state
     assert first["keyed_rows"][0]["record"]["state_summary"].find("hand_outcome") >= 0
     assert "score" in first["keyed_rows"][0]
+
+
+def test_v2_blind_review_exposes_matched_decision_without_score_or_outcome(
+    tmp_path: Path,
+) -> None:
+    campaigns = [
+        _campaign(tmp_path, "pilot-p", "mixed_table"),
+        _campaign(tmp_path, "pilot-e", "target_vs_seven_no_memory"),
+    ]
+
+    pack = build_relevance_review_pack(
+        campaigns,
+        sample_size=3,
+        sample_seed=7,
+        review_schema_version="v2",
+    )
+
+    assert pack["schema_version"] == "task4_retrieval_relevance_review_pack_v2"
+    blind = pack["blind_rows"][0]
+    assert blind["retrieval_unit"] == "decision_point_max_v1"
+    assert blind["matched_phase"] == "flop"
+    assert blind["matched_decision"]["retrieval_query"] == "query decision point"
+    assert "fallback_used" not in blind["matched_decision"]
+    assert "score" not in blind
+    assert "final_reward" not in blind["record"]
+
+    audit = audit_relevance_labels(pack, [])
+    assert audit["review_pack_schema_version"] == (
+        "task4_retrieval_relevance_review_pack_v2"
+    )
+    assert audit["source_rebuild_verified"] is True
 
 
 def _audit_pack(rows: list[dict[str, object]]) -> dict[str, object]:

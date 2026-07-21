@@ -1,0 +1,7 @@
+extends: task4_campaign_e_pilot.yaml
+
+agent:
+  retrieval_unit: decision_point_max_v1
+
+experiment:
+  protocol_variant: calibration_pilot_for_campaign_e_decision_point_max_v1

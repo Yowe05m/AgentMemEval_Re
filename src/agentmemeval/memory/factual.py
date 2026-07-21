@@ -55,6 +55,7 @@ class FactualMemory:
         top_k: int = 8,
         max_records: int = 500,
         retrieval_backend: str = "hybrid_rag",
+        retrieval_unit: str = "hand_terminal_v1",
         semantic_weight: float = 0.65,
         feature_weight: float = 0.35,
         embedding_backend: EmbeddingBackend | None = None,
@@ -84,6 +85,9 @@ class FactualMemory:
         self.top_k = top_k
         self.max_records = max_records
         self.retrieval_backend = retrieval_backend
+        if retrieval_unit not in {"hand_terminal_v1", "decision_point_max_v1"}:
+            raise ValueError(f"未知 retrieval_unit：{retrieval_unit}")
+        self.retrieval_unit = retrieval_unit
         self.semantic_weight = semantic_weight
         self.feature_weight = feature_weight
         self.embedding_backend = embedding_backend or HashEmbeddingBackend()
@@ -152,6 +156,7 @@ class FactualMemory:
                 semantic_weight=self.semantic_weight,
                 feature_weight=self.feature_weight,
                 embedding_backend=self.embedding_backend,
+                retrieval_unit=self.retrieval_unit,
             )
             selected_rag, below_threshold, duplicate_excluded = self._select_diverse_records(
                 [(item.record, item.score, item) for item in scored_rag]
@@ -168,6 +173,9 @@ class FactualMemory:
                     "colbert": item.colbert,
                     "feature": item.feature,
                     "salience": item.salience,
+                    "retrieval_unit": item.retrieval_unit,
+                    "matched_decision_index": item.matched_decision_index,
+                    "matched_phase": item.matched_phase,
                 }
                 for _record, _score, item in selected_rag
             ]
@@ -194,6 +202,7 @@ class FactualMemory:
                 "mechanism": self.name,
                 "scope": self.scope,
                 "retrieval_backend": self.retrieval_backend,
+                "retrieval_unit": self.retrieval_unit,
                 "query": build_retrieval_query(observation),
                 "retrieved_fact_ids": list(self.last_retrieval),
                 "retrieval_scores": list(self.last_scores),
@@ -389,10 +398,11 @@ class FactualMemory:
             agent_id=self.agent_id,
             scope=self.scope,
             payload={
-                "schema_version": 5,
+                "schema_version": 6,
                 "top_k": self.top_k,
                 "max_records": self.max_records,
                 "retrieval_backend": self.retrieval_backend,
+                "retrieval_unit": self.retrieval_unit,
                 "semantic_weight": self.semantic_weight,
                 "feature_weight": self.feature_weight,
                 "minimum_retrieval_score": self.minimum_retrieval_score,
@@ -433,6 +443,11 @@ class FactualMemory:
         self.retrieval_backend = str(
             snapshot.payload.get("retrieval_backend", self.retrieval_backend)
         )
+        self.retrieval_unit = str(
+            snapshot.payload.get("retrieval_unit", self.retrieval_unit)
+        )
+        if self.retrieval_unit not in {"hand_terminal_v1", "decision_point_max_v1"}:
+            raise ValueError(f"未知 retrieval_unit：{self.retrieval_unit}")
         self.semantic_weight = float(snapshot.payload.get("semantic_weight", self.semantic_weight))
         self.feature_weight = float(snapshot.payload.get("feature_weight", self.feature_weight))
         raw_minimum = snapshot.payload.get(
@@ -517,6 +532,7 @@ class FactualMemory:
             "experience_updates": 0,
             "last_retrieved_fact_ids": list(self.last_retrieval),
             "retrieval_backend": self.retrieval_backend,
+            "retrieval_unit": self.retrieval_unit,
             "last_retrieval_scores": list(self.last_scores),
             "minimum_retrieval_score": self.minimum_retrieval_score,
             "retrieval_threshold_status": self.retrieval_threshold_status,
@@ -678,6 +694,8 @@ def _decision_view(event: DecisionEvent) -> dict[str, object]:
         "amount": event.committed_action.amount,
         "guard_repaired": bool(event.llm_metadata.get("guard_repaired")),
         "fallback_used": bool(event.llm_metadata.get("fallback_used")),
+        "retrieval_query": build_retrieval_query(event.observation),
+        "features": observation_features(event.observation),
     }
 
 

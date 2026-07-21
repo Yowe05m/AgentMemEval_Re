@@ -50,6 +50,9 @@ class RetrievalScore:
     dense: float | None = None
     sparse: float | None = None
     colbert: float | None = None
+    retrieval_unit: str = "hand_terminal_v1"
+    matched_decision_index: int | None = None
+    matched_phase: str | None = None
 
 
 @dataclass(slots=True)
@@ -639,6 +642,7 @@ def hybrid_top_k_records(
     salience_fn: Callable[[str], float] | None = None,
     dimensions: int = 256,
     embedding_backend: EmbeddingBackend | None = None,
+    retrieval_unit: str = "hand_terminal_v1",
 ) -> list[RetrievalScore]:
     """
     功能：使用语义 hash embedding + 结构特征 Jaccard 的混合 RAG 排序。
@@ -658,19 +662,64 @@ def hybrid_top_k_records(
 
     if not records or k <= 0:
         return []
+    if retrieval_unit not in {"hand_terminal_v1", "decision_point_max_v1"}:
+        raise ValueError(f"未知 retrieval_unit：{retrieval_unit}")
     query_text = build_retrieval_query(observation)
     backend = embedding_backend or HashEmbeddingBackend(dimensions)
-    semantic_scores = backend.score_documents(
-        query_text, [retrieval_text_for_backend(record, backend) for record in records]
-    )
     query_features = observation_features(observation)
+    if retrieval_unit == "decision_point_max_v1":
+        views_by_record = [_decision_point_views(record, backend) for record in records]
+    else:
+        views_by_record = [
+            [
+                {
+                    "text": retrieval_text_for_backend(record, backend),
+                    "features": list(record.features),
+                    "decision_index": None,
+                    "phase": _record_phase(record),
+                }
+            ]
+            for record in records
+        ]
+    flat_views = [view for views in views_by_record for view in views]
+    semantic_scores = _score_decision_documents(
+        backend,
+        query_text,
+        [str(view["text"]) for view in flat_views],
+    )
     scored: list[RetrievalScore] = []
-    for index, record in enumerate(records):
-        component = semantic_scores[index]
-        semantic = component.combined
-        feature = jaccard_similarity(query_features, record.features)
+    offset = 0
+    for record, views in zip(records, views_by_record, strict=True):
+        candidates = []
+        for view, component in zip(
+            views,
+            semantic_scores[offset : offset + len(views)],
+            strict=True,
+        ):
+            semantic = component.combined
+            feature = jaccard_similarity(query_features, list(view["features"]))
+            candidates.append(
+                (
+                    semantic_weight * semantic + feature_weight * feature,
+                    semantic,
+                    feature,
+                    component,
+                    view,
+                )
+            )
+        offset += len(views)
+        base, semantic, feature, component, matched_view = max(
+            candidates,
+            key=lambda item: (
+                item[0],
+                item[1],
+                item[2],
+                -1
+                if item[4]["decision_index"] is None
+                else int(item[4]["decision_index"]),
+            ),
+        )
         salience = float(salience_fn(record.record_id) if salience_fn else 1.0)
-        base = semantic_weight * semantic + feature_weight * feature
         score = base + math.log(max(salience, 1e-6)) if salience_fn else base
         scored.append(
             RetrievalScore(
@@ -682,6 +731,13 @@ def hybrid_top_k_records(
                 component.dense,
                 component.sparse,
                 component.colbert,
+                retrieval_unit,
+                (
+                    None
+                    if matched_view["decision_index"] is None
+                    else int(matched_view["decision_index"])
+                ),
+                str(matched_view["phase"]) if matched_view["phase"] else None,
             )
         )
     scored.sort(
@@ -689,6 +745,61 @@ def hybrid_top_k_records(
         reverse=True,
     )
     return scored[:k]
+
+
+def _decision_point_views(
+    record: FactualMemoryRecord, backend: EmbeddingBackend
+) -> list[dict[str, object]]:
+    """Return versioned decision-point retrieval views or a legacy terminal fallback."""
+
+    decisions = record.source.get("decisions", [])
+    views = []
+    if isinstance(decisions, list):
+        for index, raw in enumerate(decisions):
+            if not isinstance(raw, dict):
+                continue
+            query = str(raw.get("retrieval_query", "")).strip()
+            features = raw.get("features")
+            if not query or not isinstance(features, list):
+                continue
+            views.append(
+                {
+                    "text": query,
+                    "features": [str(value) for value in features],
+                    "decision_index": index,
+                    "phase": str(raw.get("phase", "")),
+                }
+            )
+    if views:
+        return views
+    return [
+        {
+            "text": retrieval_text_for_backend(record, backend),
+            "features": list(record.features),
+            "decision_index": None,
+            "phase": _record_phase(record),
+        }
+    ]
+
+
+def _score_decision_documents(
+    backend: EmbeddingBackend,
+    query: str,
+    documents: list[str],
+) -> list[SemanticScore]:
+    """Score all decision views without bypassing a backend candidate-depth contract."""
+
+    scores = backend.score_documents(query, documents)
+    if len(scores) != len(documents):
+        raise RuntimeError("embedding backend score count does not match decision views")
+    return scores
+
+
+def _record_phase(record: FactualMemoryRecord) -> str | None:
+    for feature in record.features:
+        if str(feature).startswith("phase:"):
+            return str(feature).partition(":")[2]
+    return None
 
 
 def _tokens(text: str) -> list[str]:

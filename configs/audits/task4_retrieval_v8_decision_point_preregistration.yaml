@@ -1,0 +1,74 @@
+schema_version: task4_retrieval_remediation_preregistration_v1
+status: preregistered_before_v8_runtime_results
+classification: calibration_only_not_for_paper
+
+trigger_evidence:
+  review_key_sha256: 3a5abaf3c4bc5b1f19d4174bb3b2d823fc0453b57ef6fc054a9e0a3d231c460a
+  human_labels_sha256: bc770784bacc4f1a0236b5c482a3e447fb5c42302ff42d356d44ec5c49cfab3a
+  relevance_audit_sha256: 7e3c470fd126ebe3ac93005bc5215bf8c0ffc86182ffe6c353b4ec68ca0be76c
+  relevance_audit_status: blocked
+  post_hoc_diagnostic_role: development_only
+  existing_240_labels_reuse_as_validation: prohibited
+
+intervention:
+  name: decision_point_max_v1
+  rationale: >-
+    Current queries represent one decision state while historical documents are
+    anchored to a hand-terminal narrative. Each newly admitted fact will retain
+    versioned query/features for every committed decision. Retrieval scores every
+    decision view and uses the maximum joint semantic-plus-feature score per hand.
+  changed_fields:
+    agent.retrieval_unit:
+      from: hand_terminal_v1
+      to: decision_point_max_v1
+  frozen_unchanged_fields:
+    semantic_weight: 0.65
+    feature_weight: 0.35
+    top_k_fact: 30
+    top_k_sync_async: 15
+    embedding_backend: openai_compatible
+    embedding_model: Qwen/Qwen3-Embedding-4B
+    embedding_revision: 5cf2132abc99cad020ac570b19d031efec650f2b
+    retrieval_threshold_status: pending_pilot
+    minimum_retrieval_score: null
+  legacy_snapshot_policy: terminal_fallback_without_validation_credit
+
+engineering_validation:
+  true_service_smoke_seed: 2026072491
+  smoke_is_not_for_paper: true
+  required_checks:
+    - zero_provider_fallback
+    - zero_service_error
+    - reward_and_stack_conservation
+    - no_negative_stack
+    - no_duplicate_hand_id
+    - no_test_memory_update
+    - retrieval_scores_record_matched_decision_index_and_phase
+
+fresh_calibration_pilot:
+  campaign_p_config: configs/campaigns/task4_campaign_p_pilot_parallel_v8_decision_point.yaml
+  campaign_e_config: configs/campaigns/task4_campaign_e_pilot_parallel_v8_decision_point.yaml
+  paired_seeds: [2026072401, 2026072402, 2026072403, 2026072404, 2026072405, 2026072406, 2026072407, 2026072408]
+  overlap_with_v7_pilot_seeds: prohibited
+  runtime_identity_change_from_v7: code_and_retrieval_unit_only
+  results_classification: pilot_descriptive_only
+
+fresh_blind_review:
+  sample_size: 240
+  sample_seed: 2026072400
+  source_campaigns: [campaign_p_v8, campaign_e_v8]
+  old_review_row_or_pair_reuse: prohibited
+  reviewer_type: human
+  all_rows_must_be_labeled: true
+  allowed_labels: [relevant, irrelevant, uncertain]
+  maximum_uncertain_rate: 0.25
+  candidate_threshold_rule: lowest_candidate_meeting_all_constraints_to_preserve_coverage
+  minimum_decisive_selected_rows: 30
+  minimum_wilson_precision_lower_95: 0.60
+  maximum_projected_empty_rate: 0.50
+
+decision_rule:
+  pass: freeze_the_selected_threshold_then_continue_pilot_freeze_chain
+  fail: preserve_no_go_and_do_not_tune_on_the_fresh_validation_labels
+  formal_before_pass: prohibited
+  threshold_or_power_relaxation: prohibited

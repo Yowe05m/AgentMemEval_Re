@@ -27,12 +27,17 @@ REVIEW_POLICY = {
 
 
 def build_relevance_review_pack(
-    campaign_dirs: list[str | Path], *, sample_size: int = 240, sample_seed: int = 20260717
+    campaign_dirs: list[str | Path],
+    *,
+    sample_size: int = 240,
+    sample_seed: int = 20260717,
+    review_schema_version: str = "v1",
 ) -> dict[str, Any]:
     """Build a deterministic, score-blind review sample from completed pilot leaves."""
 
     if sample_size < 1:
         raise ValueError("sample_size must be positive")
+    schema_version = _review_schema_id(review_schema_version)
     pairs: list[dict[str, Any]] = []
     query_max_scores: list[float] = []
     sources: list[dict[str, Any]] = []
@@ -111,8 +116,7 @@ def build_relevance_review_pack(
                         pair_key = (
                             f"{campaign_id}|{run_id}|{line_number}|{record_id}"
                         )
-                        pairs.append(
-                            {
+                        pair = {
                                 "pair_key": pair_key,
                                 "campaign_id": campaign_id,
                                 "run_id": run_id,
@@ -135,7 +139,9 @@ def build_relevance_review_pack(
                                 "feature": _optional_float(score.get("feature")),
                                 "salience": _optional_float(score.get("salience")),
                             }
-                        )
+                        if schema_version.endswith("_v2"):
+                            pair.update(_matched_decision_evidence(fact, score, pair_key))
+                        pairs.append(pair)
         sources.append(
             {
                 "campaign_id": campaign_id,
@@ -197,9 +203,9 @@ def build_relevance_review_pack(
     for index, pair in enumerate(selected, 1):
         row_id = f"RR{index:04d}_{hashlib.sha256(pair['pair_key'].encode()).hexdigest()[:12]}"
         keyed_rows.append({"row_id": row_id, **pair})
-        blind_rows.append(_blind_row(row_id, pair))
+        blind_rows.append(_blind_row(row_id, pair, schema_version))
     return {
-        "schema_version": "task4_retrieval_relevance_review_pack_v1",
+        "schema_version": schema_version,
         "status": "pending_independent_human_labels",
         "sample_seed": sample_seed,
         "requested_sample_size": sample_size,
@@ -234,7 +240,11 @@ def audit_relevance_labels(pack: dict[str, Any], labels: list[dict[str, str]]) -
     if len(set(row_ids)) != len(row_ids):
         blockers.append("review pack contains duplicate keyed row IDs")
     rows = {str(row["row_id"]): row for row in keyed_rows}
-    if pack.get("schema_version") != "task4_retrieval_relevance_review_pack_v1":
+    schema_version = str(pack.get("schema_version", ""))
+    if schema_version not in {
+        "task4_retrieval_relevance_review_pack_v1",
+        "task4_retrieval_relevance_review_pack_v2",
+    }:
         blockers.append("review pack schema is invalid")
     if pack.get("status") != "pending_independent_human_labels":
         blockers.append("review pack status is invalid")
@@ -261,7 +271,7 @@ def audit_relevance_labels(pack: dict[str, Any], labels: list[dict[str, str]]) -
         blockers.append("review pack source matrix or event evidence is incomplete")
     blind_rows = pack.get("blind_rows", [])
     expected_blind_rows = [
-        _blind_row(str(row["row_id"]), row)
+        _blind_row(str(row["row_id"]), row, schema_version)
         for row in keyed_rows
     ]
     if blind_rows != expected_blind_rows:
@@ -278,6 +288,7 @@ def audit_relevance_labels(pack: dict[str, Any], labels: list[dict[str, str]]) -
                 [str(source["campaign_dir"]) for source in sources],
                 sample_size=int(pack.get("requested_sample_size", 0)),
                 sample_seed=int(pack.get("sample_seed", 0)),
+                review_schema_version=schema_version,
             )
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             blockers.append(f"review pack source rebuild failed: {type(exc).__name__}")
@@ -356,6 +367,7 @@ def audit_relevance_labels(pack: dict[str, Any], labels: list[dict[str, str]]) -
     return {
         "schema_version": "task4_retrieval_relevance_audit_v2",
         "review_status": "human_labels_verified" if not blockers else "blocked",
+        "review_pack_schema_version": schema_version,
         "retrieval_threshold_status": "frozen" if not blockers else "blocked",
         "minimum_retrieval_score": selected_threshold,
         "policy": REVIEW_POLICY,
@@ -397,11 +409,15 @@ def _blind_record(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _blind_row(row_id: str, pair: dict[str, Any]) -> dict[str, Any]:
+def _blind_row(
+    row_id: str,
+    pair: dict[str, Any],
+    schema_version: str = "task4_retrieval_relevance_review_pack_v1",
+) -> dict[str, Any]:
     record = pair.get("record", {})
     if not isinstance(record, dict):
         record = {}
-    return {
+    blind = {
         "row_id": row_id,
         "mechanism": str(pair.get("mechanism", "")),
         "stage": str(pair.get("stage", "")),
@@ -409,6 +425,70 @@ def _blind_row(row_id: str, pair: dict[str, Any]) -> dict[str, Any]:
         "query": str(pair.get("query", "")),
         "record": _blind_record(record),
     }
+    if schema_version.endswith("_v2"):
+        blind["matched_decision"] = _blind_decision(pair.get("matched_decision"))
+        blind["matched_phase"] = str(pair.get("matched_phase", ""))
+        blind["retrieval_unit"] = str(pair.get("retrieval_unit", ""))
+    return blind
+
+
+def _review_schema_id(value: str) -> str:
+    normalized = str(value).strip().lower()
+    aliases = {
+        "v1": "task4_retrieval_relevance_review_pack_v1",
+        "task4_retrieval_relevance_review_pack_v1": (
+            "task4_retrieval_relevance_review_pack_v1"
+        ),
+        "v2": "task4_retrieval_relevance_review_pack_v2",
+        "task4_retrieval_relevance_review_pack_v2": (
+            "task4_retrieval_relevance_review_pack_v2"
+        ),
+    }
+    if normalized not in aliases:
+        raise ValueError(f"unknown review schema version: {value}")
+    return aliases[normalized]
+
+
+def _matched_decision_evidence(
+    fact: dict[str, Any], score: dict[str, Any], pair_key: str
+) -> dict[str, Any]:
+    if str(score.get("retrieval_unit", "")) != "decision_point_max_v1":
+        raise ValueError(f"V2 review pair lacks decision-point retrieval identity: {pair_key}")
+    raw_index = score.get("matched_decision_index")
+    if raw_index is None:
+        raise ValueError(f"V2 review pair lacks matched decision index: {pair_key}")
+    index = int(raw_index)
+    source = fact.get("source", {})
+    decisions = source.get("decisions", []) if isinstance(source, dict) else []
+    if not isinstance(decisions, list) or index < 0 or index >= len(decisions):
+        raise ValueError(f"V2 review pair matched decision is unavailable: {pair_key}")
+    decision = decisions[index]
+    if not isinstance(decision, dict):
+        raise ValueError(f"V2 review pair matched decision is malformed: {pair_key}")
+    phase = str(score.get("matched_phase", ""))
+    if not phase or phase != str(decision.get("phase", "")):
+        raise ValueError(f"V2 review pair matched phase is inconsistent: {pair_key}")
+    return {
+        "retrieval_unit": "decision_point_max_v1",
+        "matched_decision_index": index,
+        "matched_phase": phase,
+        "matched_decision": dict(decision),
+    }
+
+
+def _blind_decision(value: object) -> dict[str, object]:
+    decision = value if isinstance(value, dict) else {}
+    allowed = (
+        "phase",
+        "board",
+        "hole",
+        "pot_before",
+        "to_call",
+        "action_type",
+        "retrieval_query",
+        "features",
+    )
+    return {key: decision.get(key) for key in allowed}
 
 
 def _score_bin(value: float, boundaries: list[float]) -> str:
