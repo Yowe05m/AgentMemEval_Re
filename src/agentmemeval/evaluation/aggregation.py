@@ -244,6 +244,21 @@ def aggregate_table_run_units(
 def validate_runtime_homogeneity(manifests: list[dict[str, Any]]) -> dict[str, Any]:
     """Compare hardware and service identities before any cross-run formal aggregation."""
 
+    return _validate_runtime_homogeneity(manifests, task8b=False)
+
+
+def validate_task8b_runtime_homogeneity(
+    manifests: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """TASK8B homogeneity: driver and PCI are observed metadata, not gating identity."""
+
+    return _validate_runtime_homogeneity(manifests, task8b=True)
+
+
+def _validate_runtime_homogeneity(
+    manifests: list[dict[str, Any]], *, task8b: bool
+) -> dict[str, Any]:
+
     def embedding_identity(item: dict[str, Any]) -> str:
         embedding = dict(item.get("metadata", {}).get("embedding", {}))
         # This namespace must be run-local to prevent cache leakage. Its absolute
@@ -251,14 +266,20 @@ def validate_runtime_homogeneity(manifests: list[dict[str, Any]]) -> dict[str, A
         embedding.pop("cache_namespace_template", None)
         return repr(embedding)
 
+    def gpu_identity(item: dict[str, Any]) -> tuple[object, ...]:
+        devices = item.get("metadata", {}).get("gpu", {}).get("devices", [])
+        if task8b:
+            return tuple(device.get("name") for device in devices)
+        return tuple(
+            (device.get("name"), device.get("driver"), device.get("pci_bus_id"))
+            for device in devices
+        )
+
     fields = {
         "code": lambda item: tuple(
             sorted(item.get("metadata", {}).get("code", {}).items())
         ),
-        "gpu": lambda item: tuple(
-            (device.get("name"), device.get("driver"), device.get("pci_bus_id"))
-            for device in item.get("metadata", {}).get("gpu", {}).get("devices", [])
-        ),
+        "gpu": gpu_identity,
         "cuda": lambda item: (
             item.get("metadata", {})
             .get("model_service_runtime", {})

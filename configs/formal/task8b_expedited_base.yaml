@@ -72,7 +72,7 @@ experiment:
     uniform_hardware_verified: true
   formal_runtime_lock:
     gpu_name: NVIDIA GeForce RTX 5090
-    gpu_driver: 595.58.03
+    gpu_driver_policy: informational_only
     service_torch_cuda_version: "13.0"
     vllm_version: 0.23.1rc1.dev1032+g4a6440ace
     decision_model_name: qwen/qwen3.5-9b

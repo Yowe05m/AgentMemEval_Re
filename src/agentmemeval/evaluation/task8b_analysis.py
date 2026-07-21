@@ -1603,7 +1603,12 @@ def _table1_rows(selected_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ("config", "per-task config SHA-256", "task identity audit"),
         ("schedule", "per-task schedule SHA-256 and seed-pod CRN", "task identity audit"),
         ("runtime_image", "uniform frozen image fingerprint", "fleet identity gate"),
-        ("cuda_driver", "uniform frozen CUDA/driver class", "fleet health gate"),
+        ("cuda_runtime", "uniform frozen CUDA runtime class", "fleet health gate"),
+        (
+            "gpu_driver",
+            "observed per worker; informational only; non-gating",
+            "runtime health audit",
+        ),
         ("mechanisms", "NoMemory, Fact, Expr, Sync, Async", "TASK8B matrix"),
         ("checkpoints", "30,75,150,300", "TASK8B matrix"),
         ("heldout_tables", "H01,H02,H03", "TASK8B matrix"),

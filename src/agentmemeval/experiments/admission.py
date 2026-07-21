@@ -189,7 +189,17 @@ def _runtime_lock_blockers(
     if service_runtime.get("status") != "verified":
         blockers.append("model service runtime probe must be verified")
     observed = runtime_identity_from_metadata(runtime)
+    driver_policy = lock.get("gpu_driver_policy")
+    if driver_policy is not None:
+        if driver_policy != "informational_only":
+            blockers.append(
+                "experiment.formal_runtime_lock.gpu_driver_policy must be informational_only"
+            )
+        elif observed.get("gpu_driver") in {None, ""}:
+            blockers.append("runtime gpu_driver is required for informational recording")
     for field in FORMAL_RUNTIME_LOCK_FIELDS:
+        if field == "gpu_driver" and driver_policy is not None:
+            continue
         actual = observed.get(field)
         expected = lock.get(field)
         if expected in {None, ""}:

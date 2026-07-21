@@ -706,6 +706,21 @@ def test_table4_uses_fixed_50_hand_windows_and_50_hand_block_ols() -> None:
     )
 
 
+def test_table1_marks_gpu_driver_as_observed_non_gating() -> None:
+    from agentmemeval.evaluation import task8b_analysis
+
+    rows = {row["field"]: row for row in task8b_analysis._table1_rows([])}
+
+    assert rows["gpu_driver"] == {
+        "field": "gpu_driver",
+        "frozen_value": "observed per worker; informational only; non-gating",
+        "source": "runtime health audit",
+        "status": "frozen",
+        "disclosure": "",
+    }
+    assert rows["cuda_runtime"]["frozen_value"] == "uniform frozen CUDA runtime class"
+
+
 def test_phase_f_paper_renderer_emits_all_frozen_tables_figures_and_hashes(
     tmp_path: Path,
 ) -> None:

@@ -3,8 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import yaml
+
+from agentmemeval.evaluation.aggregation import (
+    validate_runtime_homogeneity,
+    validate_task8b_runtime_homogeneity,
+)
+from agentmemeval.evaluation.runtime_lock import runtime_identity_from_metadata
+from agentmemeval.experiments.admission import _runtime_lock_blockers
 from agentmemeval.experiments.formal_protocol import sha256_json
 from agentmemeval.experiments.task8b_bundle import build_task8b_executable_bundle
+from tests.unit.test_formal_freeze import _runtime_manifest
 
 
 def _identity(path: Path) -> Path:
@@ -39,6 +48,88 @@ def _matrix(path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def test_task8b_runtime_driver_is_informational_but_required_for_health_audit() -> None:
+    runtime = _runtime_manifest()["metadata"]
+    observed = runtime_identity_from_metadata(runtime)
+    lock = dict(observed)
+    lock.pop("gpu_driver")
+    lock["gpu_driver_policy"] = "informational_only"
+    experiment = {"formal_runtime_lock": lock}
+
+    for driver in ("595.58.03", "595.71.05", "580.105.08", "future-driver"):
+        runtime["gpu"]["devices"][0]["driver"] = driver
+        assert _runtime_lock_blockers(experiment, runtime) == []
+
+    runtime["gpu"]["devices"][0]["driver"] = ""
+    assert _runtime_lock_blockers(experiment, runtime) == [
+        "runtime gpu_driver is required for informational recording"
+    ]
+
+    runtime["gpu"]["devices"][0]["driver"] = "580.105.08"
+    runtime["model_service_runtime"]["status"] = "failed"
+    assert _runtime_lock_blockers(experiment, runtime)[0] == (
+        "model service runtime probe must be verified"
+    )
+    runtime["model_service_runtime"]["status"] = "verified"
+    runtime["model_service_runtime"]["vllm_version"] = "different"
+    assert "runtime vllm_version mismatch" in _runtime_lock_blockers(
+        experiment, runtime
+    )[0]
+
+
+def test_task8b_base_marks_driver_as_informational_only() -> None:
+    base = yaml.safe_load(
+        Path("configs/formal/task8b_expedited_base.yaml").read_text(encoding="utf-8")
+    )
+    runtime_lock = base["experiment"]["formal_runtime_lock"]
+
+    assert runtime_lock["gpu_driver_policy"] == "informational_only"
+    assert "gpu_driver" not in runtime_lock
+
+
+def test_task8b_aggregation_ignores_driver_and_pci_but_not_gpu_or_runtime() -> None:
+    def manifest(
+        *, gpu: str, driver: str, pci: str, vllm: str = "0.23.1"
+    ) -> dict[str, object]:
+        return {
+            "metadata": {
+                "code": {"commit": "same", "dirty": False},
+                "gpu": {
+                    "devices": [
+                        {"name": gpu, "driver": driver, "pci_bus_id": pci}
+                    ]
+                },
+                "model_service_runtime": {
+                    "torch_cuda_version": "13.0",
+                    "vllm_version": vllm,
+                },
+                "model": {"name": "qwen", "revision": "r", "weights_hash": "w"},
+                "service": {"startup": "same"},
+                "embedding": {"name": "bge", "revision": "r"},
+                "prompts": {"decision_system_sha256": "p"},
+            }
+        }
+
+    first = manifest(gpu="RTX 5090", driver="595.58.03", pci="0000:01:00.0")
+    second = manifest(gpu="RTX 5090", driver="580.105.08", pci="0000:81:00.0")
+    assert validate_task8b_runtime_homogeneity([first, second])["homogeneous"] is True
+    assert validate_runtime_homogeneity([first, second])["homogeneous"] is False
+
+    wrong_gpu = manifest(gpu="RTX 4090", driver="580.105.08", pci="0000:81:00.0")
+    assert validate_task8b_runtime_homogeneity([first, wrong_gpu])["mismatches"] == {
+        "gpu": [("RTX 5090",), ("RTX 4090",)]
+    }
+    wrong_vllm = manifest(
+        gpu="RTX 5090",
+        driver="580.105.08",
+        pci="0000:81:00.0",
+        vllm="different",
+    )
+    assert "vllm_runtime" in validate_task8b_runtime_homogeneity(
+        [first, wrong_vllm]
+    )["mismatches"]
 
 
 def test_formal_bundle_recomputes_complete_142200_hand_matrix(tmp_path: Path) -> None:
