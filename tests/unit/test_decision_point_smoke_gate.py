@@ -127,3 +127,37 @@ def test_decision_point_smoke_gate_rejects_malformed_match(tmp_path: Path) -> No
 
     assert audit["status"] == "no_go"
     assert any("malformed decision-point" in item for item in audit["blockers"])
+
+
+def test_decision_point_smoke_gate_expands_test_hands_per_target(
+    tmp_path: Path,
+) -> None:
+    run = _write_run(tmp_path)
+    config = yaml.safe_load((run / "resolved_config.yaml").read_text(encoding="utf-8"))
+    config["experiment"]["evaluate_all_train_agents"] = True
+    config["experiment"]["agent_roster"].append(
+        {"agent_id": "no_memory_00", "mechanism": "no_memory"}
+    )
+    (run / "resolved_config.yaml").write_text(
+        yaml.safe_dump(config), encoding="utf-8"
+    )
+    hands = (run / "hand_summaries.jsonl").read_text(encoding="utf-8").splitlines()
+    extra = json.loads(hands[-1])
+    extra["hand_id"] = "h3"
+    hands.append(json.dumps(extra))
+    (run / "hand_summaries.jsonl").write_text(
+        "\n".join(hands) + "\n", encoding="utf-8"
+    )
+
+    audit = build_decision_point_smoke_gate(
+        run,
+        expected_code_sha="expected",
+        expected_train_hands=1,
+        expected_test_hands=1,
+    )
+
+    assert audit["status"] == "ready_to_start_v8_calibration_pilot"
+    hand_audit = audit["evidence"]["hand_audit"]
+    assert hand_audit["configured_test_hands_per_target"] == 1
+    assert hand_audit["evaluation_target_count"] == 2
+    assert hand_audit["expected_total_test_hands"] == 2

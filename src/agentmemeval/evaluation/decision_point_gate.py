@@ -78,7 +78,16 @@ def build_decision_point_smoke_gate(
         if int(execution.get(field, -1)) != 0:
             blockers.append(f"execution {field} is not zero: {execution.get(field)}")
 
-    hand_audit = _audit_hands(hands, expected_train_hands, expected_test_hands)
+    evaluation_target_count = _evaluation_target_count(experiment)
+    expected_total_test_hands = expected_test_hands * evaluation_target_count
+    hand_audit = _audit_hands(
+        hands,
+        expected_train_hands,
+        expected_total_test_hands,
+    )
+    hand_audit["configured_test_hands_per_target"] = expected_test_hands
+    hand_audit["evaluation_target_count"] = evaluation_target_count
+    hand_audit["expected_total_test_hands"] = expected_total_test_hands
     blockers.extend(hand_audit["blockers"])
     event_audit = _audit_events(events)
     blockers.extend(event_audit["blockers"])
@@ -148,6 +157,18 @@ def _audit_hands(
         "negative_stack_hand_ids": negative_stacks,
         "blockers": blockers,
     }
+
+
+def _evaluation_target_count(experiment: dict[str, Any]) -> int:
+    if experiment.get("evaluate_all_train_agents") is True:
+        roster = experiment.get("agent_roster", [])
+        if not isinstance(roster, list) or not roster:
+            raise ValueError("evaluate_all_train_agents requires a non-empty agent_roster")
+        return len(roster)
+    targets = experiment.get("evaluation_target_ids", [])
+    if isinstance(targets, list) and targets:
+        return len(targets)
+    return 1
 
 
 def _audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
