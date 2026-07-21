@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 
 import yaml
@@ -14,6 +14,20 @@ from agentmemeval.experiments.campaign import build_campaign_aggregate_payload
 def _gate_module() -> ModuleType:
     path = Path(__file__).resolve().parents[2] / "tools/task4/gate_campaign_p_before_e.py"
     spec = importlib.util.spec_from_file_location("task4_campaign_p_gate", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _aggregate_correction_module() -> ModuleType:
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "tools/task4/rebuild_campaign_aggregate_run_local_cache.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "task4_campaign_aggregate_cache_correction", path
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -310,6 +324,89 @@ def test_campaign_p_gate_rejects_noncanonical_embedding_cache_namespace(
         "embedding cache namespace mismatch" in blocker
         for blocker in audit["blockers"]
     )
+
+
+def test_campaign_aggregate_cache_correction_changes_only_runtime_identity(
+    tmp_path: Path,
+) -> None:
+    campaign, aggregate = _campaign(tmp_path)
+    original_root = PurePosixPath(str(campaign).replace("\\", "/"))
+    for run_dir in sorted((campaign / "runs").iterdir()):
+        manifest_path = run_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["metadata"]["embedding"]["cache_namespace_template"] = str(
+            original_root
+            / "runs"
+            / run_dir.name
+            / "embedding_cache"
+            / "{agent_id}.json"
+        )
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    aggregate_data = json.loads(aggregate.read_text(encoding="utf-8"))
+    aggregate_data["runtime_homogeneity"] = {
+        "homogeneous": False,
+        "run_count": 2,
+        "mismatches": {"embedding": ["run-a-cache", "run-b-cache"]},
+        "identity": None,
+        "formal_aggregation_allowed": False,
+    }
+    aggregate.write_text(json.dumps(aggregate_data), encoding="utf-8")
+
+    audit, corrected = _aggregate_correction_module().build_correction(
+        campaign,
+        original_campaign_dir=str(original_root),
+        observed_aggregate_path=aggregate,
+        expected_code_sha="expected-sha",
+        expected_run_count=2,
+    )
+
+    assert audit["status"] == "verified_isolated_cache_path_correction"
+    assert audit["blockers"] == []
+    assert audit["aggregate_payload_unchanged_outside_runtime_homogeneity"] is True
+    assert corrected["runtime_homogeneity"]["homogeneous"] is True
+    assert (
+        audit["observed_aggregate_metrics_sha256"]
+        == audit["corrected_aggregate_metrics_sha256"]
+    )
+
+
+def test_campaign_aggregate_cache_correction_rejects_other_payload_changes(
+    tmp_path: Path,
+) -> None:
+    campaign, aggregate = _campaign(tmp_path)
+    original_root = PurePosixPath(str(campaign).replace("\\", "/"))
+    for run_dir in sorted((campaign / "runs").iterdir()):
+        manifest_path = run_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["metadata"]["embedding"]["cache_namespace_template"] = str(
+            original_root
+            / "runs"
+            / run_dir.name
+            / "embedding_cache"
+            / "{agent_id}.json"
+        )
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    aggregate_data = json.loads(aggregate.read_text(encoding="utf-8"))
+    aggregate_data["runtime_homogeneity"] = {
+        "homogeneous": False,
+        "run_count": 2,
+        "mismatches": {"embedding": ["run-a-cache", "run-b-cache"]},
+        "identity": None,
+        "formal_aggregation_allowed": False,
+    }
+    aggregate_data["completed_run_count"] = 999
+    aggregate.write_text(json.dumps(aggregate_data), encoding="utf-8")
+
+    audit, _corrected = _aggregate_correction_module().build_correction(
+        campaign,
+        original_campaign_dir=str(original_root),
+        observed_aggregate_path=aggregate,
+        expected_code_sha="expected-sha",
+        expected_run_count=2,
+    )
+
+    assert audit["status"] == "no_go"
+    assert any("outside runtime_homogeneity" in item for item in audit["blockers"])
 
 
 def test_campaign_p_gate_accepts_failed_attempt_followed_by_complete_retry(
