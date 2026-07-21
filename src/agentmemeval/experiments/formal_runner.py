@@ -635,6 +635,7 @@ def _run_experiment_tasks(
             experiment["train_hands"] = 0
             experiment.pop("checkpoint_set", None)
             experiment.pop("checkpoint_interval", None)
+            experiment.pop("checkpoint_test_hands_by_checkpoint", None)
             experiment["initial_checkpoint_hand"] = int(manifest["checkpoint_set"][-1])
             experiment["memory_mode"] = mode
             experiment["update_memory_test"] = mode == "Online"
