@@ -317,6 +317,8 @@ def _worker_manifest(
                 }
             ),
         }
+    elif protocol_status == "canary/not-for-paper" and seed_pod_identity is not None:
+        manifest["seed_pod_identity"] = copy.deepcopy(seed_pod_identity)
     if protocol_status == "canary/not-for-paper":
         manifest["canary_total_hands"] = canary_total_hands
         if task_configs is not None:
@@ -805,7 +807,8 @@ def run_worker_manifest(
             "schema_version": "task8-worker-completion-v1",
             "worker_id": manifest["worker_id"],
             "status": "complete",
-            "not_for_paper": str(manifest["protocol_status"]).startswith("mock/"),
+            "not_for_paper": str(manifest["protocol_status"]).startswith("mock/")
+            or str(manifest["protocol_status"]) == "canary/not-for-paper",
             "files_tsv_sha256": _sha256_file(run_dir / "files.tsv"),
         }
         _write_json_new(run_dir / "completion_receipt.json", completion)

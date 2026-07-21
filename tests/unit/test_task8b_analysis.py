@@ -10,7 +10,10 @@ from typing import Any
 import pytest
 
 from agentmemeval.core.errors import ConfigError
-from agentmemeval.evaluation.task8b_analysis import run_task8b_analysis
+from agentmemeval.evaluation.task8b_analysis import (
+    build_task8b_analysis_input,
+    run_task8b_analysis,
+)
 
 IDENTITY = {
     "code_sha": "a" * 40,
@@ -46,6 +49,27 @@ def _write_json(path: Path, value: object) -> None:
         encoding="utf-8",
         newline="",
     )
+
+
+def test_phase_f_input_builder_explicitly_rejects_canary_protocol(
+    tmp_path: Path,
+) -> None:
+    manifests = tmp_path / "manifests"
+    _write_json(
+        manifests / "P01.json",
+        {
+            "protocol_status": "canary/not-for-paper",
+            "worker_id": "P01",
+            "seed_bundle": 2026090101,
+        },
+    )
+
+    with pytest.raises(ConfigError, match="拒绝非 expedited formal manifest"):
+        build_task8b_analysis_input(
+            manifests,
+            tmp_path / "snapshots",
+            tmp_path / "phase-f-input.json",
+        )
 
 
 def _metric_records() -> list[dict[str, object]]:

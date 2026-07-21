@@ -10,6 +10,7 @@ from agentmemeval.core.errors import ConfigError
 from agentmemeval.experiments.formal_protocol import sha256_json
 from agentmemeval.experiments.formal_runner import (
     generate_worker_manifests,
+    run_worker_manifest,
     validate_worker_manifest,
     validate_worker_manifest_set,
 )
@@ -243,3 +244,33 @@ def test_real_canary_rejects_more_than_100_total_hands(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="100|canary.*hands"):
         validate_worker_manifest(manifest)
+
+
+def test_real_canary_completion_receipt_is_permanently_not_for_paper(
+    tmp_path: Path,
+) -> None:
+    output, _ = _generate(
+        tmp_path,
+        seeds=[2026090199],
+        protocol_status="mock/not-for-paper/model-substituted",
+        execution_mode="mock_seed_pod",
+    )
+    manifest_path = output / "P01.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["protocol_status"] = "canary/not-for-paper"
+    manifest["canary_total_hands"] = 2
+    manifest["worker_planned_hands"] = 1
+    manifest["instance_identity"]["output_path"] = str(tmp_path / "canary-output")
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+        newline="",
+    )
+
+    result = run_worker_manifest(manifest_path, receipt_root=tmp_path / "receipts")
+
+    completion = json.loads(
+        (Path(result["run_dir"]) / "completion_receipt.json").read_text(encoding="utf-8")
+    )
+    assert completion["status"] == "complete"
+    assert completion["not_for_paper"] is True

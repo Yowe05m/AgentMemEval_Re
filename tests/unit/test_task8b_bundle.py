@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agentmemeval.experiments.formal_protocol import sha256_json
 from agentmemeval.experiments.task8b_bundle import build_task8b_executable_bundle
 
 
@@ -80,6 +81,29 @@ def test_canary_bundle_is_real_two_worker_and_under_100_hands(tmp_path: Path) ->
     ]
     assert sum(item["worker_planned_hands"] for item in manifests) == result["planned_hands"]
     assert all(item["checkpoint_set"] == [1, 3, 5] for item in manifests)
+    by_role = {item["role"]: item for item in manifests}
+    schedule_rows = [
+        {
+            "worker_role": role,
+            "task_id": task["task_id"],
+            "schedule_sha256": task["expected_identity"]["schedule_sha256"],
+        }
+        for role in ("primary", "secondary")
+        for task in by_role[role]["task_configs"]
+    ]
+    expected_pod_identity = {
+        "seed_bundle": 2026090199,
+        "schedule_sha256": sha256_json(
+            {
+                "schema_version": "task8b-seed-pod-schedule-bundle-v1",
+                "seed_bundle": 2026090199,
+                "task_schedules": schedule_rows,
+            }
+        ),
+        "task_schedules": schedule_rows,
+    }
+    assert by_role["primary"]["seed_pod_identity"] == expected_pod_identity
+    assert by_role["secondary"]["seed_pod_identity"] == expected_pod_identity
 
 
 def test_bundle_is_byte_identical_for_same_frozen_inputs(tmp_path: Path) -> None:
