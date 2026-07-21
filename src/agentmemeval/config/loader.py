@@ -126,6 +126,9 @@ def validate_config(config: dict[str, Any]) -> None:
         if section_config.get("persona") and run_mode != "smoke":
             raise ConfigError("Exp2 人格机制已延期；persona 配置只能用于 not_for_paper smoke")
     agent = config.get("agent", {})
+    retrieval_unit = str(agent.get("retrieval_unit", "hand_terminal_v1"))
+    if retrieval_unit not in {"hand_terminal_v1", "decision_point_max_v1"}:
+        raise ConfigError(f"未知 agent.retrieval_unit：{retrieval_unit}")
     embedding_backend = str(agent.get("embedding_backend", "hash"))
     if embedding_backend not in {"hash", "openai_compatible", "bgem3_hybrid_http"}:
         raise ConfigError(f"未知 agent.embedding_backend：{embedding_backend}")

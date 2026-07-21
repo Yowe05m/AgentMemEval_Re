@@ -1,6 +1,27 @@
 schema_version: task4_retrieval_remediation_preregistration_v1
-status: preregistered_before_v8_runtime_results
+status: amended_for_expedited_pilot_before_v8_runtime_results
 classification: calibration_only_not_for_paper
+
+expedited_amendment:
+  authorized_by_user: true
+  reason: time_constrained_fast_validation
+  made_before_any_v8_runtime_result: true
+  previous_scale:
+    paired_seeds: 8
+    train_hands_per_run: 150
+    final_test_hands_per_run: 25
+  amended_scale:
+    paired_seeds: 2
+    train_hands_per_run: 60
+    final_test_hands_per_run: 20
+  retained_requirements:
+    - complete_same_seed_condition_groups
+    - true_decision_and_embedding_services
+    - fallback_and_service_error_audit
+    - reward_and_stack_conservation
+    - fresh_v2_human_blind_review
+  paper_claim_from_expedited_pilot: prohibited
+  formal_power_claim_from_expedited_pilot: prohibited
 
 trigger_evidence:
   review_key_sha256: 3a5abaf3c4bc5b1f19d4174bb3b2d823fc0453b57ef6fc054a9e0a3d231c460a
@@ -48,7 +69,7 @@ engineering_validation:
 fresh_calibration_pilot:
   campaign_p_config: configs/campaigns/task4_campaign_p_pilot_parallel_v8_decision_point.yaml
   campaign_e_config: configs/campaigns/task4_campaign_e_pilot_parallel_v8_decision_point.yaml
-  paired_seeds: [2026072401, 2026072402, 2026072403, 2026072404, 2026072405, 2026072406, 2026072407, 2026072408]
+  paired_seeds: [2026072401, 2026072402]
   overlap_with_v7_pilot_seeds: prohibited
   runtime_identity_change_from_v7: code_and_retrieval_unit_only
   results_classification: pilot_descriptive_only

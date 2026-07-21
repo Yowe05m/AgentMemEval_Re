@@ -5,3 +5,8 @@ agent:
 
 experiment:
   protocol_variant: calibration_pilot_for_campaign_e_decision_point_max_v1
+  train_hands: 60
+  test_hands: 20
+  checkpoint_interval: 60
+  checkpoint_test_hands: 20
+  required_seed_pairs: 2

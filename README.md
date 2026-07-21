@@ -341,6 +341,26 @@ python tools/task4/retrieval_relevance_review.py audit `
   --output outputs/campaigns/retrieval_review_<utc>/relevance_audit.json
 ```
 
+若旧的 hand-terminal 检索单元未通过人工相关性门禁，可在新的 calibration-only
+Campaign 中显式设置 `agent.retrieval_unit: decision_point_max_v1`。该模式为每个已提交
+决策保存版本化状态 query/features，并在一手历史牌的多个决策点中选择联合
+semantic+feature 分数最高的视图；默认 `hand_terminal_v1` 保持不变，历史快照只能走
+terminal fallback，不能获得新模式的验证资格。新 Campaign 的人工审查包必须使用：
+
+```powershell
+python tools/task4/retrieval_relevance_review.py build `
+  --campaign-dir outputs/campaigns/<fresh-p> `
+  --campaign-dir outputs/campaigns/<fresh-e> `
+  --sample-size 240 `
+  --sample-seed <fresh-preregistered-seed> `
+  --review-schema-version v2 `
+  --output-dir outputs/campaigns/retrieval_review_<fresh-utc>
+```
+
+V2 blind row 会显示被实际命中的历史决策点，但仍隐藏检索分数、收益和来源映射。用于
+发现问题的旧标签只能标为 `post_hoc_development_only`，不得在调参后继续冒充独立验证
+集；必须从新 P/E Pilot 生成全新样本并重新真人盲审。
+
 行为、执行、检索和功效的联合冻结提案只读取 P/E campaign 中 state 为
 `complete` 的 leaf；partial、failed 或 interrupted run 会被排除。行为门槛只检查
 `protocol_audit.json` 中预注册的 evaluation targets，不把 heldout 对手纳入目标

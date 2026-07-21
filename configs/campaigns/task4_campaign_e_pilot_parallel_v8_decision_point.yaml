@@ -1,7 +1,7 @@
 campaign:
   campaign_id: task4_campaign_e_pilot_parallel_v8_decision_point
   design: target_vs_seven_no_memory
-  protocol_label: calibration_pilot_parallel4_decision_point_max_v1_not_for_main_table
+  protocol_label: expedited_calibration_pilot_decision_point_max_v1_not_for_main_table
   base_experiment_config: ../experiments/task4_campaign_e_pilot_v8_decision_point.yaml
   output_root: outputs/campaigns
   max_parallel_runs: 4
@@ -9,12 +9,6 @@ campaign:
   seeds:
     - 2026072401
     - 2026072402
-    - 2026072403
-    - 2026072404
-    - 2026072405
-    - 2026072406
-    - 2026072407
-    - 2026072408
   baseline_condition_id: no_memory_target
   target_agent_id: target_00
   conditions:

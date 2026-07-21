@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentmemeval.config.loader import load_config
+from agentmemeval.config.loader import ConfigError, load_config, validate_config
 from agentmemeval.core.domain import FactualMemoryRecord
 from agentmemeval.memory.factual import FactualMemory
 from agentmemeval.memory.rag import (
@@ -129,6 +129,14 @@ def test_unknown_retrieval_unit_fails_closed() -> None:
         FactualMemory("agent_00", retrieval_unit="post_hoc_best")
 
 
+def test_config_rejects_unknown_retrieval_unit() -> None:
+    config = load_config("configs/experiments/task4_campaign_p_smoke_v8_decision_point.yaml")
+    config["agent"]["retrieval_unit"] = "post_hoc_best"
+
+    with pytest.raises(ConfigError, match="retrieval_unit"):
+        validate_config(config)
+
+
 @pytest.mark.parametrize(
     "config_path",
     [
@@ -141,3 +149,20 @@ def test_v8_decision_point_configs_resolve_and_validate(config_path: str) -> Non
     config = load_config(config_path)
 
     assert config["agent"]["retrieval_unit"] == "decision_point_max_v1"
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    [
+        "configs/experiments/task4_campaign_p_pilot_v8_decision_point.yaml",
+        "configs/experiments/task4_campaign_e_pilot_v8_decision_point.yaml",
+    ],
+)
+def test_expedited_v8_pilot_scale_is_explicit(config_path: str) -> None:
+    experiment = load_config(config_path)["experiment"]
+
+    assert experiment["train_hands"] == 60
+    assert experiment["test_hands"] == 20
+    assert experiment["checkpoint_interval"] == 60
+    assert experiment["checkpoint_test_hands"] == 20
+    assert experiment["required_seed_pairs"] == 2
