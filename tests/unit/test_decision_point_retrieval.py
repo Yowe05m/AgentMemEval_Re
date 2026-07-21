@@ -4,6 +4,7 @@ import pytest
 
 from agentmemeval.config.loader import ConfigError, load_config, validate_config
 from agentmemeval.core.domain import FactualMemoryRecord
+from agentmemeval.memory.fact_expr_async import FactExprAsyncMemory
 from agentmemeval.memory.factual import FactualMemory
 from agentmemeval.memory.rag import (
     SemanticScore,
@@ -122,6 +123,24 @@ def test_factual_memory_persists_versioned_decision_views() -> None:
     restored = FactualMemory("agent_00")
     restored.restore(snapshot)
     assert restored.retrieval_unit == "decision_point_max_v1"
+
+
+def test_async_memory_preserves_decision_point_score_metadata() -> None:
+    memory = FactExprAsyncMemory(
+        "agent_00",
+        embedding_backend=ExactTextBackend(),
+        fact_options={"retrieval_unit": "decision_point_max_v1"},
+    )
+    memory.on_hand_finished(make_trajectory())
+
+    scores = memory.build_context(make_observation()).metadata["fact"][
+        "retrieval_scores"
+    ]
+
+    assert scores
+    assert scores[0]["retrieval_unit"] == "decision_point_max_v1"
+    assert scores[0]["matched_decision_index"] == 0
+    assert scores[0]["matched_phase"] == "preflop"
 
 
 def test_unknown_retrieval_unit_fails_closed() -> None:

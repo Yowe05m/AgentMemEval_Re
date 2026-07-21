@@ -10,7 +10,12 @@ from agentmemeval.evaluation.decision_point_gate import (
 )
 
 
-def _write_run(tmp_path: Path, *, malformed_score: bool = False) -> Path:
+def _write_run(
+    tmp_path: Path,
+    *,
+    malformed_score: bool = False,
+    composed_metadata: bool = False,
+) -> Path:
     run = tmp_path / "run"
     snapshots = run / "memory_snapshots"
     snapshots.mkdir(parents=True)
@@ -51,10 +56,15 @@ def _write_run(tmp_path: Path, *, malformed_score: bool = False) -> Path:
         "matched_decision_index": None if malformed_score else 0,
         "matched_phase": "preflop",
     }
+    metadata = (
+        {"fact": {"retrieval_scores": [score]}}
+        if composed_metadata
+        else {"retrieval_scores": [score]}
+    )
     event = {
         "event": "action",
         "fallback_used": False,
-        "memory_context": {"metadata": {"retrieval_scores": [score]}},
+        "memory_context": {"metadata": metadata},
     }
     (run / "events.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
     hands = [
@@ -127,6 +137,20 @@ def test_decision_point_smoke_gate_rejects_malformed_match(tmp_path: Path) -> No
 
     assert audit["status"] == "no_go"
     assert any("malformed decision-point" in item for item in audit["blockers"])
+
+
+def test_decision_point_smoke_gate_reads_composed_fact_metadata(
+    tmp_path: Path,
+) -> None:
+    audit = build_decision_point_smoke_gate(
+        _write_run(tmp_path, composed_metadata=True),
+        expected_code_sha="expected",
+        expected_train_hands=1,
+        expected_test_hands=1,
+    )
+
+    assert audit["status"] == "ready_to_start_v8_calibration_pilot"
+    assert audit["evidence"]["event_audit"]["retrieval_score_count"] == 1
 
 
 def test_decision_point_smoke_gate_expands_test_hands_per_target(

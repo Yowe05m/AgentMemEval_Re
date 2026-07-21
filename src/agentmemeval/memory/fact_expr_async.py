@@ -137,6 +137,7 @@ class FactExprAsyncMemory:
             self.fact.top_k,
             salience_fn=lambda record_id: self._salience(record_id, self.hand_counter + 1),
             embedding_backend=self.fact.embedding_backend,
+            retrieval_unit=self.fact.retrieval_unit,
         )
         retrieved = [item.record for item in scored]
         retrieved_ids = {item.record.record_id for item in scored}
@@ -149,8 +150,14 @@ class FactExprAsyncMemory:
                 "record_id": item.record.record_id,
                 "score": item.score,
                 "semantic": item.semantic,
+                "dense": item.dense,
+                "sparse": item.sparse,
+                "colbert": item.colbert,
                 "feature": item.feature,
                 "salience": item.salience,
+                "retrieval_unit": item.retrieval_unit,
+                "matched_decision_index": item.matched_decision_index,
+                "matched_phase": item.matched_phase,
             }
             for item in scored
         ]

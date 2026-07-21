@@ -187,7 +187,7 @@ def _audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         metadata = context.get("metadata")
         if not isinstance(metadata, dict):
             continue
-        for score in metadata.get("retrieval_scores", []):
+        for score in _retrieval_scores(metadata):
             if not isinstance(score, dict):
                 malformed.append(f"line {line_number}: non-object score")
                 continue
@@ -214,6 +214,18 @@ def _audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         "malformed_retrieval_scores": malformed,
         "blockers": blockers,
     }
+
+
+def _retrieval_scores(metadata: dict[str, Any]) -> list[Any]:
+    """Read factual scores from standalone or composed memory metadata."""
+
+    direct = metadata.get("retrieval_scores")
+    if isinstance(direct, list):
+        return direct
+    fact = metadata.get("fact")
+    if isinstance(fact, dict) and isinstance(fact.get("retrieval_scores"), list):
+        return fact["retrieval_scores"]
+    return []
 
 
 def _audit_snapshots(root: Path, config: dict[str, Any]) -> dict[str, Any]:

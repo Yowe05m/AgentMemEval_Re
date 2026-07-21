@@ -94,9 +94,17 @@ def build_relevance_review_pack(
                     facts = context.get("facts")
                     if not isinstance(metadata, dict) or not isinstance(facts, list):
                         continue
+                    retrieval_scores = metadata.get("retrieval_scores")
+                    if not isinstance(retrieval_scores, list):
+                        fact_metadata = metadata.get("fact")
+                        retrieval_scores = (
+                            fact_metadata.get("retrieval_scores", [])
+                            if isinstance(fact_metadata, dict)
+                            else []
+                        )
                     scores = {
                         str(item.get("record_id")): item
-                        for item in metadata.get("retrieval_scores", [])
+                        for item in retrieval_scores
                         if isinstance(item, dict) and item.get("record_id") is not None
                     }
                     observed_scores = [

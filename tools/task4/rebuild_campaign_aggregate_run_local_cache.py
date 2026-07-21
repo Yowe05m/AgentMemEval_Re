@@ -122,6 +122,8 @@ def build_correction(
     corrected_homogeneity = corrected.get("runtime_homogeneity", {})
     if corrected_homogeneity != normalized_homogeneity:
         blockers.append("corrected aggregate runtime identity differs from leaf audit")
+    corrected = _json_normalize(corrected)
+    corrected_homogeneity = corrected.get("runtime_homogeneity", {})
 
     observed_with_corrected_identity = copy.deepcopy(observed)
     observed_with_corrected_identity["runtime_homogeneity"] = corrected_homogeneity
@@ -225,6 +227,16 @@ def _json_sha256(value: Any) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _json_normalize(value: Any) -> Any:
+    """Return the exact JSON data model that would be persisted to disk.
+
+    Aggregate builders may use integer seed keys in memory. JSON object keys are
+    strings, so compare the rebuilt payload only after the same serialization
+    boundary used by the observed on-disk aggregate.
+    """
+    return json.loads(json.dumps(value, ensure_ascii=False))
 
 
 if __name__ == "__main__":

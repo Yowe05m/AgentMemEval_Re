@@ -370,6 +370,16 @@ def test_campaign_aggregate_cache_correction_changes_only_runtime_identity(
     )
 
 
+def test_campaign_aggregate_cache_correction_normalizes_json_seed_keys() -> None:
+    module = _aggregate_correction_module()
+
+    rebuilt = {"condition_units": {"fact": {2026072401: {"value": 1.0}}}}
+    observed = {"condition_units": {"fact": {"2026072401": {"value": 1.0}}}}
+
+    assert rebuilt != observed
+    assert module._json_normalize(rebuilt) == observed
+
+
 def test_campaign_aggregate_cache_correction_rejects_other_payload_changes(
     tmp_path: Path,
 ) -> None:
