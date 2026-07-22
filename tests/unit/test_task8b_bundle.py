@@ -3,20 +3,27 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
+from agentmemeval.config.loader import load_config
+from agentmemeval.core.errors import ConfigError
 from agentmemeval.evaluation.aggregation import (
     validate_runtime_homogeneity,
     validate_task8b_runtime_homogeneity,
 )
 from agentmemeval.evaluation.runtime_lock import runtime_identity_from_metadata
+from agentmemeval.experiments import task8b_bundle as task8b_bundle_module
 from agentmemeval.experiments.admission import _runtime_lock_blockers
 from agentmemeval.experiments.formal_protocol import (
     sha256_json,
     task8b_embedding_fingerprint,
 )
 from agentmemeval.experiments.formal_runner import _verify_completed_task_identity
-from agentmemeval.experiments.task8b_bundle import build_task8b_executable_bundle
+from agentmemeval.experiments.task8b_bundle import (
+    build_task8b_executable_bundle,
+    build_task8b_host_schedule,
+)
 from tests.unit.test_formal_freeze import _runtime_manifest
 
 
@@ -242,6 +249,142 @@ def test_formal_bundle_recomputes_complete_142200_hand_matrix(tmp_path: Path) ->
     assert primary["receipt_identity"] == secondary["dependency_receipt_identity"]
     assert primary["seed_pod_identity"] == secondary["seed_pod_identity"]
     assert len(primary["seed_pod_identity"]["task_schedules"]) == 10
+
+
+def test_task8b_explicit_zero_checkpoint_interval_preserves_frozen_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_path = Path("configs/formal/task8b_expedited_base.yaml")
+    config = load_config(base_path)
+    experiment = config["experiment"]
+    assert experiment["checkpoint_interval"] == 0
+    assert experiment["checkpoint_set"] == [30, 75, 150, 300]
+    assert experiment["required_seed_pairs"] == 12
+    assert experiment["expedited_protocol_amendment"]["seeds"] == list(
+        range(2026090101, 2026090113)
+    )
+    assert experiment["primary_endpoint"] == "final_test_bb_per_100"
+    assert experiment["primary_estimand"] == (
+        "same_seed_cross_condition_target_effect_vs_no_memory"
+    )
+    assert experiment["task8b_paired_interaction"] == (
+        "heldout_minus_source_mechanism_minus_fact"
+    )
+
+    matrix = _matrix(tmp_path / "matrix.csv")
+    identity = _identity(tmp_path / "identity.json")
+    runtime_root = "/root/autodl-tmp/task8b_explicit_zero_regression"
+    explicit_bundle = tmp_path / "explicit-zero"
+    absent_bundle = tmp_path / "absent"
+    explicit_result = build_task8b_executable_bundle(
+        matrix_path=matrix,
+        base_config_path=base_path,
+        fleet_identity_path=identity,
+        output_dir=explicit_bundle,
+        runtime_bundle_root=runtime_root,
+    )
+    original_load_raw_config = task8b_bundle_module.load_raw_config
+
+    def load_without_interval(path: str | Path) -> dict[str, object]:
+        value = original_load_raw_config(path)
+        if Path(path).resolve() == base_path.resolve():
+            value["experiment"].pop("checkpoint_interval")
+        return value
+
+    monkeypatch.setattr(
+        task8b_bundle_module,
+        "load_raw_config",
+        load_without_interval,
+    )
+    absent_result = build_task8b_executable_bundle(
+        matrix_path=matrix,
+        base_config_path=base_path,
+        fleet_identity_path=identity,
+        output_dir=absent_bundle,
+        runtime_bundle_root=runtime_root,
+    )
+
+    assert explicit_result == absent_result
+    explicit_files = {
+        path.relative_to(explicit_bundle): path.read_bytes()
+        for path in explicit_bundle.rglob("*")
+        if path.is_file()
+    }
+    absent_files = {
+        path.relative_to(absent_bundle): path.read_bytes()
+        for path in absent_bundle.rglob("*")
+        if path.is_file()
+    }
+    assert explicit_files == absent_files
+    generated_config = yaml.safe_load(
+        (explicit_bundle / "configs" / "isolation_async.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "checkpoint_interval" not in generated_config["experiment"]
+
+
+def test_task8b_11_host_schedule_is_wave_gated_and_fail_closed(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    build_task8b_executable_bundle(
+        matrix_path=_matrix(tmp_path / "matrix.csv"),
+        base_config_path="configs/formal/task8b_expedited_base.yaml",
+        fleet_identity_path=_identity(tmp_path / "identity.json"),
+        output_dir=bundle,
+        runtime_bundle_root="/root/autodl-tmp/task8b_bundle_test",
+    )
+    hosts = [f"physical-{index:02d}" for index in range(1, 12)]
+    schedule = build_task8b_host_schedule(
+        manifest_dir=bundle / "manifests",
+        host_ids=hosts,
+        output_path=tmp_path / "host_schedule.json",
+    )
+
+    assert schedule["worker_count"] == 24
+    assert schedule["max_active_workers"] == 11
+    assert [wave["max_active"] for wave in schedule["waves"]] == [11, 11, 2]
+    cards = [card for wave in schedule["waves"] for card in wave["assignments"]]
+    assert len({card["worker_id"] for card in cards}) == 24
+    assert len({card["cache_namespace"] for card in cards}) == 24
+    assert len({card["output_path"] for card in cards}) == 24
+    worker_wave = {
+        card["worker_id"]: wave["wave"]
+        for wave in schedule["waves"]
+        for card in wave["assignments"]
+    }
+    for wave in schedule["waves"]:
+        wave_cards = wave["assignments"]
+        assert len({card["host_id"] for card in wave_cards}) == len(wave_cards)
+        for card in wave_cards:
+            if card["role"] == "secondary":
+                assert worker_wave[card["depends_on"]] < wave["wave"]
+                assert card["start_gate"] == {
+                    "status": "verified_primary_receipt_required",
+                    "producer_worker_id": card["depends_on"],
+                    "receipt_relative_path": f"receipts/{card['depends_on']}.json",
+                }
+    assert len({card["host_id"] for card in cards}) == 11
+
+    primary_path = bundle / "manifests" / "P01.json"
+    primary = json.loads(primary_path.read_text(encoding="utf-8"))
+    primary["instance_identity"]["cache_namespace"] = "tampered/cache"
+    primary_path.write_text(json.dumps(primary), encoding="utf-8")
+    with pytest.raises(ConfigError, match="worker manifest SHA-256 不匹配：P01"):
+        build_task8b_host_schedule(
+            manifest_dir=bundle / "manifests",
+            host_ids=hosts,
+            output_path=tmp_path / "rejected_schedule.json",
+        )
+
+
+def test_task8b_11_host_schedule_rejects_duplicate_hosts(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="physical host IDs 必须唯一"):
+        build_task8b_host_schedule(
+            manifest_dir=tmp_path / "unused",
+            host_ids=["same-host"] * 11,
+            output_path=tmp_path / "host_schedule.json",
+        )
 
 
 def test_canary_bundle_is_real_two_worker_and_under_100_hands(tmp_path: Path) -> None:

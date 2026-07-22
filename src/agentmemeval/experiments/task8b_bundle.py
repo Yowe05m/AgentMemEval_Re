@@ -22,6 +22,7 @@ from agentmemeval.experiments.formal_runner import (
     TASK8B_FLEET_LOCK_FIELDS,
     TASK8B_FORMAL_SEEDS,
     generate_worker_manifests,
+    validate_worker_manifest_set,
 )
 
 CHECKPOINT_SET = [30, 75, 150, 300]
@@ -146,6 +147,121 @@ def build_task8b_executable_bundle(
     }
     _write_json_new(destination / "bundle_manifest.json", result)
     return result
+
+
+def build_task8b_host_schedule(
+    *,
+    manifest_dir: str | Path,
+    host_ids: list[str],
+    output_path: str | Path,
+) -> dict[str, Any]:
+    """Bind 24 frozen worker cards to 11 reusable physical hosts in gated waves."""
+
+    hosts = [str(host).strip() for host in host_ids]
+    if len(hosts) != 11 or any(not host for host in hosts):
+        raise ConfigError("TASK8B 24-worker 调度要求恰好 11 个非空 physical host IDs")
+    if len(set(hosts)) != len(hosts):
+        raise ConfigError("TASK8B physical host IDs 必须唯一")
+    source = Path(manifest_dir)
+    index = _read_json(source / "manifest_index.json")
+    index_body = dict(index)
+    recorded_bundle_sha256 = str(index_body.pop("bundle_sha256", ""))
+    if not recorded_bundle_sha256 or sha256_json(index_body) != recorded_bundle_sha256:
+        raise ConfigError("TASK8B manifest index bundle SHA-256 不匹配")
+    if int(index.get("worker_count", 0)) != 24 or int(index.get("seed_count", 0)) != 12:
+        raise ConfigError("TASK8B host schedule 只接受冻结的 12x2 / 24-worker bundle")
+    raw_rows = index.get("workers")
+    if not isinstance(raw_rows, list) or len(raw_rows) != 24:
+        raise ConfigError("TASK8B manifest index worker rows 不完整")
+    manifests: dict[str, dict[str, Any]] = {}
+    for row in raw_rows:
+        if not isinstance(row, dict):
+            raise ConfigError("TASK8B manifest index worker row 非法")
+        worker_id = str(row.get("worker_id", ""))
+        manifest = _read_json(source / f"{worker_id}.json")
+        if sha256_json(manifest) != str(row.get("manifest_sha256", "")):
+            raise ConfigError(f"TASK8B worker manifest SHA-256 不匹配：{worker_id}")
+        if (
+            manifest.get("role") != row.get("role")
+            or int(manifest.get("seed_bundle", -1)) != int(row.get("seed_bundle", -2))
+        ):
+            raise ConfigError(f"TASK8B manifest index identity 不匹配：{worker_id}")
+        manifests[worker_id] = manifest
+    validate_worker_manifest_set(list(manifests.values()), expected_seed_count=12)
+
+    pending = set(manifests)
+    completed_primaries: set[str] = set()
+    waves: list[dict[str, Any]] = []
+    while pending:
+        eligible = sorted(
+            (
+                manifest
+                for worker_id, manifest in manifests.items()
+                if worker_id in pending
+                and (
+                    manifest["role"] == "primary"
+                    or str(manifest.get("depends_on")) in completed_primaries
+                )
+            ),
+            key=lambda item: (item["role"] != "primary", str(item["worker_id"])),
+        )
+        if not eligible:
+            raise ConfigError("TASK8B host schedule 无可运行 worker；P/S receipt 依赖死锁")
+        selected = eligible[: len(hosts)]
+        wave_number = len(waves) + 1
+        cards = []
+        host_slots = hosts[: len(selected)]
+        for slot, (host_id, manifest) in enumerate(
+            zip(host_slots, selected, strict=True), start=1
+        ):
+            worker_id = str(manifest["worker_id"])
+            card = {
+                "slot": slot,
+                "host_id": host_id,
+                "worker_id": worker_id,
+                "role": manifest["role"],
+                "seed_bundle": manifest["seed_bundle"],
+                "manifest_relative_path": f"{worker_id}.json",
+                "manifest_sha256": sha256_json(manifest),
+                "cache_namespace": manifest["instance_identity"]["cache_namespace"],
+                "output_path": manifest["instance_identity"]["output_path"],
+                "depends_on": manifest.get("depends_on"),
+                "start_gate": (
+                    {"status": "manifest_admitted"}
+                    if manifest["role"] == "primary"
+                    else {
+                        "status": "verified_primary_receipt_required",
+                        "producer_worker_id": manifest["depends_on"],
+                        "receipt_relative_path": manifest["receipt_relative_path"],
+                    }
+                ),
+            }
+            cards.append(card)
+            pending.remove(worker_id)
+        completed_primaries.update(
+            str(manifest["worker_id"])
+            for manifest in selected
+            if manifest["role"] == "primary"
+        )
+        waves.append(
+            {
+                "wave": wave_number,
+                "max_active": len(cards),
+                "assignments": cards,
+            }
+        )
+    schedule = {
+        "schema_version": "task8b-11-host-wave-schedule-v1",
+        "manifest_bundle_sha256": recorded_bundle_sha256,
+        "physical_host_count": len(hosts),
+        "max_active_workers": len(hosts),
+        "worker_count": len(manifests),
+        "wave_count": len(waves),
+        "waves": waves,
+    }
+    schedule["schedule_sha256"] = sha256_json(schedule)
+    _write_json_new(Path(output_path), schedule)
+    return schedule
 
 
 def _write_task_configs(

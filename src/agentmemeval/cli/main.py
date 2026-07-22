@@ -33,7 +33,10 @@ from agentmemeval.experiments.formal_runner import (
     verify_checkpoint_receipt,
 )
 from agentmemeval.experiments.runner import run_config
-from agentmemeval.experiments.task8b_bundle import build_task8b_executable_bundle
+from agentmemeval.experiments.task8b_bundle import (
+    build_task8b_executable_bundle,
+    build_task8b_host_schedule,
+)
 from agentmemeval.experiments.task8b_transport import (
     archive_completed_worker,
     transfer_checkpoint_bundle,
@@ -79,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
             return _formal_status(args)
         if args.command == "task8b-build-bundle":
             return _task8b_build_bundle(args)
+        if args.command == "task8b-build-host-schedule":
+            return _task8b_build_host_schedule(args)
         if args.command == "task8b-transfer-checkpoint":
             return _task8b_transfer_checkpoint(args)
         if args.command == "task8b-archive-worker":
@@ -211,6 +216,15 @@ def build_parser() -> argparse.ArgumentParser:
     task8b_bundle.add_argument("--output-dir", required=True)
     task8b_bundle.add_argument("--runtime-bundle-root", required=True)
     task8b_bundle.add_argument("--canary-seed", type=int)
+    task8b_schedule = sub.add_parser(
+        "task8b-build-host-schedule",
+        help="将 24 个 frozen worker cards fail-closed 分配到 11-host waves",
+    )
+    task8b_schedule.add_argument("--manifest-dir", required=True)
+    task8b_schedule.add_argument(
+        "--hosts", required=True, help="逗号分隔的 11 个唯一 physical host IDs"
+    )
+    task8b_schedule.add_argument("--output", required=True)
     task8b_transfer = sub.add_parser(
         "task8b-transfer-checkpoint", help="逐文件验证并以 receipt-last 传输 checkpoint"
     )
@@ -426,6 +440,17 @@ def _task8b_build_bundle(args: argparse.Namespace) -> int:
         output_dir=args.output_dir,
         runtime_bundle_root=args.runtime_bundle_root,
         canary_seed=args.canary_seed,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _task8b_build_host_schedule(args: argparse.Namespace) -> int:
+    hosts = [value.strip() for value in str(args.hosts).split(",") if value.strip()]
+    result = build_task8b_host_schedule(
+        manifest_dir=args.manifest_dir,
+        host_ids=hosts,
+        output_path=args.output,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

@@ -45,6 +45,9 @@ experiment:
   evaluation_target_ids: [target_00]
   multiple_comparison_method: holm
   required_seed_pairs: 12
+  # Explicitly neutralize the legacy positive interval inherited from TASK6.
+  # TASK8B uses only the frozen nonuniform checkpoint_set below.
+  checkpoint_interval: 0
   checkpoint_set: [30, 75, 150, 300]
   heldout_table_set: [H01, H02, H03]
   heldout_table_rosters:
