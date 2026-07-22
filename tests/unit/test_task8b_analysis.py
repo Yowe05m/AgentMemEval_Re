@@ -149,6 +149,123 @@ def test_phase_f_preunlock_manifest_hashes_files_code_and_real_lock(
         task8b_analysis_module._validate_preunlock_manifest(tampered)
 
 
+def _write_input_builder_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path, Path, Path, Path]:
+    phase_f = tmp_path / "phase_f"
+    repo = tmp_path / "repo"
+    manifests = tmp_path / "manifests"
+    snapshots = tmp_path / "snapshots"
+    _write_phase_f_files(phase_f)
+    for relative_path in task8b_analysis_module.PHASE_F_ANALYSIS_CODE_FILES:
+        path = repo / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"code:{relative_path}\n", encoding="utf-8", newline="")
+    lock = repo / "uv.lock"
+    lock.write_text("version = 1\n", encoding="utf-8", newline="")
+    monkeypatch.setattr(task8b_analysis_module, "_git_clean_head", lambda _repo: "e" * 40)
+    preunlock = tmp_path / "pre-unlock.json"
+    build_task8b_preunlock_manifest(
+        phase_f,
+        lock,
+        preunlock,
+        repository_root=repo,
+        frozen_at_utc="2026-07-22T00:00:00+00:00",
+    )
+    manifest_index = manifests / "manifest_index.json"
+    _write_json(manifest_index, {"schema_version": "fixture"})
+    for index, seed in enumerate(range(2026090101, 2026090113), start=1):
+        for role in ("P", "S"):
+            worker_id = f"{role}{index:02d}"
+            _write_json(
+                manifests / f"{worker_id}.json",
+                {
+                    "protocol_status": "frozen/expedited-formal-candidate",
+                    "worker_id": worker_id,
+                    "pod_id": f"pod{index:02d}",
+                    "seed_bundle": seed,
+                    "common_identity": IDENTITY,
+                },
+            )
+            (snapshots / worker_id / str(seed) / "attempt_01").mkdir(parents=True)
+    return phase_f, repo, lock, manifests, snapshots
+
+
+def test_phase_f_input_separates_analysis_and_experiment_code_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    phase_f, repo, lock, manifests, snapshots = _write_input_builder_fixture(
+        tmp_path, monkeypatch
+    )
+    payload = build_task8b_analysis_input(
+        manifests,
+        snapshots,
+        tmp_path / "phase-f-input.json",
+        tmp_path / "pre-unlock.json",
+        repository_root=repo,
+        phase_f_dir=phase_f,
+        dependency_lock_path=lock,
+    )
+
+    assert payload["analysis_code_sha"] == "e" * 40
+    assert payload["analysis_code_dirty"] is False
+    assert payload["analysis_frozen_at_utc"] == "2026-07-22T00:00:00+00:00"
+    assert payload["dependency_lock_sha256"] == _sha256(lock)
+    assert payload["experiment_code_sha"] == IDENTITY["code_sha"]
+    assert payload["analysis_code_sha"] != payload["experiment_code_sha"]
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "message"),
+    (
+        ("src/agentmemeval/evaluation/task8b_analysis.py", "analysis code 文件 hash 不匹配"),
+        ("analysis_contract.md", "Phase F contract 文件 hash 不匹配"),
+    ),
+)
+def test_phase_f_input_rejects_tampered_preunlock_frozen_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+    message: str,
+) -> None:
+    phase_f, repo, lock, manifests, snapshots = _write_input_builder_fixture(
+        tmp_path, monkeypatch
+    )
+    target = repo / relative_path if relative_path.startswith("src/") else phase_f / relative_path
+    target.write_text("tampered after pre-unlock freeze\n", encoding="utf-8", newline="")
+
+    with pytest.raises(ConfigError, match=message):
+        build_task8b_analysis_input(
+            manifests,
+            snapshots,
+            tmp_path / "phase-f-input.json",
+            tmp_path / "pre-unlock.json",
+            repository_root=repo,
+            phase_f_dir=phase_f,
+            dependency_lock_path=lock,
+        )
+
+
+def test_phase_f_input_recomputes_preunlock_dependency_lock_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    phase_f, repo, lock, manifests, snapshots = _write_input_builder_fixture(
+        tmp_path, monkeypatch
+    )
+    lock.write_text("tampered lock after pre-unlock freeze\n", encoding="utf-8", newline="")
+
+    with pytest.raises(ConfigError, match="dependency lock hash 不匹配"):
+        build_task8b_analysis_input(
+            manifests,
+            snapshots,
+            tmp_path / "phase-f-input.json",
+            tmp_path / "pre-unlock.json",
+            repository_root=repo,
+            phase_f_dir=phase_f,
+            dependency_lock_path=lock,
+        )
+
+
 def _metric_records() -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     heldout_raw = {"Fact": "1.0", "Expr": "0.2", "Async": "0.6"}
@@ -603,7 +720,70 @@ def test_phase_f_lineage_and_inference_outputs_cover_frozen_schema(tmp_path: Pat
     }.issubset(lineage_fields)
     lineage_statuses = {row["verification_status"] for row in lineage_rows}
     assert lineage_statuses <= {"UNVERIFIED", "VERIFIED", "REJECTED"}
-    assert "VERIFIED" in lineage_statuses
+    required_nonempty = {
+        "lineage_id",
+        "output_artifact_id",
+        "output_element_id",
+        "output_kind",
+        "analysis_contract_id",
+        "analysis_code_sha",
+        "analysis_manifest_sha256",
+        "input_manifest_sha256",
+        "input_snapshot_id",
+        "exclusion_ledger_sha256",
+        "row_selector",
+        "transformation",
+        "aggregation_order",
+        "cluster_ids",
+        "statistical_unit",
+        "n_planned",
+        "n_effective",
+        "verification_status",
+        "source_records",
+    }
+    assert all(
+        all(str(row[field]).strip() for field in required_nonempty)
+        for row in lineage_rows
+    )
+    required_source_fields = {
+        "run_id",
+        "worker_id",
+        "pod_id",
+        "seed",
+        "condition",
+        "task_id",
+        "analysis_family",
+        "mechanism",
+        "memory_mode",
+        "location",
+        "checkpoint_hand",
+        "heldout_table_id",
+        "attempt",
+        "code_sha",
+        "config_sha256",
+        "prompt_sha256",
+        "model_fingerprint",
+        "embedding_fingerprint",
+        "schedule_sha256",
+        "source_file_relative_path",
+        "source_file_sha256",
+        "exclusion_status",
+    }
+    for row in lineage_rows:
+        source_records = json.loads(row["source_records"])
+        assert source_records
+        assert all(required_source_fields <= set(record) for record in source_records)
+        assert json.loads(row["aggregation_order"])
+        assert json.loads(row["cluster_ids"])
+        assert row["output_kind"] in {
+            "table_cell",
+            "figure_point",
+            "figure_line",
+            "figure_interval",
+            "caption_statistic",
+        }
+    assert all(row["output_kind"] != "raw_source_provenance" for row in lineage_rows)
+    assert (output / "raw_source_provenance.csv").is_file()
     with (output / "primary_inference.csv").open("r", encoding="utf-8", newline="") as handle:
         inference_fields = set(next(csv.reader(handle)))
     assert {
@@ -645,6 +825,162 @@ def test_phase_f_e6_contains_all_frozen_raw_robustness_fields(tmp_path: Path) ->
     }.issubset(fields)
 
 
+def test_primary_holm_family_is_unresolved_when_one_contrast_is_missing() -> None:
+    rows = task8b_analysis_module._primary_inference_rows(
+        [
+            {
+                "contrast": "Expr_vs_Fact",
+                "paired_interaction_bb_per_100": "1.00000000",
+            }
+        ]
+    )
+
+    assert [row["contrast"] for row in rows] == ["Expr_vs_Fact", "Async_vs_Fact"]
+    assert {row["holm_adjusted_p"] for row in rows} == {"UNRESOLVED"}
+    assert {row["holm_rank"] for row in rows} == {"UNRESOLVED"}
+    assert {row["holm_reject_0_05"] for row in rows} == {"UNRESOLVED"}
+    assert next(row for row in rows if row["contrast"] == "Async_vs_Fact")[
+        "n_effective"
+    ] == 0
+
+
+@pytest.mark.parametrize(
+    ("counter", "expected_reason"),
+    (
+        ("fallback_count", "FALLBACK_NONZERO"),
+        ("memory_revision_fallback_count", "REVISION_FALLBACK_NONZERO"),
+        (
+            "reward_conservation_violation_count",
+            "REWARD_CONSERVATION_VIOLATION",
+        ),
+        (
+            "stack_conservation_violation_count",
+            "STACK_CONSERVATION_VIOLATION",
+        ),
+    ),
+)
+def test_formal_health_counters_keep_distinct_frozen_exclusion_codes(
+    counter: str,
+    expected_reason: str,
+) -> None:
+    execution = {
+        "fallback_count": 0,
+        "memory_revision_fallback_count": 0,
+        "reward_conservation_violation_count": 0,
+        "stack_conservation_violation_count": 0,
+    }
+    execution[counter] = 1
+
+    reasons = task8b_analysis_module._formal_execution_health_reasons(execution)
+
+    assert reasons == [expected_reason]
+    assert task8b_analysis_module._ledger_reason_for(reasons) == expected_reason
+
+
+def test_formal_health_counter_ledger_priority_is_explicit() -> None:
+    reasons = task8b_analysis_module._formal_execution_health_reasons(
+        {
+            "fallback_count": 1,
+            "memory_revision_fallback_count": 1,
+            "reward_conservation_violation_count": 1,
+            "stack_conservation_violation_count": 1,
+        }
+    )
+
+    assert task8b_analysis_module._ledger_reason_for(reasons) == (
+        "REVISION_FALLBACK_NONZERO"
+    )
+
+
+def test_table3_lineage_uses_cell_specific_n_effective() -> None:
+    source_rows = [
+        {
+            "condition": "Fact",
+            "mechanism": "Fact",
+            "seed": seed,
+            "checkpoint": 30,
+            "task_id": "isolation_fact",
+            "analysis_family": "R1-E1-I",
+            "memory_mode": "Frozen",
+            "location": "Heldout",
+            "run_id": f"P{seed}",
+            "source_file": "metrics.json",
+            "source_file_sha256": "a" * 64,
+            "row_selector": "records[0]",
+        }
+        for seed in task8b_analysis_module.FORMAL_SEEDS[:7]
+    ]
+    rows = task8b_analysis_module._paper_lineage_rows(
+        (
+            [
+                {
+                    "mechanism": "Fact",
+                    "checkpoint_hand": 30,
+                    "seed_clusters_effective": 7,
+                    "generalization_gap_mean": "1.00000000",
+                }
+            ],
+        ),
+        ("table3_checkpoint_scan",),
+        source_rows,
+    )
+
+    assert rows
+    assert {int(row["n_effective"]) for row in rows} == {7}
+    assert {row["cluster_ids"] for row in rows} == {
+        ";".join(str(seed) for seed in task8b_analysis_module.FORMAL_SEEDS[:7])
+    }
+
+
+def test_figure_lineage_has_one_mark_per_plotting_row() -> None:
+    source = {
+        "condition": "Fact",
+        "mechanism": "Fact",
+        "seed": task8b_analysis_module.FORMAL_SEEDS[0],
+        "checkpoint": 300,
+        "task_id": "isolation_fact",
+        "analysis_family": "R1-E1-I",
+        "memory_mode": "Frozen",
+        "location": "Heldout",
+        "run_id": "P01:isolation_fact",
+        "source_file": "metrics.json",
+        "source_file_sha256": "a" * 64,
+        "row_selector": "records[0]",
+    }
+    figure_data = (
+        [{"order": 0, "source": "source train", "target": "checkpoint"}],
+        [{"mechanism": "Fact", "checkpoint_hand": 300, "n_effective": 1}],
+        [
+            {
+                "seed": task8b_analysis_module.FORMAL_SEEDS[0],
+                "contrast": "Expr_vs_Fact",
+                "paired_interaction_bb_per_100": "1.00000000",
+                "row_type": "seed",
+            }
+        ],
+        [
+            {
+                "seed": task8b_analysis_module.FORMAL_SEEDS[0],
+                "mechanism": "Fact",
+                "mode": "Actual Frozen",
+                "final_bb100": "1.00000000",
+            }
+        ],
+    )
+
+    rows = task8b_analysis_module._figure_lineage_rows(figure_data, [source])
+
+    assert len(rows) == sum(len(figure) for figure in figure_data)
+    assert {row["output_artifact_id"] for row in rows} == {
+        f"figure{index}_plotting_data.csv" for index in range(1, 5)
+    }
+    assert {row["output_kind"] for row in rows} <= {
+        "figure_point",
+        "figure_line",
+        "figure_interval",
+    }
+
+
 def _write_non_synthetic_24_worker_fixture(tmp_path: Path) -> tuple[Path, Path]:
     workers = []
     for index, seed in enumerate(range(2026090101, 2026090113), start=1):
@@ -682,6 +1018,10 @@ def _write_non_synthetic_24_worker_fixture(tmp_path: Path) -> tuple[Path, Path]:
             "analysis_contract_id": "task8b-phase-f-v1",
             "synthetic_test_mode": False,
             "analysis_code_sha": "e" * 40,
+            "analysis_code_dirty": False,
+            "analysis_frozen_at_utc": "2026-07-22T00:00:00+00:00",
+            "dependency_lock_sha256": "9" * 64,
+            "experiment_code_sha": IDENTITY["code_sha"],
             "input_snapshot_id": "synthetic-24-worker-render-fixture",
             "workers": workers,
         },
@@ -694,6 +1034,18 @@ def _write_non_synthetic_24_worker_fixture(tmp_path: Path) -> tuple[Path, Path]:
         newline="",
     )
     return manifest_path, ledger_path
+
+
+def test_phase_f_formal_input_requires_preunlock_dependency_lock_sha(
+    tmp_path: Path,
+) -> None:
+    manifest, ledger = _write_non_synthetic_24_worker_fixture(tmp_path)
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value.pop("dependency_lock_sha256")
+    _write_json(manifest, value)
+
+    with pytest.raises(ConfigError, match="dependency lock SHA-256"):
+        run_task8b_analysis(manifest, ledger, tmp_path / "analysis")
 
 
 def test_phase_f_rejects_same_budget_wrong_worker_seed_topology(tmp_path: Path) -> None:
@@ -990,6 +1342,44 @@ def test_phase_f_paper_renderer_emits_all_frozen_tables_figures_and_hashes(
         "n_effective",
         "status",
     }
+
+    with (output / "exclusion_retry_ledger.csv").open(
+        "r", encoding="utf-8", newline=""
+    ) as handle:
+        exclusion_fields = next(csv.reader(handle))
+    assert exclusion_fields == list(task8b_analysis_module.EXCLUSION_LEDGER_FIELDS)
+
+    analysis_manifest = json.loads(
+        (output / "analysis_manifest.json").read_text(encoding="utf-8")
+    )
+    assert analysis_manifest["analysis_code_sha"] == "e" * 40
+    assert analysis_manifest["experiment_code_sha"] == IDENTITY["code_sha"]
+    assert analysis_manifest["analysis_code_dirty"] is False
+    assert analysis_manifest["analysis_frozen_at_utc"] == "2026-07-22T00:00:00+00:00"
+    assert analysis_manifest["analysis_environment"]["locked_dependencies_sha256"] == "9" * 64
+    assert analysis_manifest["input_artifacts"]
+    assert analysis_manifest["exclusion_ledger"]["relative_path"]
+    assert analysis_manifest["exclusion_ledger"]["sha256"] == _sha256(
+        output / "exclusion_retry_ledger.csv"
+    )
+    assert len(analysis_manifest["planned_outputs"]) >= 11
+
+    with (output / "data_lineage.csv").open(
+        "r", encoding="utf-8", newline=""
+    ) as handle:
+        lineage_rows = list(csv.DictReader(handle))
+    figure_rows = [
+        row for row in lineage_rows if row["output_artifact_id"].startswith("figure")
+    ]
+    plotting_row_count = 0
+    for index in range(1, 5):
+        with (output / f"figure{index}_plotting_data.csv").open(
+            "r", encoding="utf-8", newline=""
+        ) as handle:
+            plotting_row_count += sum(1 for _ in csv.DictReader(handle))
+    assert len(figure_rows) == plotting_row_count
+    assert all(row["analysis_code_sha"] == "e" * 40 for row in figure_rows)
+    assert all(row["experiment_code_sha"] == IDENTITY["code_sha"] for row in figure_rows)
 
 
 def test_supplementary_lineage_uses_only_authoritative_family_and_mode_sources() -> None:

@@ -58,19 +58,26 @@ LINEAGE_FIELDS = (
     "output_kind",
     "analysis_contract_id",
     "analysis_code_sha",
+    "experiment_code_sha",
     "analysis_manifest_sha256",
     "input_manifest_sha256",
+    "input_snapshot_id",
     "exclusion_ledger_sha256",
     "run_id",
+    "worker_id",
+    "pod_id",
     "seed",
     "condition",
+    "mechanism",
     "task_id",
     "analysis_family",
     "memory_mode",
     "location",
     "checkpoint",
+    "checkpoint_hand",
     "heldout_table_id",
     "attempt",
+    "authoritative_attempt_rule",
     "code_sha",
     "config_sha256",
     "prompt_sha256",
@@ -78,20 +85,48 @@ LINEAGE_FIELDS = (
     "embedding_fingerprint",
     "schedule_sha256",
     "source_file",
+    "source_file_relative_path",
     "source_file_sha256",
     "row_selector",
+    "transformation",
+    "aggregation_order",
+    "cluster_ids",
     "exclusion_status",
     "statistical_unit",
     "n_planned",
     "n_effective",
-    "verification_status",
-    "input_snapshot_id",
-    "source_records",
-    "transformation",
-    "aggregation_order",
-    "cluster_ids",
     "missing_reason_codes",
+    "derived_value_full_precision",
     "display_value",
+    "verification_status",
+    "source_records",
+    "reviewer",
+    "reviewed_at_utc",
+)
+
+EXCLUSION_LEDGER_FIELDS = (
+    "ledger_entry_id",
+    "recorded_at_utc",
+    "recorded_before_effect_unblind",
+    "seed",
+    "pod_id",
+    "worker_id",
+    "run_id",
+    "attempt",
+    "scope",
+    "reason_code",
+    "eligible_retry",
+    "evidence_relative_path",
+    "evidence_sha256",
+    "retry_attempt",
+    "authoritative_attempt",
+    "excluded_from_confirmatory",
+    "excluded_from_secondary",
+    "decision_rule_version",
+    "review_status",
+    "reviewer",
+    "reviewed_at_utc",
+    "notes",
 )
 
 PHASE_F_REQUIRED_FILES = (
@@ -232,12 +267,18 @@ def _git_clean_head(repository_root: Path) -> str:
 
 def _validate_preunlock_manifest(path: Path) -> dict[str, Any]:
     value = _read_json(path)
+    frozen_at = str(value.get("frozen_at_utc", ""))
+    try:
+        parsed_frozen_at = dt.datetime.fromisoformat(frozen_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ConfigError("Phase F pre-unlock freeze timestamp 非法") from exc
     if (
         value.get("schema_version") != "task8b-phase-f-pre-unlock-v1"
         or value.get("analysis_contract_id") != "task8b-phase-f-v1"
         or value.get("manifest_status") != "FROZEN_BEFORE_FORMAL_RESULT"
         or value.get("formal_result_loaded") is not False
         or value.get("analysis_code_dirty") is not False
+        or parsed_frozen_at.tzinfo is None
         or not re.fullmatch(r"[0-9a-f]{40}", str(value.get("analysis_code_sha", "")))
     ):
         raise ConfigError("Phase F pre-unlock manifest 未满足揭盲前冻结门禁")
@@ -273,11 +314,65 @@ def _validate_preunlock_manifest(path: Path) -> dict[str, Any]:
     return value
 
 
+def _verify_preunlock_file_hashes(
+    manifest: dict[str, Any],
+    *,
+    repository_root: Path,
+    phase_f_root: Path,
+    dependency_lock_path: Path,
+) -> None:
+    """Recompute every frozen file hash before building an unblinded input manifest."""
+
+    groups = (
+        (manifest.get("analysis_code_files"), repository_root, "analysis code"),
+        (manifest.get("phase_f_files"), phase_f_root, "Phase F contract"),
+    )
+    for raw_rows, root, label in groups:
+        if not isinstance(raw_rows, list):
+            raise ConfigError(f"Phase F pre-unlock {label} 文件清单非法")
+        seen: set[str] = set()
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                raise ConfigError(f"Phase F pre-unlock {label} 文件行非法")
+            relative = str(row.get("relative_path", ""))
+            relative_path = Path(relative)
+            if (
+                not relative
+                or relative_path.is_absolute()
+                or ".." in relative_path.parts
+                or relative in seen
+            ):
+                raise ConfigError(f"Phase F pre-unlock {label} 文件路径非法")
+            seen.add(relative)
+            source = (root / relative_path).resolve()
+            if root.resolve() not in source.parents or not source.is_file():
+                raise ConfigError(f"Phase F pre-unlock {label} 文件缺失：{relative}")
+            if (
+                int(row.get("size", -1)) != source.stat().st_size
+                or str(row.get("sha256", "")) != _sha256(source)
+            ):
+                raise ConfigError(f"Phase F pre-unlock {label} 文件 hash 不匹配：{relative}")
+    lock = manifest.get("dependency_lock")
+    if not isinstance(lock, dict):
+        raise ConfigError("Phase F pre-unlock dependency lock 清单非法")
+    if (
+        dependency_lock_path.name != str(lock.get("name", ""))
+        or not dependency_lock_path.is_file()
+        or int(lock.get("size", -1)) != dependency_lock_path.stat().st_size
+        or str(lock.get("sha256", "")) != _sha256(dependency_lock_path)
+    ):
+        raise ConfigError("Phase F pre-unlock dependency lock hash 不匹配")
+
+
 def build_task8b_analysis_input(
     worker_manifest_dir: str | Path,
     snapshot_root: str | Path,
     output_path: str | Path,
     pre_unlock_manifest_path: str | Path,
+    *,
+    repository_root: str | Path | None = None,
+    phase_f_dir: str | Path | None = None,
+    dependency_lock_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build the formal Phase F input manifest from frozen manifests and recovered attempts."""
 
@@ -299,10 +394,35 @@ def build_task8b_analysis_input(
         raise ConfigError("Phase F input builder worker IDs 必须为 P01-P12/S01-S12")
     pre_unlock_path = Path(pre_unlock_manifest_path).resolve()
     pre_unlock = _validate_preunlock_manifest(pre_unlock_path)
-    if {
+    repo = (
+        Path(repository_root).resolve()
+        if repository_root is not None
+        else Path(__file__).parents[3].resolve()
+    )
+    phase_root = (
+        Path(phase_f_dir).resolve()
+        if phase_f_dir is not None
+        else (pre_unlock_path.parent / "phase_f_generated").resolve()
+    )
+    lock = (
+        Path(dependency_lock_path).resolve()
+        if dependency_lock_path is not None
+        else (repo / str(pre_unlock["dependency_lock"]["name"])).resolve()
+    )
+    _verify_preunlock_file_hashes(
+        pre_unlock,
+        repository_root=repo,
+        phase_f_root=phase_root,
+        dependency_lock_path=lock,
+    )
+    experiment_code_shas = {
         str(row.get("common_identity", {}).get("code_sha", "")) for row in worker_manifests
-    } != {str(pre_unlock["analysis_code_sha"])}:
-        raise ConfigError("Phase F pre-unlock analysis code SHA 与 worker canonical SHA 不一致")
+    }
+    if len(experiment_code_shas) != 1 or not re.fullmatch(
+        r"[0-9a-f]{40}", next(iter(experiment_code_shas), "")
+    ):
+        raise ConfigError("Phase F worker experiment code SHA 必须全局唯一且为完整 SHA")
+    experiment_code_sha = next(iter(experiment_code_shas))
     workers = []
     for manifest in sorted(worker_manifests, key=lambda row: str(row["worker_id"])):
         worker_id = str(manifest["worker_id"])
@@ -338,7 +458,11 @@ def build_task8b_analysis_input(
         "schema_version": "task8b-phase-f-input-v1",
         "analysis_contract_id": "task8b-phase-f-v1",
         "synthetic_test_mode": False,
-        "analysis_code_sha": workers[0]["expected_identity"]["code_sha"],
+        "analysis_code_sha": str(pre_unlock["analysis_code_sha"]),
+        "analysis_code_dirty": bool(pre_unlock["analysis_code_dirty"]),
+        "analysis_frozen_at_utc": str(pre_unlock["frozen_at_utc"]),
+        "dependency_lock_sha256": str(pre_unlock["dependency_lock"]["sha256"]),
+        "experiment_code_sha": experiment_code_sha,
         "input_snapshot_id": _sha256(manifest_dir / "manifest_index.json"),
         "unlocked_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "unlocked_by": "task8b-build-analysis-input",
@@ -401,6 +525,13 @@ def run_task8b_analysis(
         selected.append(chosen)
         exclusions.extend(rejected)
     synthetic_mode = bool(manifest.get("synthetic_test_mode", False))
+    if not synthetic_mode and manifest.get("analysis_code_dirty") is not False:
+        raise ConfigError("正式 Phase F analysis code 必须来自 pre-unlock clean freeze")
+    dependency_lock_sha = str(manifest.get("dependency_lock_sha256", ""))
+    if not synthetic_mode and not re.fullmatch(r"[0-9a-f]{64}", dependency_lock_sha):
+        raise ConfigError("正式 Phase F input 缺 pre-unlock dependency lock SHA-256")
+    if not synthetic_mode and not str(manifest.get("analysis_frozen_at_utc", "")):
+        raise ConfigError("正式 Phase F input 缺 pre-unlock freeze timestamp")
     if all((item["root"] / "worker_manifest.json").is_file() for item in selected):
         _validate_selected_seed_pods(selected, enforce_formal=not synthetic_mode)
 
@@ -414,24 +545,71 @@ def run_task8b_analysis(
     e6_rows = _e6_rows(selected)
     inference_rows = _primary_inference_rows(effect_rows)
     input_sha = _sha256(manifest_path)
-    ledger_sha = _sha256(ledger_path)
+    input_ledger_sha = _sha256(ledger_path)
+    normalized_exclusions = [
+        {
+            field: (
+                row.get(field, "")
+                if field != "notes"
+                else "; ".join(
+                    value
+                    for value in (
+                        str(row.get("notes", "")).strip(),
+                        f"validation_reasons={row.get('validation_reasons', '')}",
+                    )
+                    if value
+                )
+            )
+            for field in EXCLUSION_LEDGER_FIELDS
+        }
+        for row in exclusions
+    ]
+    generated_ledger_path = destination / "exclusion_retry_ledger.csv"
+    _write_csv(
+        generated_ledger_path,
+        normalized_exclusions,
+        fields=EXCLUSION_LEDGER_FIELDS,
+    )
+    generated_ledger_sha = _sha256(generated_ledger_path)
     if not synthetic_mode:
         _validate_formal_primary_effects(effect_rows)
     analysis_code_sha = str(
         manifest.get("analysis_code_sha") or selected[0]["identity"].get("code_sha", "")
     )
+    experiment_code_sha = str(
+        manifest.get("experiment_code_sha") or selected[0]["identity"].get("code_sha", "")
+    )
+    if not re.fullmatch(r"[0-9a-f]{40}", analysis_code_sha) or not re.fullmatch(
+        r"[0-9a-f]{40}", experiment_code_sha
+    ):
+        raise ConfigError("Phase F analysis/experiment code SHA 必须为完整 40-char SHA")
+    if any(
+        str(item["identity"].get("code_sha", "")) != experiment_code_sha
+        for item in selected
+    ):
+        raise ConfigError("Phase F experiment_code_sha 与 worker identity 不一致")
     result = {
         "schema_version": "task8b-phase-f-analysis-manifest-v1",
         "analysis_contract_id": str(manifest.get("analysis_contract_id", "")),
         "manifest_status": "SYNTHETIC_TEST" if synthetic_mode else "FORMAL_RESULT_LOADED",
         "created_at_utc": manifest.get("unlocked_at_utc"),
+        "analysis_frozen_at_utc": manifest.get("analysis_frozen_at_utc"),
         "frozen_before_result_unblinding": True,
         "analysis_code_sha": analysis_code_sha,
-        "analysis_code_dirty": "UNVERIFIED_NOT_ASSERTED",
+        "experiment_code_sha": experiment_code_sha,
+        "analysis_code_dirty": (
+            "UNVERIFIED_NOT_ASSERTED"
+            if synthetic_mode
+            else bool(manifest.get("analysis_code_dirty", True))
+        ),
         "analysis_environment": {
             "python": platform.python_version(),
             "platform": platform.platform(),
-            "locked_dependencies_sha256": _sha256(Path(__file__).parents[3] / "pyproject.toml"),
+            "locked_dependencies_sha256": (
+                dependency_lock_sha
+                if dependency_lock_sha
+                else "UNVERIFIED_SYNTHETIC_TEST"
+            ),
         },
         "protocol": {
             "n_planned": 12,
@@ -467,17 +645,53 @@ def run_task8b_analysis(
         "attempt_selection": "first_numerically_ordered_complete_valid_eligible_attempt",
         "input_snapshot": {
             "snapshot_id": manifest.get("input_snapshot_id"),
+            "local_read_only_path": str(manifest_path.parent),
+            "archive_manifest_sha256": input_sha,
             "input_manifest_sha256": input_sha,
             "per_file_hash_verification": "verified",
             "worker_count_verified": len(selected),
             "hands_budget_verified": "142200" if not synthetic_mode else "synthetic",
         },
+        "input_artifacts": [
+            {
+                "relative_path": manifest_path.name,
+                "sha256": input_sha,
+                "kind": "phase_f_input_manifest",
+            },
+            {
+                "relative_path": ledger_path.name,
+                "sha256": input_ledger_sha,
+                "kind": "exclusion_ledger",
+            },
+        ],
+        "exclusion_ledger": {
+            "relative_path": "exclusion_retry_ledger.csv",
+            "sha256": generated_ledger_sha,
+            "source_input_sha256": input_ledger_sha,
+            "review_status": "AUTOMATED_PRECHECK_ONLY",
+        },
+        "planned_outputs": [
+            "table1_protocol_identity.csv",
+            "table2_core_adaptation_generalization.csv",
+            "table3_checkpoint_scan.csv",
+            "table4_frozen_online_without.csv",
+            "table5_behavior_robustness.csv",
+            "figure1_protocol_flow",
+            "figure2_checkpoint_curves",
+            "figure3_paired_interactions",
+            "figure4_frozen_online_without",
+            "data_lineage.csv",
+            "raw_source_provenance.csv",
+            "automated_consistency_precheck.md",
+            "artifact_sha256.csv",
+            "independent_review_report.md",
+        ],
         "selected_worker_count": len(selected),
         "selected_seed_count": len({int(item["seed"]) for item in selected}),
         "primary_effect_row_count": len(effect_rows),
         "e6_row_count": len(e6_rows),
         "input_manifest_sha256": input_sha,
-        "exclusion_ledger_sha256": ledger_sha,
+        "exclusion_ledger_sha256": generated_ledger_sha,
         "bootstrap_seed": 2026090199,
         "bootstrap_replicates": 10000,
         "multiplicity": "holm",
@@ -501,20 +715,25 @@ def run_task8b_analysis(
             {
                 "analysis_contract_id": "task8b-phase-f-v1",
                 "analysis_code_sha": analysis_code_sha,
+                "experiment_code_sha": experiment_code_sha,
                 "analysis_manifest_sha256": manifest_sha,
                 "input_manifest_sha256": input_sha,
-                "exclusion_ledger_sha256": ledger_sha,
+                "exclusion_ledger_sha256": generated_ledger_sha,
                 "statistical_unit": "seed",
                 "n_planned": 12,
                 "n_effective": n_effective,
                 "verification_status": "VERIFIED",
             }
         )
+    _write_csv(
+        destination / "raw_source_provenance.csv",
+        lineage,
+        fields=LINEAGE_FIELDS,
+    )
     _write_csv(destination / "selected_attempts.csv", selected_rows)
     _write_csv(destination / "primary_seed_effects.csv", effect_rows)
     _write_csv(destination / "primary_inference.csv", inference_rows)
     _write_csv(destination / "e6_metrics.csv", e6_rows)
-    _write_csv(destination / "exclusion_retry_ledger.csv", exclusions)
     paper_lineage = _emit_paper_artifacts(
         destination=destination,
         selected_rows=selected_rows,
@@ -525,9 +744,24 @@ def run_task8b_analysis(
         render_figures=not bool(manifest.get("synthetic_test_mode", False)),
         source_lineage=lineage,
     )
+    for row in paper_lineage:
+        row.update(
+            {
+                "analysis_contract_id": "task8b-phase-f-v1",
+                "analysis_code_sha": analysis_code_sha,
+                "experiment_code_sha": experiment_code_sha,
+                "analysis_manifest_sha256": manifest_sha,
+                "input_manifest_sha256": input_sha,
+                "exclusion_ledger_sha256": generated_ledger_sha,
+                "input_snapshot_id": str(
+                    manifest.get("input_snapshot_id", "frozen_local_recovery")
+                ),
+            }
+        )
+    paper_lineage = _normalize_data_lineage_rows(paper_lineage, lineage)
     _write_csv(
         destination / "data_lineage.csv",
-        [*lineage, *paper_lineage],
+        paper_lineage,
         fields=LINEAGE_FIELDS,
     )
     _write_bytes_new(destination / "analysis_manifest.json", manifest_bytes)
@@ -704,16 +938,30 @@ def _metric_and_lineage_rows(
             lineage.append(
                 {
                     "run_id": item["worker_id"],
+                    "worker_id": item["worker_id"],
+                    "pod_id": item["pod_id"],
                     "seed": item["seed"],
                     "condition": str(record.get("mechanism", "")),
+                    "mechanism": str(record.get("mechanism", "")),
+                    "task_id": str(record.get("task_id", "synthetic")),
+                    "analysis_family": str(record.get("analysis_family", "R1-E1-I")),
+                    "memory_mode": str(record.get("memory_mode", "")),
+                    "location": str(record.get("location", "")),
                     "checkpoint": int(record.get("checkpoint_hand", 0)),
+                    "checkpoint_hand": int(record.get("checkpoint_hand", 0)),
                     "heldout_table_id": str(record.get("table_id", "")),
                     "attempt": item["attempt"],
+                    "authoritative_attempt_rule": (
+                        "first_numerically_ordered_complete_valid_eligible_attempt"
+                    ),
                     "code_sha": identity.get("code_sha", ""),
                     "config_sha256": identity.get("config_sha256", ""),
                     "prompt_sha256": identity.get("prompt_sha256", ""),
                     "model_fingerprint": identity.get("model_fingerprint", ""),
+                    "embedding_fingerprint": identity.get("embedding_fingerprint", ""),
+                    "schedule_sha256": identity.get("schedule_sha256", ""),
                     "source_file": "metrics.json",
+                    "source_file_relative_path": "metrics.json",
                     "source_file_sha256": _sha256(item["root"] / "metrics.json"),
                     "row_selector": f"records[{index}]",
                     "exclusion_status": "eligible",
@@ -811,14 +1059,7 @@ def _assess_formal_worker(
         if not isinstance(execution, dict) or execution.get("valid") is not True:
             reasons.append("HEALTH_INVALID")
         if isinstance(execution, dict):
-            counters = (
-                "fallback_count",
-                "memory_revision_fallback_count",
-                "reward_conservation_violation_count",
-                "stack_conservation_violation_count",
-            )
-            if any(int(execution.get(field, -1)) != 0 for field in counters):
-                reasons.append("FALLBACK_NONZERO")
+            reasons.extend(_formal_execution_health_reasons(execution))
         if (
             not isinstance(validity, dict)
             or validity.get("execution_valid") is not True
@@ -840,6 +1081,28 @@ def _assess_formal_worker(
     if len(isolation_schedules) != 1 or "" in isolation_schedules:
         reasons.append("CRN_INVALID")
     return sorted(set(reasons)), observed
+
+
+def _formal_execution_health_reasons(execution: dict[str, Any]) -> list[str]:
+    """Map each frozen health counter to its distinct exclusion reason."""
+
+    counter_reasons = (
+        ("fallback_count", "FALLBACK_NONZERO"),
+        ("memory_revision_fallback_count", "REVISION_FALLBACK_NONZERO"),
+        (
+            "reward_conservation_violation_count",
+            "REWARD_CONSERVATION_VIOLATION",
+        ),
+        (
+            "stack_conservation_violation_count",
+            "STACK_CONSERVATION_VIOLATION",
+        ),
+    )
+    return [
+        reason
+        for counter, reason in counter_reasons
+        if int(execution.get(counter, -1)) != 0
+    ]
 
 
 def _validate_selected_seed_pods(selected: list[dict[str, Any]], *, enforce_formal: bool) -> None:
@@ -1044,15 +1307,22 @@ def _formal_metric_rows(
             lineage.append(
                 {
                     "run_id": f"{item['worker_id']}:{task_id}",
+                    "worker_id": item["worker_id"],
+                    "pod_id": item["pod_id"],
                     "seed": item["seed"],
                     "condition": row["mechanism"],
+                    "mechanism": row["mechanism"],
                     "task_id": task_id,
                     "analysis_family": row.get("analysis_family", ""),
                     "memory_mode": row.get("memory_mode", ""),
                     "location": row.get("location", ""),
                     "checkpoint": row["checkpoint_hand"],
+                    "checkpoint_hand": row["checkpoint_hand"],
                     "heldout_table_id": row["table_id"],
                     "attempt": item["attempt"],
+                    "authoritative_attempt_rule": (
+                        "first_numerically_ordered_complete_valid_eligible_attempt"
+                    ),
                     "code_sha": task_identity.get("code_sha", ""),
                     "config_sha256": task_identity.get("resolved_config_sha256", ""),
                     "prompt_sha256": task_identity.get("prompt_sha256", ""),
@@ -1060,6 +1330,9 @@ def _formal_metric_rows(
                     "embedding_fingerprint": task_identity.get("embedding_fingerprint", ""),
                     "schedule_sha256": task_identity.get("schedule_sha256", ""),
                     "source_file": (
+                        task_root.relative_to(item["root"]) / "hand_summaries.jsonl"
+                    ).as_posix(),
+                    "source_file_relative_path": (
                         task_root.relative_to(item["root"]) / "hand_summaries.jsonl"
                     ).as_posix(),
                     "source_file_sha256": source_sha,
@@ -1462,6 +1735,9 @@ def _ledger_reason_for(reasons: list[str]) -> str:
     priority = (
         ("CRN_INVALID", "CRN_MISMATCH"),
         ("IDENTITY_INVALID", "IDENTITY_MISMATCH"),
+        ("REVISION_FALLBACK_NONZERO", "REVISION_FALLBACK_NONZERO"),
+        ("REWARD_CONSERVATION_VIOLATION", "REWARD_CONSERVATION_VIOLATION"),
+        ("STACK_CONSERVATION_VIOLATION", "STACK_CONSERVATION_VIOLATION"),
         ("FALLBACK_NONZERO", "FALLBACK_NONZERO"),
         ("COMPLETION_INVALID", "INVALID_RECEIPT_OR_DEPENDENCY"),
         ("ARTIFACT_HASH_INVALID", "ARTIFACT_INCOMPLETE_OR_HASH_MISMATCH"),
@@ -1559,13 +1835,177 @@ def _emit_paper_artifacts(
     )
     _write_text_new(destination / "automated_consistency_precheck.md", review)
     main_lineage = _paper_lineage_rows(tables, names, source_lineage)
+    figure_lineage = _figure_lineage_rows(figure_data, source_lineage)
     supplementary_lineage = _paper_lineage_rows(
         (leave_one_seed_out, secondary_mixed),
         ("leave_one_seed_out_robustness", "secondary_mixed_ecological"),
         source_lineage,
         table_offset=5,
     )
-    return [*main_lineage, *supplementary_lineage]
+    return [*main_lineage, *figure_lineage, *supplementary_lineage]
+
+
+def _figure_lineage_rows(
+    figure_data: tuple[list[dict[str, Any]], ...],
+    source_lineage: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Emit one lineage record for every machine-readable Figure 1-4 mark."""
+
+    source_names = (
+        "table1_protocol_identity",
+        "table3_checkpoint_scan",
+        "table2_core_adaptation_generalization",
+        "table4_frozen_online_without",
+    )
+    output: list[dict[str, Any]] = []
+    for figure_index, (rows, source_name) in enumerate(
+        zip(figure_data, source_names, strict=True), start=1
+    ):
+        for row_index, row in enumerate(rows, start=1):
+            candidates = _paper_lineage_rows(
+                ([row],),
+                (source_name,),
+                source_lineage,
+            )
+            lineage = dict(candidates[0]) if candidates else {}
+            lineage.update(
+                {
+                    "lineage_id": f"figure{figure_index}:mark:{row_index}",
+                    "output_artifact_id": f"figure{figure_index}_plotting_data.csv",
+                    "output_element_id": f"row={row_index}",
+                    "output_kind": (
+                        "figure_line"
+                        if figure_index in {1, 2}
+                        else "figure_interval"
+                        if str(row.get("row_type", "")) == "summary"
+                        else "figure_point"
+                    ),
+                    "row_selector": f"plotting_rows[{row_index - 1}]",
+                    "transformation": "frozen_figure_mark_from_plotting_row",
+                    "display_value": json.dumps(
+                        row,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                }
+            )
+            cluster_ids = str(lineage.get("cluster_ids", ""))
+            if "n_effective" in row:
+                lineage["n_effective"] = row["n_effective"]
+            elif row.get("seed") not in {None, ""}:
+                lineage["n_effective"] = 1
+            elif cluster_ids:
+                lineage["n_effective"] = len(cluster_ids.split(";"))
+            output.append(lineage)
+    return output
+
+
+def _normalize_data_lineage_rows(
+    rows: list[dict[str, Any]],
+    source_lineage: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Make every published lineage row a complete table/figure cell record."""
+
+    one_source_per_worker: dict[str, dict[str, Any]] = {}
+    for source in source_lineage:
+        worker_key = str(source.get("worker_id") or source.get("run_id", ""))
+        one_source_per_worker.setdefault(worker_key, source)
+    fallback_sources = [
+        _compact_lineage_source(one_source_per_worker[key])
+        for key in sorted(one_source_per_worker)
+    ]
+    required_nonempty = (
+        "lineage_id",
+        "output_artifact_id",
+        "output_element_id",
+        "output_kind",
+        "analysis_contract_id",
+        "analysis_code_sha",
+        "analysis_manifest_sha256",
+        "input_manifest_sha256",
+        "input_snapshot_id",
+        "exclusion_ledger_sha256",
+        "row_selector",
+        "transformation",
+        "statistical_unit",
+        "verification_status",
+    )
+    normalized_rows: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        try:
+            source_records = json.loads(str(row.get("source_records") or "[]"))
+        except json.JSONDecodeError as exc:
+            raise ConfigError("Phase F lineage source_records 必须为 JSON array") from exc
+        if not isinstance(source_records, list):
+            raise ConfigError("Phase F lineage source_records 必须为 JSON array")
+        if not source_records:
+            source_records = list(fallback_sources)
+        if not source_records:
+            raise ConfigError("Phase F lineage 每个输出单元必须具有 source_records")
+        source_records = [_compact_lineage_source(record) for record in source_records]
+        row["source_records"] = json.dumps(
+            source_records,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        cluster_ids = sorted(
+            {
+                int(record["seed"])
+                for record in source_records
+                if str(record.get("seed", "")).isdigit()
+            }
+        )
+        row["cluster_ids"] = json.dumps(cluster_ids, separators=(",", ":"))
+        aggregation = str(row.get("aggregation_order", "")).strip()
+        aggregation_steps = [step for step in aggregation.split("->") if step]
+        row["aggregation_order"] = json.dumps(
+            aggregation_steps or ["source_record", "output_element"],
+            separators=(",", ":"),
+        )
+        missing = str(row.get("missing_reason_codes", "")).strip()
+        row["missing_reason_codes"] = json.dumps(
+            [] if not missing else [missing],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if row.get("n_effective", "") == "":
+            row["n_effective"] = len(cluster_ids)
+        for field in required_nonempty:
+            if str(row.get(field, "")).strip() == "":
+                raise ConfigError(f"Phase F lineage required field 为空：{field}")
+        normalized_rows.append(row)
+    return normalized_rows
+
+
+def _compact_lineage_source(source: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": source.get("run_id", "synthetic"),
+        "worker_id": source.get("worker_id", ""),
+        "pod_id": source.get("pod_id", ""),
+        "seed": source.get("seed"),
+        "condition": source.get("condition", ""),
+        "task_id": source.get("task_id", "synthetic"),
+        "analysis_family": source.get("analysis_family") or "R1-E1-I",
+        "mechanism": source.get("mechanism") or source.get("condition"),
+        "memory_mode": source.get("memory_mode") or "Frozen",
+        "location": source.get("location"),
+        "checkpoint_hand": source.get("checkpoint_hand", source.get("checkpoint")),
+        "heldout_table_id": source.get("heldout_table_id") or None,
+        "attempt": source.get("attempt"),
+        "code_sha": source.get("code_sha"),
+        "config_sha256": source.get("config_sha256"),
+        "prompt_sha256": source.get("prompt_sha256"),
+        "model_fingerprint": source.get("model_fingerprint"),
+        "embedding_fingerprint": source.get("embedding_fingerprint"),
+        "schedule_sha256": source.get("schedule_sha256"),
+        "source_file_relative_path": source.get("source_file_relative_path")
+        or source.get("source_file"),
+        "source_file_sha256": source.get("source_file_sha256"),
+        "exclusion_status": source.get("exclusion_status", "eligible"),
+    }
 
 
 def _paper_lineage_rows(
@@ -1653,6 +2093,12 @@ def _paper_lineage_rows(
                 ]
             if not sources and name == "table1_protocol_identity":
                 sources = source_lineage
+            if name == "table1_protocol_identity":
+                one_per_worker: dict[str, dict[str, Any]] = {}
+                for source in sources:
+                    identity = str(source.get("worker_id") or source.get("run_id", ""))
+                    one_per_worker.setdefault(identity, source)
+                sources = [one_per_worker[key] for key in sorted(one_per_worker)]
             for field, value in row.items():
                 cell_sources = list(sources)
                 if (
@@ -1702,14 +2148,48 @@ def _paper_lineage_rows(
                 compact_sources = [
                     {
                         "run_id": source.get("run_id"),
+                        "worker_id": source.get("worker_id"),
+                        "pod_id": source.get("pod_id"),
                         "seed": source.get("seed"),
-                        "source_file": source.get("source_file"),
+                        "condition": source.get("condition"),
+                        "task_id": source.get("task_id"),
+                        "analysis_family": source.get("analysis_family"),
+                        "mechanism": source.get("mechanism", source.get("condition")),
+                        "memory_mode": source.get("memory_mode"),
+                        "location": source.get("location"),
+                        "checkpoint_hand": source.get(
+                            "checkpoint_hand", source.get("checkpoint")
+                        ),
+                        "heldout_table_id": source.get("heldout_table_id") or None,
+                        "attempt": source.get("attempt"),
+                        "code_sha": source.get("code_sha"),
+                        "config_sha256": source.get("config_sha256"),
+                        "prompt_sha256": source.get("prompt_sha256"),
+                        "model_fingerprint": source.get("model_fingerprint"),
+                        "embedding_fingerprint": source.get("embedding_fingerprint"),
+                        "schedule_sha256": source.get("schedule_sha256"),
+                        "source_file_relative_path": source.get("source_file"),
                         "source_file_sha256": source.get("source_file_sha256"),
-                        "row_selector": source.get("row_selector"),
+                        "exclusion_status": source.get("exclusion_status", "eligible"),
                     }
                     for source in cell_sources
                 ]
                 first = cell_sources[0] if cell_sources else {}
+                cluster_ids = sorted(
+                    {
+                        int(source["seed"])
+                        for source in cell_sources
+                        if str(source.get("seed", "")).isdigit()
+                    }
+                )
+                cell_n_effective = row.get(
+                    "n_effective",
+                    row.get("seed_clusters_effective", len(cluster_ids)),
+                )
+                try:
+                    derived_value: Any = float(value)
+                except (TypeError, ValueError):
+                    derived_value = ""
                 output.append(
                     {
                         "lineage_id": f"table{table_index}:r{row_index}:{field}",
@@ -1718,15 +2198,25 @@ def _paper_lineage_rows(
                         "output_kind": "table_cell",
                         "analysis_contract_id": "task8b-phase-f-v1",
                         "analysis_code_sha": first.get("analysis_code_sha", ""),
+                        "experiment_code_sha": first.get(
+                            "experiment_code_sha", first.get("code_sha", "")
+                        ),
                         "analysis_manifest_sha256": first.get("analysis_manifest_sha256", ""),
                         "input_manifest_sha256": first.get("input_manifest_sha256", ""),
                         "exclusion_ledger_sha256": first.get("exclusion_ledger_sha256", ""),
                         "run_id": first.get("run_id", "protocol"),
+                        "worker_id": first.get("worker_id", ""),
+                        "pod_id": first.get("pod_id", ""),
                         "seed": first.get("seed", ""),
                         "condition": mechanism or str(row.get("field", "protocol")),
+                        "mechanism": mechanism,
                         "checkpoint": checkpoint,
+                        "checkpoint_hand": checkpoint,
                         "heldout_table_id": "",
                         "attempt": first.get("attempt", ""),
+                        "authoritative_attempt_rule": (
+                            "first_numerically_ordered_complete_valid_eligible_attempt"
+                        ),
                         "code_sha": first.get("code_sha", ""),
                         "config_sha256": first.get("config_sha256", ""),
                         "prompt_sha256": first.get("prompt_sha256", ""),
@@ -1735,6 +2225,11 @@ def _paper_lineage_rows(
                         "schedule_sha256": first.get("schedule_sha256", ""),
                         "source_file": ";".join(
                             sorted({str(source.get("source_file", "")) for source in cell_sources})
+                        ),
+                        "source_file_relative_path": ";".join(
+                            sorted(
+                                {str(source.get("source_file", "")) for source in cell_sources}
+                            )
                         ),
                         "source_file_sha256": ";".join(
                             sorted(
@@ -1748,7 +2243,7 @@ def _paper_lineage_rows(
                         "exclusion_status": "eligible",
                         "statistical_unit": "seed",
                         "n_planned": 12,
-                        "n_effective": row.get("n_effective", ""),
+                        "n_effective": cell_n_effective,
                         "verification_status": "UNVERIFIED",
                         "input_snapshot_id": "frozen_local_recovery",
                         "source_records": json.dumps(
@@ -1759,20 +2254,14 @@ def _paper_lineage_rows(
                         ),
                         "transformation": "frozen_table_aggregation",
                         "aggregation_order": "target->table->seed->cross_seed",
-                        "cluster_ids": ";".join(
-                            str(seed)
-                            for seed in sorted(
-                                {
-                                    int(source["seed"])
-                                    for source in cell_sources
-                                    if str(source.get("seed", "")).isdigit()
-                                }
-                            )
-                        ),
+                        "cluster_ids": ";".join(str(seed) for seed in cluster_ids),
                         "missing_reason_codes": str(
                             row.get("missing_reason_codes", row.get("missing_reason", ""))
                         ),
                         "display_value": value,
+                        "derived_value_full_precision": derived_value,
+                        "reviewer": "",
+                        "reviewed_at_utc": "",
                     }
                 )
     return output
