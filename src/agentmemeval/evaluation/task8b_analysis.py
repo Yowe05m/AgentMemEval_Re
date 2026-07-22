@@ -37,6 +37,27 @@ FORMAL_SECONDARY_TASKS = {
     "async_online": (600, {"R1-E4"}),
     "async_without": (600, {"R1-E5"}),
 }
+RECOVERY_DISPOSITION = "VERIFIER_FALSE_POSITIVE_SAME_ATTEMPT_RECOVERY"
+RECOVERY_PROTOCOL_AMENDMENT_ID = "TASK8B-VFPR-20260722"
+RECOVERY_TASK_ID = "isolation_no_memory"
+RECOVERY_ADOPTION_SCHEMA = "task8b-same-attempt-task-adoption-v1"
+RECOVERY_TASK_RECEIPT_SCHEMA = "task8-worker-task-receipt-v1"
+RECOVERY_ATTESTATION_SCHEMA = "task8b-task1-adoption-attestation-v1"
+RECOVERY_CANONICAL_AUDIT_SCHEMA = "task8b-canonicalization-equivalence-audit-v1"
+RECOVERY_REASON = "resolved-config-integer-key-canonicalization"
+FROZEN_SCIENTIFIC_CODE_SHA = "a1d1eb97efb41d52585057ab7c9594dcd19227ae"
+RECOVERY_EVIDENCE_FIELDS = (
+    "protocol_amendment_sha256",
+    "verifier_code_sha",
+    "pre_recovery_archive_sha256",
+    "pre_recovery_file_manifest_sha256",
+    "original_terminal_state_sha256",
+    "original_expected_config_sha256",
+    "corrected_config_sha256",
+    "canonicalization_equivalence_audit_sha256",
+    "recovery_certificate_sha256",
+    "task1_adoption_attestation_sha256",
+)
 ALLOWED_EXCLUSION_REASONS = {
     "ARTIFACT_INCOMPLETE_OR_HASH_MISMATCH",
     "CRN_MISMATCH",
@@ -103,6 +124,25 @@ LINEAGE_FIELDS = (
     "reviewer",
     "reviewed_at_utc",
 )
+RECOVERY_LINEAGE_FIELDS = (
+    "recovery_disposition",
+    "verifier_code_sha",
+    "protocol_amendment_id",
+    "protocol_amendment_sha256",
+    "pre_recovery_archive_sha256",
+    "pre_recovery_file_manifest_sha256",
+    "original_terminal_state_sha256",
+    "original_expected_config_sha256",
+    "corrected_config_sha256",
+    "canonicalization_equivalence_audit_sha256",
+    "recovery_certificate_sha256",
+    "task1_adoption_attestation_sha256",
+    "scientific_execution_code_sha",
+    "source_execution_stage",
+    "raw_artifact_reused",
+    "task1_rerun_performed",
+)
+RAW_SOURCE_LINEAGE_FIELDS = LINEAGE_FIELDS + RECOVERY_LINEAGE_FIELDS
 
 EXCLUSION_LEDGER_FIELDS = (
     "ledger_entry_id",
@@ -728,7 +768,7 @@ def run_task8b_analysis(
     _write_csv(
         destination / "raw_source_provenance.csv",
         lineage,
-        fields=LINEAGE_FIELDS,
+        fields=RAW_SOURCE_LINEAGE_FIELDS,
     )
     _write_csv(destination / "selected_attempts.csv", selected_rows)
     _write_csv(destination / "primary_seed_effects.csv", effect_rows)
@@ -935,6 +975,9 @@ def _metric_and_lineage_rows(
             row = {**record, "seed": item["seed"], "worker_id": item["worker_id"]}
             metrics.append(row)
             identity = item["identity"]
+            recovery = _standard_lineage_recovery_context(
+                str(identity.get("code_sha", ""))
+            )
             lineage.append(
                 {
                     "run_id": item["worker_id"],
@@ -949,7 +992,11 @@ def _metric_and_lineage_rows(
                     "location": str(record.get("location", "")),
                     "checkpoint": int(record.get("checkpoint_hand", 0)),
                     "checkpoint_hand": int(record.get("checkpoint_hand", 0)),
-                    "heldout_table_id": str(record.get("table_id", "")),
+                    "heldout_table_id": (
+                        str(record.get("table_id", ""))
+                        if str(record.get("location", "")) == "Heldout"
+                        else None
+                    ),
                     "attempt": item["attempt"],
                     "authoritative_attempt_rule": (
                         "first_numerically_ordered_complete_valid_eligible_attempt"
@@ -965,6 +1012,7 @@ def _metric_and_lineage_rows(
                     "source_file_sha256": _sha256(item["root"] / "metrics.json"),
                     "row_selector": f"records[{index}]",
                     "exclusion_status": "eligible",
+                    **recovery,
                 }
             )
     lineage.sort(key=lambda row: tuple(str(row.get(field, "")) for field in LINEAGE_FIELDS))
@@ -1232,6 +1280,7 @@ def _formal_metric_rows(
     task_rows = manifest.get("task_configs", [])
     metrics: list[dict[str, Any]] = []
     lineage: list[dict[str, Any]] = []
+    worker_recovery = _worker_recovery_lineage_context(item)
     for task in sorted(task_rows, key=lambda row: str(row.get("task_id", ""))):
         task_id = str(task["task_id"])
         task_root = task_run_map[task_id]
@@ -1318,7 +1367,9 @@ def _formal_metric_rows(
                     "location": row.get("location", ""),
                     "checkpoint": row["checkpoint_hand"],
                     "checkpoint_hand": row["checkpoint_hand"],
-                    "heldout_table_id": row["table_id"],
+                    "heldout_table_id": (
+                        row["table_id"] if row.get("location") == "Heldout" else None
+                    ),
                     "attempt": item["attempt"],
                     "authoritative_attempt_rule": (
                         "first_numerically_ordered_complete_valid_eligible_attempt"
@@ -1338,9 +1389,239 @@ def _formal_metric_rows(
                     "source_file_sha256": source_sha,
                     "row_selector": f"derived_group[{index}]",
                     "exclusion_status": "eligible",
+                    **_task_recovery_lineage_context(worker_recovery, task_id),
                 }
             )
     return lineage, metrics
+
+
+def _standard_lineage_recovery_context(experiment_code_sha: str) -> dict[str, Any]:
+    if re.fullmatch(r"[0-9a-f]{40}", experiment_code_sha) is None:
+        raise ConfigError("Phase F source experiment code SHA 非法")
+    return {
+        "experiment_code_sha": experiment_code_sha,
+        "recovery_disposition": "NONE",
+        "verifier_code_sha": None,
+        "protocol_amendment_id": None,
+        "protocol_amendment_sha256": None,
+        "pre_recovery_archive_sha256": None,
+        "pre_recovery_file_manifest_sha256": None,
+        "original_terminal_state_sha256": None,
+        "original_expected_config_sha256": None,
+        "corrected_config_sha256": None,
+        "canonicalization_equivalence_audit_sha256": None,
+        "recovery_certificate_sha256": None,
+        "task1_adoption_attestation_sha256": None,
+        "scientific_execution_code_sha": experiment_code_sha,
+        "source_execution_stage": "standard",
+        "raw_artifact_reused": False,
+        "task1_rerun_performed": False,
+    }
+
+
+def _worker_recovery_lineage_context(item: dict[str, Any]) -> dict[str, Any]:
+    root = Path(item["root"])
+    experiment_code_sha = str(item["identity"].get("code_sha", ""))
+    standard = _standard_lineage_recovery_context(experiment_code_sha)
+    receipt_path = root / "task_receipts" / f"{RECOVERY_TASK_ID}.json"
+    recovery_root = root / "recovery_adoptions"
+    if recovery_root.is_symlink():
+        raise ConfigError("Phase F recovery evidence root 不得为 symlink")
+    recovery_root_present = recovery_root.exists()
+    recovery_files = (
+        sorted(path for path in recovery_root.rglob("*") if path.is_file())
+        if recovery_root.is_dir()
+        else []
+    )
+    if not receipt_path.is_file():
+        if recovery_root_present:
+            raise ConfigError("Phase F recovery evidence 存在但 task1 receipt 缺失")
+        return standard
+    receipt = _read_json(receipt_path)
+    recovery_intent = (
+        "recovery_adoption" in receipt
+        or "phase_f_evidence" in receipt
+        or recovery_root_present
+    )
+    adoption = receipt.get("recovery_adoption")
+    if adoption is None:
+        if recovery_intent:
+            raise ConfigError("Phase F partial/orphan recovery evidence 不得降级为 NONE")
+        return standard
+    if not isinstance(adoption, dict) or item["attempt"] != "attempt_01":
+        raise ConfigError("Phase F recovered source 必须是 attempt_01")
+    evidence = receipt.get("phase_f_evidence")
+    if not isinstance(evidence, dict) or set(evidence) != set(RECOVERY_EVIDENCE_FIELDS):
+        raise ConfigError("Phase F recovery receipt evidence 字段不闭合")
+    for field in RECOVERY_EVIDENCE_FIELDS:
+        pattern = r"[0-9a-f]{40}" if field == "verifier_code_sha" else r"[0-9a-f]{64}"
+        if re.fullmatch(pattern, str(evidence.get(field, ""))) is None:
+            raise ConfigError(f"Phase F recovery evidence SHA 非法：{field}")
+    if evidence["verifier_code_sha"] == experiment_code_sha:
+        raise ConfigError("Phase F verifier code 不得等同 scientific execution code")
+
+    canonical_path = recovery_root / f"{RECOVERY_TASK_ID}.canonicalization_audit.json"
+    attestation_path = recovery_root / f"{RECOVERY_TASK_ID}.adoption_attestation.json"
+    certificate_path = recovery_root / f"{RECOVERY_TASK_ID}.json"
+    expected_recovery_files = {canonical_path, attestation_path, certificate_path}
+    if set(recovery_files) != expected_recovery_files or any(
+        path.is_symlink() for path in expected_recovery_files
+    ):
+        raise ConfigError("Phase F recovery artifact 集合不闭合")
+    expected_hashes = {
+        canonical_path: evidence["canonicalization_equivalence_audit_sha256"],
+        attestation_path: evidence["task1_adoption_attestation_sha256"],
+        certificate_path: evidence["recovery_certificate_sha256"],
+    }
+    if any(_sha256(path) != digest for path, digest in expected_hashes.items()):
+        raise ConfigError("Phase F recovery artifact SHA 不匹配")
+
+    canonical = _read_json(canonical_path)
+    attestation = _read_json(attestation_path)
+    certificate = _read_json(certificate_path)
+    phase_f_base = {
+        field: evidence[field]
+        for field in RECOVERY_EVIDENCE_FIELDS
+        if field not in {"task1_adoption_attestation_sha256", "recovery_certificate_sha256"}
+    }
+    phase_f_without_certificate = {
+        **phase_f_base,
+        "task1_adoption_attestation_sha256": evidence[
+            "task1_adoption_attestation_sha256"
+        ],
+    }
+    if attestation.get("phase_f_evidence") != phase_f_base:
+        raise ConfigError("Phase F recovery attestation evidence 不一致")
+    if certificate.get("phase_f_evidence") != phase_f_without_certificate:
+        raise ConfigError("Phase F recovery certificate evidence 不一致")
+    if (
+        receipt.get("schema_version") != RECOVERY_TASK_RECEIPT_SCHEMA
+        or receipt.get("task_id") != RECOVERY_TASK_ID
+        or canonical.get("schema_version") != RECOVERY_CANONICAL_AUDIT_SCHEMA
+        or canonical.get("worker_id") != item["worker_id"]
+        or canonical.get("task_id") != RECOVERY_TASK_ID
+        or attestation.get("schema_version") != RECOVERY_ATTESTATION_SCHEMA
+        or attestation.get("worker_id") != item["worker_id"]
+        or attestation.get("task_id") != RECOVERY_TASK_ID
+        or attestation.get("protocol_amendment_id")
+        != RECOVERY_PROTOCOL_AMENDMENT_ID
+        or certificate.get("schema_version") != RECOVERY_ADOPTION_SCHEMA
+        or certificate.get("status") != "authorized-task1-adoption"
+        or certificate.get("reason") != RECOVERY_REASON
+        or certificate.get("worker_id") != item["worker_id"]
+        or certificate.get("task_id") != RECOVERY_TASK_ID
+        or certificate.get("protocol_amendment_id") != RECOVERY_PROTOCOL_AMENDMENT_ID
+        or certificate.get("frozen_code_sha") != FROZEN_SCIENTIFIC_CODE_SHA
+        or experiment_code_sha != FROZEN_SCIENTIFIC_CODE_SHA
+        or attestation.get("scientific_execution_code_sha")
+        != FROZEN_SCIENTIFIC_CODE_SHA
+        or certificate.get("effect_fields_read") is not False
+        or certificate.get("scientific_outcome_fields_accessed") is not False
+        or attestation.get("scientific_outcome_fields_accessed") is not False
+        or certificate.get("task1_rerun_performed") is not False
+        or attestation.get("task1_rerun_performed") is not False
+        or certificate.get("raw_artifact_bytes_modified") is not False
+        or attestation.get("raw_artifact_bytes_modified") is not False
+        or certificate.get("planned_hands") != 1350
+        or certificate.get("actual_hands") != 1350
+        or attestation.get("planned_hands") != 1350
+        or attestation.get("actual_hands") != 1350
+    ):
+        raise ConfigError("Phase F recovery certificate/attestation identity 非法")
+    if (
+        adoption.get("schema_version") != RECOVERY_ADOPTION_SCHEMA
+        or not str(adoption.get("authorization_id", "")).strip()
+        or re.fullmatch(r"[0-9a-f]{64}", str(adoption.get("authorization_sha256", "")))
+        is None
+        or adoption.get("authorization_id") != certificate.get("authorization_id")
+        or adoption.get("authorization_sha256")
+        != certificate.get("authorization_sha256")
+        or certificate.get("authorization_id") is None
+        or certificate.get("authorization_sha256") is None
+        or adoption.get("recovery_certificate_sha256")
+        != evidence["recovery_certificate_sha256"]
+    ):
+        raise ConfigError("Phase F recovery adoption receipt hash 不匹配")
+    identity_correction = certificate.get("identity_correction")
+    canonical_legacy = canonical.get("legacy_json_roundtrip_actual_sha256")
+    certificate_legacy = (
+        identity_correction.get("legacy_json_roundtrip_actual_sha256")
+        if isinstance(identity_correction, dict)
+        else None
+    )
+    if not isinstance(identity_correction, dict) or (
+        identity_correction.get("original_expected_sha256")
+        != evidence["original_expected_config_sha256"]
+        or identity_correction.get("corrected_actual_sha256")
+        != evidence["corrected_config_sha256"]
+        or canonical.get("original_expected_sha256")
+        != evidence["original_expected_config_sha256"]
+        or canonical.get("corrected_actual_sha256")
+        != evidence["corrected_config_sha256"]
+        or evidence["corrected_config_sha256"]
+        != evidence["original_expected_config_sha256"]
+        or re.fullmatch(r"[0-9a-f]{64}", str(canonical_legacy or "")) is None
+        or canonical_legacy != certificate_legacy
+        or canonical_legacy == evidence["original_expected_config_sha256"]
+        or canonical.get("semantic_equivalence_after_stringifying_mapping_keys")
+        is not True
+        or identity_correction.get(
+            "semantic_equivalence_after_stringifying_mapping_keys"
+        )
+        is not True
+        or canonical.get("only_authorized_difference")
+        != "integer-versus-string mapping keys"
+        or identity_correction.get("only_authorized_difference")
+        != "integer-versus-string mapping keys"
+    ):
+        raise ConfigError("Phase F recovery canonical identity correction 不一致")
+    with (root / "state.tsv").open("r", encoding="utf-8", newline="") as handle:
+        state_rows = list(csv.DictReader(handle, delimiter="\t"))
+    if not any(
+        row.get("status") == "failed"
+        and row.get("row_sha256") == evidence["original_terminal_state_sha256"]
+        for row in state_rows
+    ):
+        raise ConfigError("Phase F recovery original failed state row 缺失")
+    return {
+        "experiment_code_sha": experiment_code_sha,
+        "recovery_disposition": RECOVERY_DISPOSITION,
+        "verifier_code_sha": evidence["verifier_code_sha"],
+        "protocol_amendment_id": RECOVERY_PROTOCOL_AMENDMENT_ID,
+        "protocol_amendment_sha256": evidence["protocol_amendment_sha256"],
+        "pre_recovery_archive_sha256": evidence["pre_recovery_archive_sha256"],
+        "pre_recovery_file_manifest_sha256": evidence[
+            "pre_recovery_file_manifest_sha256"
+        ],
+        "original_terminal_state_sha256": evidence["original_terminal_state_sha256"],
+        "original_expected_config_sha256": evidence[
+            "original_expected_config_sha256"
+        ],
+        "corrected_config_sha256": evidence["corrected_config_sha256"],
+        "canonicalization_equivalence_audit_sha256": evidence[
+            "canonicalization_equivalence_audit_sha256"
+        ],
+        "recovery_certificate_sha256": evidence["recovery_certificate_sha256"],
+        "task1_adoption_attestation_sha256": evidence[
+            "task1_adoption_attestation_sha256"
+        ],
+        "scientific_execution_code_sha": experiment_code_sha,
+        "task1_rerun_performed": False,
+    }
+
+
+def _task_recovery_lineage_context(
+    worker_context: dict[str, Any], task_id: str
+) -> dict[str, Any]:
+    context = dict(worker_context)
+    if context["recovery_disposition"] == "NONE":
+        return context
+    task1 = task_id == RECOVERY_TASK_ID
+    context["source_execution_stage"] = (
+        "pre_recovery_task1" if task1 else "post_adoption_task2_plus"
+    )
+    context["raw_artifact_reused"] = task1
+    return context
 
 
 def _formal_metric_record(
@@ -1981,7 +2262,9 @@ def _normalize_data_lineage_rows(
 
 
 def _compact_lineage_source(source: dict[str, Any]) -> dict[str, Any]:
-    return {
+    experiment_code_sha = source.get("experiment_code_sha") or source.get("code_sha")
+    standard = _standard_lineage_recovery_context(str(experiment_code_sha or ""))
+    compact = {
         "run_id": source.get("run_id", "synthetic"),
         "worker_id": source.get("worker_id", ""),
         "pod_id": source.get("pod_id", ""),
@@ -1996,6 +2279,7 @@ def _compact_lineage_source(source: dict[str, Any]) -> dict[str, Any]:
         "heldout_table_id": source.get("heldout_table_id") or None,
         "attempt": source.get("attempt"),
         "code_sha": source.get("code_sha"),
+        "experiment_code_sha": experiment_code_sha,
         "config_sha256": source.get("config_sha256"),
         "prompt_sha256": source.get("prompt_sha256"),
         "model_fingerprint": source.get("model_fingerprint"),
@@ -2005,7 +2289,164 @@ def _compact_lineage_source(source: dict[str, Any]) -> dict[str, Any]:
         or source.get("source_file"),
         "source_file_sha256": source.get("source_file_sha256"),
         "exclusion_status": source.get("exclusion_status", "eligible"),
+        "recovery_disposition": source.get(
+            "recovery_disposition", standard["recovery_disposition"]
+        ),
+        "verifier_code_sha": source.get("verifier_code_sha"),
+        "protocol_amendment_id": source.get("protocol_amendment_id"),
+        "protocol_amendment_sha256": source.get("protocol_amendment_sha256"),
+        "pre_recovery_archive_sha256": source.get("pre_recovery_archive_sha256"),
+        "pre_recovery_file_manifest_sha256": source.get(
+            "pre_recovery_file_manifest_sha256"
+        ),
+        "original_terminal_state_sha256": source.get(
+            "original_terminal_state_sha256"
+        ),
+        "original_expected_config_sha256": source.get(
+            "original_expected_config_sha256"
+        ),
+        "corrected_config_sha256": source.get("corrected_config_sha256"),
+        "canonicalization_equivalence_audit_sha256": source.get(
+            "canonicalization_equivalence_audit_sha256"
+        ),
+        "recovery_certificate_sha256": source.get("recovery_certificate_sha256"),
+        "task1_adoption_attestation_sha256": source.get(
+            "task1_adoption_attestation_sha256"
+        ),
+        "scientific_execution_code_sha": source.get(
+            "scientific_execution_code_sha", standard["scientific_execution_code_sha"]
+        ),
+        "source_execution_stage": source.get(
+            "source_execution_stage", standard["source_execution_stage"]
+        ),
+        "raw_artifact_reused": source.get(
+            "raw_artifact_reused", standard["raw_artifact_reused"]
+        ),
+        "task1_rerun_performed": source.get(
+            "task1_rerun_performed", standard["task1_rerun_performed"]
+        ),
     }
+    _validate_compact_lineage_source(compact)
+    return compact
+
+
+def _validate_compact_lineage_source(source: dict[str, Any]) -> None:
+    required = {
+        "run_id",
+        "worker_id",
+        "pod_id",
+        "seed",
+        "condition",
+        "task_id",
+        "analysis_family",
+        "mechanism",
+        "memory_mode",
+        "location",
+        "checkpoint_hand",
+        "attempt",
+        "code_sha",
+        "experiment_code_sha",
+        "config_sha256",
+        "prompt_sha256",
+        "model_fingerprint",
+        "embedding_fingerprint",
+        "schedule_sha256",
+        "source_file_relative_path",
+        "source_file_sha256",
+        "exclusion_status",
+        *RECOVERY_LINEAGE_FIELDS,
+    }
+    if set(source) != required | {"heldout_table_id"}:
+        raise ConfigError("Phase F compact sourceRecord 字段集合不符合冻结 schema")
+    worker_id = str(source["worker_id"])
+    pod_id = str(source["pod_id"])
+    seed = source["seed"]
+    if (
+        not str(source["run_id"])
+        or re.fullmatch(r"[PS](0[1-9]|1[0-2])", worker_id) is None
+        or re.fullmatch(r"pod(0[1-9]|1[0-2])", pod_id) is None
+        or not isinstance(seed, int)
+        or not 2026090101 <= seed <= 2026090112
+        or not str(source["condition"])
+        or not str(source["task_id"])
+        or source["analysis_family"] not in {"R1-E1-I", "R1-E1-M", "R1-E4", "R1-E5"}
+        or source["mechanism"] not in {"NoMemory", "Fact", "Expr", "Sync", "Async"}
+        or source["memory_mode"] not in {"Frozen", "Online", "Without"}
+        or source["location"] not in {"Source", "Heldout"}
+        or source["checkpoint_hand"] not in {30, 75, 150, 300}
+        or source["heldout_table_id"] not in {"H01", "H02", "H03", None}
+        or re.fullmatch(r"(attempt_01|__attempt_[0-9]{2})", str(source["attempt"]))
+        is None
+        or source["exclusion_status"] not in {"eligible", "excluded", "missing"}
+    ):
+        raise ConfigError("Phase F compact sourceRecord identity/enum 非法")
+    for field in ("code_sha", "experiment_code_sha", "scientific_execution_code_sha"):
+        if re.fullmatch(r"[0-9a-f]{40}", str(source[field])) is None:
+            raise ConfigError(f"Phase F compact sourceRecord SHA 非法：{field}")
+    for field in (
+        "config_sha256",
+        "prompt_sha256",
+        "schedule_sha256",
+        "source_file_sha256",
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", str(source[field])) is None:
+            raise ConfigError(f"Phase F compact sourceRecord SHA 非法：{field}")
+    if any(
+        not str(source[field])
+        for field in (
+            "model_fingerprint",
+            "embedding_fingerprint",
+            "source_file_relative_path",
+        )
+    ):
+        raise ConfigError("Phase F compact sourceRecord required text 为空")
+    disposition = source["recovery_disposition"]
+    recovery_hashes = (
+        "protocol_amendment_sha256",
+        "pre_recovery_archive_sha256",
+        "pre_recovery_file_manifest_sha256",
+        "original_terminal_state_sha256",
+        "original_expected_config_sha256",
+        "corrected_config_sha256",
+        "canonicalization_equivalence_audit_sha256",
+        "recovery_certificate_sha256",
+        "task1_adoption_attestation_sha256",
+    )
+    if disposition == "NONE":
+        nullable = (
+            "verifier_code_sha",
+            "protocol_amendment_id",
+            *recovery_hashes,
+        )
+        if (
+            any(source[field] is not None for field in nullable)
+            or source["scientific_execution_code_sha"] != source["experiment_code_sha"]
+            or source["source_execution_stage"] != "standard"
+            or source["raw_artifact_reused"] is not False
+            or source["task1_rerun_performed"] is not False
+        ):
+            raise ConfigError("Phase F standard sourceRecord recovery 字段非法")
+        return
+    if disposition != RECOVERY_DISPOSITION:
+        raise ConfigError("Phase F compact sourceRecord recovery disposition 非法")
+    if (
+        source["attempt"] != "attempt_01"
+        or source["experiment_code_sha"] != FROZEN_SCIENTIFIC_CODE_SHA
+        or source["scientific_execution_code_sha"] != FROZEN_SCIENTIFIC_CODE_SHA
+        or re.fullmatch(r"[0-9a-f]{40}", str(source["verifier_code_sha"])) is None
+        or source["protocol_amendment_id"] != RECOVERY_PROTOCOL_AMENDMENT_ID
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(source[field])) is None
+            for field in recovery_hashes
+        )
+        or source["source_execution_stage"]
+        not in {"pre_recovery_task1", "post_adoption_task2_plus"}
+        or source["task1_rerun_performed"] is not False
+    ):
+        raise ConfigError("Phase F recovered sourceRecord 不符合冻结 schema")
+    expected_reuse = source["source_execution_stage"] == "pre_recovery_task1"
+    if source["raw_artifact_reused"] is not expected_reuse:
+        raise ConfigError("Phase F recovered sourceRecord raw reuse 与 execution stage 不一致")
 
 
 def _paper_lineage_rows(

@@ -54,6 +54,279 @@ def _write_json(path: Path, value: object) -> None:
     )
 
 
+def _write_recovered_lineage_fixture(
+    tmp_path: Path,
+    *,
+    scientific_sha: str = "a1d1eb97efb41d52585057ab7c9594dcd19227ae",
+    semantic_equivalence: bool = True,
+    effect_fields_read: bool = False,
+    legacy_hash: str | None = "6" * 64,
+) -> dict[str, Any]:
+    root = tmp_path / "attempt_01"
+    recovery = root / "recovery_adoptions"
+    original_expected = "5" * 64
+    corrected = original_expected
+    failed_row_sha = "7" * 64
+    canonical = {
+        "schema_version": "task8b-canonicalization-equivalence-audit-v1",
+        "worker_id": "P01",
+        "task_id": "isolation_no_memory",
+        **(
+            {"legacy_json_roundtrip_actual_sha256": legacy_hash}
+            if legacy_hash is not None
+            else {}
+        ),
+        "original_expected_sha256": original_expected,
+        "corrected_actual_sha256": corrected,
+        "semantic_equivalence_after_stringifying_mapping_keys": semantic_equivalence,
+        "only_authorized_difference": "integer-versus-string mapping keys",
+    }
+    canonical_path = recovery / "isolation_no_memory.canonicalization_audit.json"
+    _write_json(canonical_path, canonical)
+    phase_f_base = {
+        "protocol_amendment_sha256": "1" * 64,
+        "verifier_code_sha": "c00da5515af3d874b3499010a02addca2c75fbe4",
+        "pre_recovery_archive_sha256": "2" * 64,
+        "pre_recovery_file_manifest_sha256": "3" * 64,
+        "original_terminal_state_sha256": failed_row_sha,
+        "original_expected_config_sha256": original_expected,
+        "corrected_config_sha256": corrected,
+        "canonicalization_equivalence_audit_sha256": _sha256(canonical_path),
+    }
+    attestation = {
+        "schema_version": "task8b-task1-adoption-attestation-v1",
+        "worker_id": "P01",
+        "task_id": "isolation_no_memory",
+        "protocol_amendment_id": "TASK8B-VFPR-20260722",
+        "scientific_execution_code_sha": scientific_sha,
+        "planned_hands": 1350,
+        "actual_hands": 1350,
+        "task1_rerun_performed": False,
+        "raw_artifact_bytes_modified": False,
+        "scientific_outcome_fields_accessed": False,
+        "phase_f_evidence": phase_f_base,
+    }
+    attestation_path = recovery / "isolation_no_memory.adoption_attestation.json"
+    _write_json(attestation_path, attestation)
+    phase_f_without_certificate = {
+        **phase_f_base,
+        "task1_adoption_attestation_sha256": _sha256(attestation_path),
+    }
+    certificate = {
+        "schema_version": "task8b-same-attempt-task-adoption-v1",
+        "status": "authorized-task1-adoption",
+        "reason": "resolved-config-integer-key-canonicalization",
+        "worker_id": "P01",
+        "task_id": "isolation_no_memory",
+        "authorization_id": "fixture-authorization",
+        "authorization_sha256": "8" * 64,
+        "protocol_amendment_id": "TASK8B-VFPR-20260722",
+        "frozen_code_sha": scientific_sha,
+        "planned_hands": 1350,
+        "actual_hands": 1350,
+        "identity_correction": {
+            **(
+                {"legacy_json_roundtrip_actual_sha256": legacy_hash}
+                if legacy_hash is not None
+                else {}
+            ),
+            "original_expected_sha256": original_expected,
+            "corrected_actual_sha256": corrected,
+            "semantic_equivalence_after_stringifying_mapping_keys": semantic_equivalence,
+            "only_authorized_difference": "integer-versus-string mapping keys",
+        },
+        "effect_fields_read": effect_fields_read,
+        "scientific_outcome_fields_accessed": False,
+        "task1_rerun_performed": False,
+        "raw_artifact_bytes_modified": False,
+        "phase_f_evidence": phase_f_without_certificate,
+    }
+    certificate_path = recovery / "isolation_no_memory.json"
+    _write_json(certificate_path, certificate)
+    phase_f_evidence = {
+        **phase_f_without_certificate,
+        "recovery_certificate_sha256": _sha256(certificate_path),
+    }
+    _write_json(
+        root / "task_receipts" / "isolation_no_memory.json",
+        {
+            "schema_version": "task8-worker-task-receipt-v1",
+            "task_id": "isolation_no_memory",
+            "recovery_adoption": {
+                "schema_version": "task8b-same-attempt-task-adoption-v1",
+                "authorization_id": "fixture-authorization",
+                "authorization_sha256": "8" * 64,
+                "recovery_certificate_sha256": phase_f_evidence[
+                    "recovery_certificate_sha256"
+                ]
+            },
+            "phase_f_evidence": phase_f_evidence,
+        },
+    )
+    (root / "state.tsv").write_text(
+        "status\trow_sha256\nfailed\t" + failed_row_sha + "\n",
+        encoding="utf-8",
+        newline="",
+    )
+    return {
+        "worker_id": "P01",
+        "pod_id": "pod01",
+        "seed": 2026090101,
+        "attempt": "attempt_01",
+        "root": root,
+        "identity": {"code_sha": scientific_sha},
+    }
+
+
+def test_phase_f_recovery_lineage_context_is_fail_closed_and_stage_aware(
+    tmp_path: Path,
+) -> None:
+    item = _write_recovered_lineage_fixture(tmp_path)
+    worker = task8b_analysis_module._worker_recovery_lineage_context(item)
+    task1 = task8b_analysis_module._task_recovery_lineage_context(
+        worker, "isolation_no_memory"
+    )
+    task2 = task8b_analysis_module._task_recovery_lineage_context(
+        worker, "isolation_fact"
+    )
+    assert task1["recovery_disposition"] == (
+        "VERIFIER_FALSE_POSITIVE_SAME_ATTEMPT_RECOVERY"
+    )
+    assert task1["source_execution_stage"] == "pre_recovery_task1"
+    assert task1["raw_artifact_reused"] is True
+    assert task2["source_execution_stage"] == "post_adoption_task2_plus"
+    assert task2["raw_artifact_reused"] is False
+    assert task1["task1_rerun_performed"] is False
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "recovery_adoptions/isolation_no_memory.canonicalization_audit.json",
+        "recovery_adoptions/isolation_no_memory.adoption_attestation.json",
+        "recovery_adoptions/isolation_no_memory.json",
+    ],
+)
+def test_phase_f_recovery_lineage_rejects_tampered_evidence(
+    tmp_path: Path, relative_path: str
+) -> None:
+    item = _write_recovered_lineage_fixture(tmp_path)
+    path = item["root"] / relative_path
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(ConfigError, match="recovery artifact SHA"):
+        task8b_analysis_module._worker_recovery_lineage_context(item)
+
+
+def test_phase_f_recovery_lineage_rejects_partial_receipt(tmp_path: Path) -> None:
+    root = tmp_path / "attempt_01"
+    _write_json(
+        root / "task_receipts" / "isolation_no_memory.json",
+        {
+            "schema_version": "task8-worker-task-receipt-v1",
+            "task_id": "isolation_no_memory",
+            "phase_f_evidence": {},
+        },
+    )
+    item = {
+        "worker_id": "P01",
+        "attempt": "attempt_01",
+        "root": root,
+        "identity": {"code_sha": "a1d1eb97efb41d52585057ab7c9594dcd19227ae"},
+    }
+    with pytest.raises(ConfigError, match="partial/orphan recovery evidence"):
+        task8b_analysis_module._worker_recovery_lineage_context(item)
+
+
+def test_phase_f_recovery_lineage_rejects_empty_recovery_root(tmp_path: Path) -> None:
+    root = tmp_path / "attempt_01"
+    (root / "recovery_adoptions").mkdir(parents=True)
+    item = {
+        "worker_id": "P01",
+        "attempt": "attempt_01",
+        "root": root,
+        "identity": {"code_sha": "a1d1eb97efb41d52585057ab7c9594dcd19227ae"},
+    }
+    with pytest.raises(ConfigError, match="task1 receipt 缺失"):
+        task8b_analysis_module._worker_recovery_lineage_context(item)
+
+
+def test_phase_f_recovery_lineage_rejects_non_attempt01(tmp_path: Path) -> None:
+    item = _write_recovered_lineage_fixture(tmp_path)
+    item["attempt"] = "__attempt_02"
+    with pytest.raises(ConfigError, match="必须是 attempt_01"):
+        task8b_analysis_module._worker_recovery_lineage_context(item)
+
+
+@pytest.mark.parametrize(
+    ("fixture_kwargs", "message"),
+    [
+        ({"semantic_equivalence": False}, "canonical identity correction"),
+        ({"effect_fields_read": True}, "certificate/attestation identity"),
+        ({"scientific_sha": "a" * 40}, "certificate/attestation identity"),
+        ({"legacy_hash": None}, "canonical identity correction"),
+        ({"legacy_hash": "5" * 64}, "canonical identity correction"),
+    ],
+)
+def test_phase_f_recovery_lineage_rejects_semantically_invalid_crosslinked_evidence(
+    tmp_path: Path, fixture_kwargs: dict[str, Any], message: str
+) -> None:
+    item = _write_recovered_lineage_fixture(tmp_path, **fixture_kwargs)
+    with pytest.raises(ConfigError, match=message):
+        task8b_analysis_module._worker_recovery_lineage_context(item)
+
+
+def test_phase_f_compact_source_preserves_recovery_schema_fields(tmp_path: Path) -> None:
+    item = _write_recovered_lineage_fixture(tmp_path)
+    source = {
+        "run_id": "P01:isolation_no_memory",
+        "worker_id": "P01",
+        "pod_id": "pod01",
+        "seed": 2026090101,
+        "condition": "NoMemory",
+        "task_id": "isolation_no_memory",
+        "analysis_family": "R1-E1-I",
+        "mechanism": "NoMemory",
+        "memory_mode": "Frozen",
+        "location": "Source",
+        "checkpoint_hand": 300,
+        "attempt": "attempt_01",
+        "code_sha": item["identity"]["code_sha"],
+        "config_sha256": "b" * 64,
+        "prompt_sha256": "c" * 64,
+        "model_fingerprint": "qwen-frozen-v1",
+        "embedding_fingerprint": "bge-m3-frozen-v1",
+        "schedule_sha256": "d" * 64,
+        "source_file_relative_path": "runs/isolation_no_memory/hand_summaries.jsonl",
+        "source_file_sha256": "e" * 64,
+        "exclusion_status": "eligible",
+        **task8b_analysis_module._task_recovery_lineage_context(
+            task8b_analysis_module._worker_recovery_lineage_context(item),
+            "isolation_no_memory",
+        ),
+    }
+    compact = task8b_analysis_module._compact_lineage_source(source)
+    schema_path = (
+        Path(__file__).parents[3]
+        / "docs"
+        / "task-records"
+        / "TASK8B"
+        / "phase_f_generated"
+        / "data_lineage.schema.json"
+    )
+    source_schema = json.loads(schema_path.read_text(encoding="utf-8"))["$defs"][
+        "sourceRecord"
+    ]
+    assert set(source_schema["required"]) <= set(compact)
+    assert set(compact) <= set(source_schema["properties"])
+    assert compact["experiment_code_sha"] == (
+        "a1d1eb97efb41d52585057ab7c9594dcd19227ae"
+    )
+    assert compact["source_execution_stage"] == "pre_recovery_task1"
+    assert compact["raw_artifact_reused"] is True
+    assert compact["task1_rerun_performed"] is False
+    assert compact["recovery_certificate_sha256"]
+
+
 def test_phase_f_input_builder_explicitly_rejects_canary_protocol(
     tmp_path: Path,
 ) -> None:
