@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -336,37 +337,81 @@ def _validate_authorization(
         raise RecoveryError("authorization must be a regular file")
 
 
-def _read_baseline(path: Path) -> dict[str, tuple[int, str]]:
+@dataclass(frozen=True)
+class _BaselineManifest:
+    layout: str
+    rows: dict[str, tuple[int, str]]
+
+
+@dataclass(frozen=True)
+class _ArchiveClosure:
+    attempt_prefix: str
+    attempt_rows: dict[str, tuple[int, str]]
+
+
+def _safe_posix_relative(value: str, *, label: str) -> str:
+    candidate = PurePosixPath(value)
+    if (
+        not value
+        or not value.isascii()
+        or "\\" in value
+        or "\x00" in value
+        or candidate.is_absolute()
+        or not candidate.parts
+        or ".." in candidate.parts
+        or any(part in {"", "."} for part in candidate.parts)
+        or candidate.as_posix() != value
+    ):
+        raise RecoveryError(f"{label} path is invalid: {value!r}")
+    return value
+
+
+def _read_baseline(path: Path) -> _BaselineManifest:
     rows: dict[str, tuple[int, str]] = {}
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle, delimiter="\t")
-            if reader.fieldnames != ["relative_path", "size", "sha256"]:
+            if reader.fieldnames == ["relative_path", "size", "sha256"]:
+                layout = "canonical-one-root"
+                size_field = "size"
+            elif reader.fieldnames == ["sha256", "bytes", "relative_path"]:
+                layout = "legacy-composite"
+                size_field = "bytes"
+            else:
                 raise RecoveryError("baseline manifest header mismatch")
             for row in reader:
-                relative = str(row["relative_path"])
+                if None in row or any(value is None for value in row.values()):
+                    raise RecoveryError("baseline manifest row width mismatch")
+                relative = _safe_posix_relative(
+                    str(row["relative_path"]), label="baseline"
+                )
                 if relative in rows:
                     raise RecoveryError(f"duplicate baseline path: {relative}")
-                size = int(row["size"])
+                raw_size = str(row[size_field])
+                size = int(raw_size)
+                if size < 0 or str(size) != raw_size:
+                    raise RecoveryError(f"invalid baseline size: {relative}")
                 sha256 = str(row["sha256"])
-                if len(sha256) != 64:
+                if len(sha256) != 64 or any(
+                    char not in "0123456789abcdef" for char in sha256
+                ):
                     raise RecoveryError(f"invalid baseline SHA-256: {relative}")
                 rows[relative] = (size, sha256)
     except (OSError, UnicodeError, ValueError) as exc:
         raise RecoveryError("invalid baseline manifest") from exc
     if not rows:
         raise RecoveryError("baseline manifest is empty")
-    return rows
+    return _BaselineManifest(layout=layout, rows=rows)
 
 
 def _verify_baseline_subset(
     attempt_root: Path,
-    baseline: dict[str, tuple[int, str]],
+    attempt_baseline: dict[str, tuple[int, str]],
     *,
     append_only_paths: set[str] | None = None,
-) -> None:
+) -> dict[str, tuple[int, str]]:
     append_only_paths = append_only_paths or set()
-    for relative, (size, sha256) in baseline.items():
+    for relative, (size, sha256) in attempt_baseline.items():
         path = _inside(attempt_root, relative)
         if not path.is_file() or path.is_symlink():
             raise RecoveryError(f"baseline file missing or symlinked: {relative}")
@@ -374,16 +419,32 @@ def _verify_baseline_subset(
             continue
         if path.stat().st_size != size or _sha256_file(path) != sha256:
             raise RecoveryError(f"baseline file integrity mismatch: {relative}")
+    return attempt_baseline
 
 
 def _verify_archive_closure(
-    archive_path: Path, baseline: dict[str, tuple[int, str]]
-) -> None:
+    archive_path: Path, baseline: _BaselineManifest, manifest: dict[str, Any]
+) -> _ArchiveClosure:
     archived: dict[str, tuple[int, str]] = {}
+    archived_directories: set[str] = set()
     try:
         with tarfile.open(archive_path, "r:gz") as archive:
             members = archive.getmembers()
-            if any(not (member.isdir() or member.isfile()) for member in members):
+            def is_regular(member: tarfile.TarInfo) -> bool:
+                sparse_keys = {
+                    key for key in member.pax_headers if key.startswith("GNU.sparse")
+                }
+                return (
+                    member.type in {tarfile.REGTYPE, tarfile.AREGTYPE}
+                    and not member.sparse
+                    and not member.linkname
+                    and not sparse_keys
+                )
+
+            def is_directory(member: tarfile.TarInfo) -> bool:
+                return member.type == tarfile.DIRTYPE and not member.linkname
+
+            if any(not (is_directory(member) or is_regular(member)) for member in members):
                 raise RecoveryError(
                     "pre-recovery archive permits only directories and regular files"
                 )
@@ -392,27 +453,58 @@ def _verify_archive_closure(
             for member in members:
                 name = PurePosixPath(member.name)
                 normalized_name = name.as_posix()
+                raw_name = (
+                    member.name[:-1]
+                    if member.isdir() and member.name.endswith("/")
+                    else member.name
+                )
                 if (
                     name.is_absolute()
                     or not name.parts
                     or ".." in name.parts
                     or any(part in {"", "."} for part in name.parts)
+                    or not raw_name.isascii()
+                    or "\\" in raw_name
+                    or "\x00" in raw_name
+                    or raw_name != normalized_name
                     or normalized_name in seen_member_names
                 ):
                     raise RecoveryError("pre-recovery archive member path is invalid")
                 seen_member_names.add(normalized_name)
                 parsed_names.append((member, name))
-            roots = {name.parts[0] for _, name in parsed_names}
-            if len(roots) != 1:
+            regular_members = [member for member, _ in parsed_names if is_regular(member)]
+            if len(regular_members) != len(baseline.rows) or sum(
+                member.size for member in regular_members
+            ) != sum(size for size, _ in baseline.rows.values()):
+                raise RecoveryError("pre-recovery archive size/count mismatch")
+            file_names = [name.as_posix() for member, name in parsed_names if is_regular(member)]
+            if baseline.layout == "canonical-one-root":
+                roots = {PurePosixPath(name).parts[0] for name in file_names}
+                if len(roots) != 1:
+                    raise RecoveryError(
+                        "pre-recovery archive must have exactly one top-level root"
+                    )
+                root = next(iter(roots))
+                expected_archive_rows = {
+                    f"{root}/{relative}": value
+                    for relative, value in baseline.rows.items()
+                }
+            else:
+                expected_archive_rows = baseline.rows
+            if set(file_names) != set(expected_archive_rows):
                 raise RecoveryError(
-                    "pre-recovery archive must have exactly one top-level root"
+                    "pre-recovery archive is not closed by the baseline manifest"
                 )
             for member, name in parsed_names:
-                if member.isdir():
+                if is_directory(member):
+                    archived_directories.add(name.as_posix())
                     continue
-                relative = PurePosixPath(*name.parts[1:]).as_posix()
-                if not relative or relative in archived:
+                relative = name.as_posix()
+                if relative in archived:
                     raise RecoveryError("pre-recovery archive path set is invalid")
+                expected_size, _ = expected_archive_rows[relative]
+                if member.size != expected_size:
+                    raise RecoveryError("pre-recovery archive member size mismatch")
                 extracted = archive.extractfile(member)
                 if extracted is None:
                     raise RecoveryError("unable to read pre-recovery archive member")
@@ -427,10 +519,113 @@ def _verify_archive_closure(
                 archived[relative] = (size, digest.hexdigest())
     except (OSError, tarfile.TarError) as exc:
         raise RecoveryError("invalid pre-recovery archive") from exc
-    if archived != baseline:
+    if baseline.layout == "canonical-one-root":
+        roots = {PurePosixPath(name).parts[0] for name in archived}
+        if len(roots) != 1:
+            raise RecoveryError(
+                "pre-recovery archive must have exactly one top-level root"
+            )
+        stripped = {
+            PurePosixPath(*PurePosixPath(relative).parts[1:]).as_posix(): value
+            for relative, value in archived.items()
+        }
+        if stripped != baseline.rows:
+            raise RecoveryError(
+                "pre-recovery archive is not closed by the baseline manifest"
+            )
+        return _ArchiveClosure(
+            attempt_prefix=next(iter(roots)), attempt_rows=baseline.rows
+        )
+    if archived != baseline.rows:
         raise RecoveryError(
             "pre-recovery archive is not closed by the baseline manifest"
         )
+    worker_id = str(manifest.get("worker_id", ""))
+    seed = str(manifest.get("seed_bundle", ""))
+    output_path = str(manifest.get("instance_identity", {}).get("output_path", ""))
+    expected_output = f"outputs/formal/task8b/{worker_id}/{seed}"
+    if output_path != expected_output:
+        raise RecoveryError("legacy archive manifest output_path mismatch")
+    suffix = f"/{expected_output}/worker_manifest.json"
+    candidates = [name for name in archived if name.endswith(suffix)]
+    if len(candidates) != 1:
+        raise RecoveryError("legacy archive must identify exactly one manifest")
+    attempt_prefix = candidates[0][: -len("/worker_manifest.json")]
+    attempt_rows = {
+        name[len(attempt_prefix) + 1 :]: value
+        for name, value in archived.items()
+        if name.startswith(attempt_prefix + "/")
+    }
+    attempt_full_names = {
+        attempt_prefix + "/" + relative for relative in attempt_rows
+    }
+    external = {
+        name: value for name, value in archived.items() if name not in attempt_full_names
+    }
+    required = {
+        "worker_manifest.json",
+        "state.tsv",
+        f"runs/{TASK_ID}/hand_summaries.jsonl",
+    }
+    nested_manifests = [
+        relative
+        for relative in attempt_rows
+        if relative.endswith("/worker_manifest.json")
+    ]
+    if (
+        len(baseline.rows) != 42
+        or len(attempt_rows) != 38
+        or len(external) != 4
+        or not required.issubset(attempt_rows)
+        or nested_manifests
+    ):
+        raise RecoveryError("legacy archive external evidence count mismatch")
+    manifest_row = attempt_rows.get("worker_manifest.json")
+    global_manifest_names = [
+        name for name in external if name.endswith(f"/manifests/{worker_id}.json")
+    ]
+    global_manifest = (
+        external.get(global_manifest_names[0])
+        if len(global_manifest_names) == 1
+        else None
+    )
+    if manifest_row is None or global_manifest != manifest_row:
+        raise RecoveryError("legacy archive global manifest mismatch")
+    runtime_names = [name for name in external if name not in global_manifest_names]
+    runtime_parents = {str(PurePosixPath(name).parent) for name in runtime_names}
+    if len(runtime_names) != 3 or len(runtime_parents) != 1:
+        raise RecoveryError("legacy archive runtime evidence mismatch")
+    runtime_parent = next(iter(runtime_parents))
+    runtime_parent_parts = PurePosixPath(runtime_parent).parts
+    expected_runtime_names = {
+        f"{runtime_parent}/{worker_id}_attempt01.pid",
+        f"{runtime_parent}/{worker_id}_attempt01.log",
+        f"{runtime_parent}/{worker_id}_attempt01.exitcode",
+    }
+    if (
+        set(runtime_names) != expected_runtime_names
+        or len(runtime_parent_parts) < 5
+        or runtime_parent_parts[-4] != "runtime_control"
+        or runtime_parent_parts[-2:] != (worker_id, "attempt01")
+        or PurePosixPath(global_manifest_names[0]).parts[0]
+        != runtime_parent_parts[0]
+    ):
+        raise RecoveryError("legacy archive runtime evidence identity mismatch")
+    file_ancestors = {
+        PurePosixPath(*PurePosixPath(name).parts[:index]).as_posix()
+        for name in archived
+        for index in range(1, len(PurePosixPath(name).parts))
+    }
+    allowed_empty = runtime_parent + f"/{worker_id}_attempt01.launch.lock"
+    matplotlib_empty = (
+        attempt_prefix + f"/runs/{TASK_ID}/plots/.matplotlib"
+    )
+    if archived_directories - file_ancestors != {
+        allowed_empty,
+        matplotlib_empty,
+    }:
+        raise RecoveryError("legacy archive contains an unexpected empty directory")
+    return _ArchiveClosure(attempt_prefix=attempt_prefix, attempt_rows=attempt_rows)
 
 
 def _current_files(attempt_root: Path) -> set[str]:
@@ -675,11 +870,13 @@ def execute_recovery(
     ):
         raise RecoveryError("attempt worker_manifest is not byte-identical")
     baseline = _read_baseline(baseline_path)
-    _verify_archive_closure(archive_path.resolve(), baseline)
+    archive_closure = _verify_archive_closure(
+        archive_path.resolve(), baseline, manifest
+    )
     receipt_was_present = preexisting_task_receipt
-    _verify_baseline_subset(
+    attempt_baseline = _verify_baseline_subset(
         attempt_root,
-        baseline,
+        archive_closure.attempt_rows,
         append_only_paths={"state.tsv"} if receipt_was_present else set(),
     )
 
@@ -720,7 +917,7 @@ def execute_recovery(
                 certificate_path,
             )
         }
-        extras = _current_files(attempt_root) - set(baseline)
+        extras = _current_files(attempt_root) - set(attempt_baseline)
         if not extras.issubset(allowed_partial):
             raise RecoveryError(f"unexpected pre-adoption files: {sorted(extras)}")
 
@@ -918,9 +1115,13 @@ def build_authorization_draft(
         raise RecoveryError("protocol amendment id is not the frozen Phase F id")
     manifest = _read_json(manifest_path.resolve())
     baseline = _read_baseline(baseline_path.resolve())
-    _verify_archive_closure(archive_path.resolve(), baseline)
-    _verify_baseline_subset(attempt_root.resolve(), baseline)
-    if _current_files(attempt_root.resolve()) != set(baseline):
+    archive_closure = _verify_archive_closure(
+        archive_path.resolve(), baseline, manifest
+    )
+    attempt_baseline = _verify_baseline_subset(
+        attempt_root.resolve(), archive_closure.attempt_rows
+    )
+    if _current_files(attempt_root.resolve()) != set(attempt_baseline):
         raise RecoveryError(
             "draft requires an exactly closed pre-recovery attempt tree"
         )

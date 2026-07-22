@@ -174,7 +174,10 @@ def _fixture(tmp_path: Path, monkeypatch):
         "seed_bundle": 2026090103,
         "heldout_table_set": ["T01"],
         "checkpoint_set": [30, 75, 150, 300],
-        "instance_identity": {"cache_namespace": "task8b/P03"},
+        "instance_identity": {
+            "cache_namespace": "task8b/P03",
+            "output_path": "outputs/formal/task8b/P03/2026090103",
+        },
         "task_configs": [
             {
                 "task_id": recovery.TASK_ID,
@@ -292,6 +295,98 @@ def _fixture(tmp_path: Path, monkeypatch):
         "protocol_amendment_id": recovery.PROTOCOL_AMENDMENT_ID,
     }
     return kwargs, runner, child
+
+
+def _rewrite_as_legacy_composite(
+    kwargs,
+    *,
+    duplicate_attempt=None,
+    special_type=None,
+    bad_runtime=False,
+    extra_empty=False,
+):
+    attempt = kwargs["attempt_root"]
+    manifest = json.loads(kwargs["manifest_path"].read_text(encoding="utf-8"))
+    output_path = manifest["instance_identity"]["output_path"]
+    attempt_prefix = f"AgentMemEval_TASK8B_a1d1eb9_H03/{output_path}"
+    existing = [item for item in attempt.rglob("*") if item.is_file()]
+    for index in range(38 - len(existing)):
+        opaque = attempt / "runs" / recovery.TASK_ID / f"opaque_{index:02d}.bin"
+        opaque.write_bytes(b"\xff\x00opaque engineering evidence\n")
+    file_bytes = {
+        f"{attempt_prefix}/{path.relative_to(attempt).as_posix()}": path.read_bytes()
+        for path in sorted(item for item in attempt.rglob("*") if item.is_file())
+    }
+    if duplicate_attempt:
+        duplicate_root = (
+            f"{attempt_prefix}/nested/{output_path}"
+            if duplicate_attempt == "nested"
+            else f"Duplicate_TASK8B_H03/{output_path}"
+        )
+        file_bytes.update(
+            {
+                (
+                    f"{duplicate_root}/{path.relative_to(attempt).as_posix()}"
+                ): path.read_bytes()
+                for path in sorted(item for item in attempt.rglob("*") if item.is_file())
+            }
+        )
+    control_root = "task8b_formal_a1d1eb9_v1"
+    runtime = f"{control_root}/runtime_control/H03/P03/attempt01"
+    file_bytes[f"{control_root}/manifests/P03.json"] = kwargs[
+        "manifest_path"
+    ].read_bytes()
+    runtime_files = {
+        "P03_attempt01.exitcode": b"1\n",
+        "P03_attempt01.log": b"failed before receipt\n",
+        "P03_attempt01.pid": b"1234\n",
+    }
+    if bad_runtime:
+        runtime_files = {
+            "wrong-a.log": b"1\n",
+            "wrong-b.log": b"failed before receipt\n",
+            "wrong-c.log": b"1234\n",
+        }
+    for name, content in runtime_files.items():
+        file_bytes[f"{runtime}/{name}"] = content
+    with kwargs["baseline_path"].open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(("sha256", "bytes", "relative_path"))
+        for relative, content in sorted(file_bytes.items()):
+            writer.writerow(
+                (hashlib.sha256(content).hexdigest(), len(content), relative)
+            )
+    with tarfile.open(kwargs["archive_path"], "w:gz") as handle:
+        for relative, content in sorted(file_bytes.items()):
+            info = tarfile.TarInfo(relative)
+            info.size = len(content)
+            info.mtime = 0
+            if special_type is not None and relative.endswith(".pid"):
+                info.type = special_type
+            handle.addfile(info, io.BytesIO(content))
+        lock = tarfile.TarInfo(f"{runtime}/P03_attempt01.launch.lock")
+        lock.type = tarfile.DIRTYPE
+        lock.mtime = 0
+        handle.addfile(lock)
+        matplotlib_cache = tarfile.TarInfo(
+            f"{attempt_prefix}/runs/{recovery.TASK_ID}/plots/.matplotlib"
+        )
+        matplotlib_cache.type = tarfile.DIRTYPE
+        matplotlib_cache.mtime = 0
+        handle.addfile(matplotlib_cache)
+        if extra_empty:
+            unexpected = tarfile.TarInfo(f"{attempt_prefix}/unexpected-empty")
+            unexpected.type = tarfile.DIRTYPE
+            unexpected.mtime = 0
+            handle.addfile(unexpected)
+    authorization = json.loads(
+        kwargs["authorization_path"].read_text(encoding="utf-8")
+    )
+    authorization["baseline_manifest_sha256"] = _sha(kwargs["baseline_path"])
+    authorization["pre_recovery_archive_sha256"] = _sha(kwargs["archive_path"])
+    kwargs["authorization_path"].write_bytes(_json_bytes(authorization))
 
 
 def test_adoption_is_receipt_last_and_idempotent(tmp_path, monkeypatch):
@@ -440,6 +535,70 @@ def test_rejects_special_tar_member(tmp_path, monkeypatch):
     with pytest.raises(
         recovery.RecoveryError, match="only directories and regular files"
     ):
+        recovery.execute_recovery(**kwargs)
+    assert runner.writes == []
+
+
+def test_accepts_frozen_legacy_composite_archive_without_repacking(
+    tmp_path, monkeypatch
+):
+    kwargs, runner, _child = _fixture(tmp_path, monkeypatch)
+    _rewrite_as_legacy_composite(kwargs)
+    archive_before = kwargs["archive_path"].read_bytes()
+    baseline_before = kwargs["baseline_path"].read_bytes()
+
+    assert recovery.execute_recovery(**kwargs) == {
+        "status": "continued",
+        "resumed": True,
+    }
+    assert kwargs["archive_path"].read_bytes() == archive_before
+    assert kwargs["baseline_path"].read_bytes() == baseline_before
+    assert len(runner.resume_calls) == 1
+
+
+def test_rejects_ambiguous_legacy_attempt_subtrees(tmp_path, monkeypatch):
+    kwargs, runner, _child = _fixture(tmp_path, monkeypatch)
+    _rewrite_as_legacy_composite(kwargs, duplicate_attempt="separate")
+    with pytest.raises(
+        recovery.RecoveryError, match="exactly one manifest|exactly one attempt subtree"
+    ):
+        recovery.execute_recovery(**kwargs)
+    assert runner.writes == []
+
+
+def test_rejects_nested_legacy_attempt_subtree(tmp_path, monkeypatch):
+    kwargs, runner, _child = _fixture(tmp_path, monkeypatch)
+    _rewrite_as_legacy_composite(kwargs, duplicate_attempt="nested")
+    with pytest.raises(recovery.RecoveryError, match="exactly one manifest"):
+        recovery.execute_recovery(**kwargs)
+    assert runner.writes == []
+
+
+@pytest.mark.parametrize("special_type", [tarfile.GNUTYPE_SPARSE, tarfile.CONTTYPE])
+def test_rejects_legacy_sparse_and_contiguous_members(
+    tmp_path, monkeypatch, special_type
+):
+    kwargs, runner, _child = _fixture(tmp_path, monkeypatch)
+    _rewrite_as_legacy_composite(kwargs, special_type=special_type)
+    with pytest.raises(
+        recovery.RecoveryError, match="only directories and regular files"
+    ):
+        recovery.execute_recovery(**kwargs)
+    assert runner.writes == []
+
+
+def test_rejects_legacy_runtime_evidence_aliases(tmp_path, monkeypatch):
+    kwargs, runner, _child = _fixture(tmp_path, monkeypatch)
+    _rewrite_as_legacy_composite(kwargs, bad_runtime=True)
+    with pytest.raises(recovery.RecoveryError, match="runtime evidence identity"):
+        recovery.execute_recovery(**kwargs)
+    assert runner.writes == []
+
+
+def test_rejects_additional_legacy_empty_directory(tmp_path, monkeypatch):
+    kwargs, runner, _child = _fixture(tmp_path, monkeypatch)
+    _rewrite_as_legacy_composite(kwargs, extra_empty=True)
+    with pytest.raises(recovery.RecoveryError, match="unexpected empty directory"):
         recovery.execute_recovery(**kwargs)
     assert runner.writes == []
 
