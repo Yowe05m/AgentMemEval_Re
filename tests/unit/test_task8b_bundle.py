@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from agentmemeval.evaluation.runtime_lock import runtime_identity_from_metadata
 from agentmemeval.experiments import task8b_bundle as task8b_bundle_module
 from agentmemeval.experiments.admission import _runtime_lock_blockers
 from agentmemeval.experiments.formal_protocol import (
+    canonicalize_resolved_config_identity,
     sha256_json,
     task8b_embedding_fingerprint,
 )
@@ -146,6 +148,102 @@ def test_completed_primary_and_secondary_tasks_accept_distinct_cache_namespaces(
         actual_fingerprints.append(actual["embedding_fingerprint"])
 
     assert actual_fingerprints == [expected["embedding_fingerprint"]] * 2
+
+
+def test_task8b_resolved_config_identity_uses_one_json_canonicalization(
+    tmp_path: Path,
+) -> None:
+    base = task8b_bundle_module.load_raw_config(
+        "configs/formal/task8b_expedited_base.yaml"
+    )
+    base["experiment"].pop("checkpoint_interval", None)
+    config_path = task8b_bundle_module._write_task_configs(
+        base, tmp_path / "configs", is_canary=False
+    )["no_memory"]
+    config = load_config(config_path)
+    seed = 2026090105
+
+    legacy_bundle_semantic = copy.deepcopy(config)
+    legacy_bundle_semantic["experiment"]["seed"] = seed
+    legacy_bundle_semantic["experiment"].pop("output_root", None)
+    legacy_bundle_semantic["experiment"].pop("run_id", None)
+    legacy_bundle_semantic["experiment"].pop("initial_memory_snapshots", None)
+    legacy_bundle_semantic["experiment"].pop("admission_audit", None)
+    legacy_bundle_semantic["agent"].pop("embedding_cache_path", None)
+    legacy_bundle_semantic.pop("_config_path", None)
+    legacy_runner_semantic = json.loads(
+        json.dumps(legacy_bundle_semantic, ensure_ascii=False)
+    )
+    assert sha256_json(legacy_bundle_semantic) == (
+        "f79ff845002054bb5c9ccb7c84ca1ad777f1e2e92db3de30f9a6935addd3c6d4"
+    )
+    assert sha256_json(legacy_runner_semantic) == (
+        "488fc7e48a97602837402ec5a095ee28c4953623816cf6fff6718ab2866c76ed"
+    )
+
+    prompts = {"decision_version": "task8b-v1"}
+    model = {"name": "Qwen/Qwen3.5-9B", "revision": "frozen-revision"}
+    embedding = {
+        "backend": "sentence_transformers",
+        "name": "BAAI/bge-m3",
+        "revision": "frozen-revision",
+        "weights_hash": "a" * 64,
+    }
+    fleet_identity = {
+        "code_sha": "c" * 40,
+        "prompt_sha256": sha256_json(prompts),
+        "model_fingerprint": sha256_json(model),
+        "embedding_fingerprint": task8b_embedding_fingerprint(embedding),
+    }
+    schedule = {"schedule_sha256": "b" * 64}
+    expected = task8b_bundle_module._expected_identity(
+        config, seed, schedule, fleet_identity
+    )
+    assert expected["resolved_config_sha256"] == sha256_json(
+        canonicalize_resolved_config_identity(
+            {**config, "experiment": {**config["experiment"], "seed": seed}}
+        )
+    )
+
+    actual_config = copy.deepcopy(config)
+    actual_config["_config_path"] = "/runtime/resolved.yaml"
+    actual_config["experiment"].update(
+        {
+            "seed": seed,
+            "output_root": "/runtime/output",
+            "run_id": "runtime-run",
+            "initial_memory_snapshots": {"agent_00": "/runtime/snapshot.json"},
+            "admission_audit": {"status": "verified"},
+        }
+    )
+    actual_config["agent"]["embedding_cache_path"] = (
+        "/runtime/cache/{agent_id}.json"
+    )
+    child_run = tmp_path / "completed"
+    child_run.mkdir()
+    (child_run / "manifest.json").write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "code": {"commit": fleet_identity["code_sha"], "dirty": False},
+                    "prompts": prompts,
+                    "model": model,
+                    "embedding": embedding,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (child_run / "schedule_manifest.json").write_text(
+        json.dumps(schedule), encoding="utf-8"
+    )
+    actual = _verify_completed_task_identity(
+        manifest={"protocol_status": "frozen/expedited-formal-candidate"},
+        raw_task={"task_id": "isolation_no_memory", "expected_identity": expected},
+        config=actual_config,
+        child_run=child_run,
+    )
+    assert actual["resolved_config_sha256"] == expected["resolved_config_sha256"]
 
 
 def test_task8b_runtime_driver_is_informational_but_required_for_health_audit() -> None:

@@ -17,6 +17,7 @@ from agentmemeval.core.errors import ConfigError
 from agentmemeval.experiments.formal_protocol import (
     build_clone_audit,
     build_heldout_schedule_manifest,
+    canonicalize_resolved_config_identity,
     clone_memory_branches,
     sha256_json,
     task8b_embedding_fingerprint,
@@ -1137,7 +1138,9 @@ def _verify_completed_task_identity(
     actual = {
         "code_sha": dict(metadata.get("code", {})).get("commit"),
         "code_dirty": dict(metadata.get("code", {})).get("dirty"),
-        "resolved_config_sha256": sha256_json(_semantic_config(config)),
+        "resolved_config_sha256": sha256_json(
+            canonicalize_resolved_config_identity(config)
+        ),
         "prompt_sha256": sha256_json(metadata.get("prompts", {})),
         "model_fingerprint": sha256_json(metadata.get("model", {})),
         "embedding_fingerprint": task8b_embedding_fingerprint(
@@ -1169,19 +1172,6 @@ def _verify_completed_task_identity(
         },
     )
     return actual
-
-
-def _semantic_config(config: dict[str, Any]) -> dict[str, Any]:
-    value = json.loads(json.dumps(config, ensure_ascii=False))
-    value.pop("_config_path", None)
-    experiment = dict(value.get("experiment", {}))
-    for field in ("output_root", "run_id", "initial_memory_snapshots", "admission_audit"):
-        experiment.pop(field, None)
-    value["experiment"] = experiment
-    agent = dict(value.get("agent", {}))
-    agent.pop("embedding_cache_path", None)
-    value["agent"] = agent
-    return value
 
 
 def _primary_checkpoint_files(run_dir: Path, manifest: dict[str, Any]) -> list[str]:

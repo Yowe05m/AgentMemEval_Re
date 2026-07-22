@@ -14,6 +14,7 @@ from agentmemeval.config.loader import load_config, load_raw_config, validate_co
 from agentmemeval.core.errors import ConfigError
 from agentmemeval.experiments.formal_protocol import (
     build_heldout_schedule_manifest,
+    canonicalize_resolved_config_identity,
     sha256_json,
 )
 from agentmemeval.experiments.formal_runner import (
@@ -538,14 +539,8 @@ def _expected_identity(
     schedule: dict[str, Any],
     fleet_identity: dict[str, Any],
 ) -> dict[str, Any]:
-    semantic = copy.deepcopy(config)
+    semantic = canonicalize_resolved_config_identity(config)
     semantic["experiment"]["seed"] = seed
-    semantic["experiment"].pop("output_root", None)
-    semantic["experiment"].pop("run_id", None)
-    semantic["experiment"].pop("initial_memory_snapshots", None)
-    semantic["experiment"].pop("admission_audit", None)
-    semantic["agent"].pop("embedding_cache_path", None)
-    semantic.pop("_config_path", None)
     return {
         **{field: fleet_identity[field] for field in FLEET_COMMON_IDENTITY_FIELDS},
         "resolved_config_sha256": sha256_json(semantic),

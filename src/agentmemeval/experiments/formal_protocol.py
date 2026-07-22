@@ -30,6 +30,21 @@ def sha256_json(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def canonicalize_resolved_config_identity(config: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a resolved config before hashing its task identity."""
+
+    value = json.loads(json.dumps(config, ensure_ascii=False))
+    value.pop("_config_path", None)
+    experiment = dict(value.get("experiment", {}))
+    for field in ("output_root", "run_id", "initial_memory_snapshots", "admission_audit"):
+        experiment.pop(field, None)
+    value["experiment"] = experiment
+    agent = dict(value.get("agent", {}))
+    agent.pop("embedding_cache_path", None)
+    value["agent"] = agent
+    return value
+
+
 def task8b_embedding_fingerprint(embedding_metadata: Any) -> str:
     """Hash fleet-common embedding identity without its task-local cache path."""
 
