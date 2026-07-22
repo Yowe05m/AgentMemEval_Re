@@ -71,11 +71,7 @@ def _write_recovered_lineage_fixture(
         "schema_version": "task8b-canonicalization-equivalence-audit-v1",
         "worker_id": "P01",
         "task_id": "isolation_no_memory",
-        **(
-            {"legacy_json_roundtrip_actual_sha256": legacy_hash}
-            if legacy_hash is not None
-            else {}
-        ),
+        **({"legacy_json_roundtrip_actual_sha256": legacy_hash} if legacy_hash is not None else {}),
         "original_expected_sha256": original_expected,
         "corrected_actual_sha256": corrected,
         "semantic_equivalence_after_stringifying_mapping_keys": semantic_equivalence,
@@ -156,9 +152,7 @@ def _write_recovered_lineage_fixture(
                 "schema_version": "task8b-same-attempt-task-adoption-v1",
                 "authorization_id": "fixture-authorization",
                 "authorization_sha256": "8" * 64,
-                "recovery_certificate_sha256": phase_f_evidence[
-                    "recovery_certificate_sha256"
-                ]
+                "recovery_certificate_sha256": phase_f_evidence["recovery_certificate_sha256"],
             },
             "phase_f_evidence": phase_f_evidence,
         },
@@ -183,15 +177,9 @@ def test_phase_f_recovery_lineage_context_is_fail_closed_and_stage_aware(
 ) -> None:
     item = _write_recovered_lineage_fixture(tmp_path)
     worker = task8b_analysis_module._worker_recovery_lineage_context(item)
-    task1 = task8b_analysis_module._task_recovery_lineage_context(
-        worker, "isolation_no_memory"
-    )
-    task2 = task8b_analysis_module._task_recovery_lineage_context(
-        worker, "isolation_fact"
-    )
-    assert task1["recovery_disposition"] == (
-        "VERIFIER_FALSE_POSITIVE_SAME_ATTEMPT_RECOVERY"
-    )
+    task1 = task8b_analysis_module._task_recovery_lineage_context(worker, "isolation_no_memory")
+    task2 = task8b_analysis_module._task_recovery_lineage_context(worker, "isolation_fact")
+    assert task1["recovery_disposition"] == ("VERIFIER_FALSE_POSITIVE_SAME_ATTEMPT_RECOVERY")
     assert task1["source_execution_stage"] == "pre_recovery_task1"
     assert task1["raw_artifact_reused"] is True
     assert task2["source_execution_stage"] == "post_adoption_task2_plus"
@@ -313,14 +301,10 @@ def test_phase_f_compact_source_preserves_recovery_schema_fields(tmp_path: Path)
         / "phase_f_generated"
         / "data_lineage.schema.json"
     )
-    source_schema = json.loads(schema_path.read_text(encoding="utf-8"))["$defs"][
-        "sourceRecord"
-    ]
+    source_schema = json.loads(schema_path.read_text(encoding="utf-8"))["$defs"]["sourceRecord"]
     assert set(source_schema["required"]) <= set(compact)
     assert set(compact) <= set(source_schema["properties"])
-    assert compact["experiment_code_sha"] == (
-        "a1d1eb97efb41d52585057ab7c9594dcd19227ae"
-    )
+    assert compact["experiment_code_sha"] == ("a1d1eb97efb41d52585057ab7c9594dcd19227ae")
     assert compact["source_execution_stage"] == "pre_recovery_task1"
     assert compact["raw_artifact_reused"] is True
     assert compact["task1_rerun_performed"] is False
@@ -407,9 +391,7 @@ def test_phase_f_preunlock_manifest_hashes_files_code_and_real_lock(
     assert payload["analysis_code_sha"] == "a" * 40
     assert payload["dependency_lock"]["verified_real_lock"] is True
     assert payload["dependency_lock"]["sha256"] == _sha256(lock)
-    assert {row["relative_path"] for row in payload["phase_f_files"]} == set(
-        PHASE_F_REQUIRED_FILES
-    )
+    assert {row["relative_path"] for row in payload["phase_f_files"]} == set(PHASE_F_REQUIRED_FILES)
     assert {row["relative_path"] for row in payload["analysis_code_files"]} == set(
         task8b_analysis_module.PHASE_F_ANALYSIS_CODE_FILES
     )
@@ -420,6 +402,409 @@ def test_phase_f_preunlock_manifest_hashes_files_code_and_real_lock(
     _write_json(tampered, payload)
     with pytest.raises(ConfigError, match="揭盲前冻结门禁"):
         task8b_analysis_module._validate_preunlock_manifest(tampered)
+
+
+def test_phase_f_rejects_non_authoritative_recovery_supplement_v1(
+    tmp_path: Path,
+) -> None:
+    draft = tmp_path / "supplement-v1.json"
+    _write_json(
+        draft,
+        {
+            "schema_version": "task8b-phase-f-recovery-supplementary-freeze-v1",
+            "frozen_at_utc": "2026-07-22T20:16:00Z",
+        },
+    )
+
+    with pytest.raises(ConfigError, match="non-authoritative chronology draft"):
+        task8b_analysis_module._validate_preunlock_manifest(draft)
+
+
+def test_phase_f_inventory_delta_requires_exact_changed_files() -> None:
+    parent = {
+        "analysis_code_files": [{"relative_path": "code.py", "size": 1, "sha256": "a" * 64}],
+        "phase_f_files": [{"relative_path": "contract.md", "size": 2, "sha256": "b" * 64}],
+    }
+    current = {
+        "analysis_code_files": [{"relative_path": "code.py", "size": 3, "sha256": "c" * 64}],
+        "phase_f_files": [{"relative_path": "contract.md", "size": 2, "sha256": "b" * 64}],
+    }
+
+    assert task8b_analysis_module._inventory_delta(parent, current) == {
+        ("code.py", 1, "a" * 64, 3, "c" * 64)
+    }
+    assert task8b_analysis_module._declared_inventory_delta(
+        {
+            "changed_from_parent": [
+                {
+                    "relative_path": "code.py",
+                    "old_size": 1,
+                    "old_sha256": "a" * 64,
+                    "new_size": 3,
+                    "new_sha256": "c" * 64,
+                }
+            ]
+        }
+    ) == task8b_analysis_module._inventory_delta(parent, current)
+
+
+def _write_supplement_v2_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, dict[str, Any]]:
+    root = tmp_path / "workspace"
+    repo = root / "agentmemeval_rebuild"
+    records = root / "docs" / "task-records" / "TASK8B"
+    records.mkdir(parents=True)
+    repo.mkdir()
+    phase_f = records / "phase_f_generated"
+    _write_phase_f_files(phase_f)
+    code_path = repo / "src" / "agentmemeval" / "evaluation" / "task8b_analysis.py"
+    code_path.parent.mkdir(parents=True)
+    code_path.write_text("# recovery lineage code\n", encoding="utf-8", newline="")
+    contract_path = repo / "configs" / "formal" / "task8b_phase_f_contract.json"
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_text("{}\n", encoding="utf-8", newline="")
+    lock_path = repo / "uv.lock"
+    lock_path.write_text("version = 1\n", encoding="utf-8", newline="")
+    parent_path = records / "phase_f_pre_unlock_manifest_429e3f3.json"
+    amendment_path = records / "task8b_verifier_recovery_amendment_v1.json"
+    draft_path = records / "phase_f_recovery_supplementary_freeze_563e73e.json"
+    revocation_path = records / "phase_f_recovery_supplement_revocation_v1.json"
+    receipt_path = records / "phase_f_recovery_lineage_test_receipt_v2.json"
+    evidence_paths = [
+        records / "0722_21_非实验性故障自动恢复与断点续跑协议修订.md",
+        records / "0722_24_P03断点恢复与Legacy归档兼容记录.md",
+        records / "current_worker_execution_ledger_v2.csv",
+    ]
+    old_code = {
+        "relative_path": "src/agentmemeval/evaluation/task8b_analysis.py",
+        "size": 1,
+        "sha256": "1" * 64,
+    }
+    new_code = {
+        "relative_path": old_code["relative_path"],
+        "size": code_path.stat().st_size,
+        "sha256": _sha256(code_path),
+    }
+    contract = {
+        "relative_path": "configs/formal/task8b_phase_f_contract.json",
+        "size": contract_path.stat().st_size,
+        "sha256": _sha256(contract_path),
+    }
+    phase_rows = [
+        {
+            "relative_path": relative,
+            "size": (phase_f / relative).stat().st_size,
+            "sha256": _sha256(phase_f / relative),
+        }
+        for relative in PHASE_F_REQUIRED_FILES
+    ]
+    parent = {
+        "analysis_code_files": [old_code, contract],
+        "phase_f_files": phase_rows,
+    }
+    _write_json(parent_path, parent)
+    _write_json(amendment_path, {"amendment_id": "TASK8B-VFPR-20260722"})
+    _write_json(draft_path, {"supplement_id": "draft"})
+    for path in evidence_paths:
+        path.write_text("blind evidence\n", encoding="utf-8", newline="")
+    draft_sha = "cc81d36df4a2dd05fc7b32437993a262b378bca68194f505d84c7b31ad177e5d"
+    revocation = {
+        "schema_version": "task8b-phase-f-supplement-revocation-v1",
+        "disposition": "NON_AUTHORITATIVE_DRAFT",
+        "reason_code": "IMPOSSIBLE_PRECOMMIT_FREEZE_TIMESTAMP",
+        "revoked_manifest_sha256": draft_sha,
+        "revoked_manifest_size": draft_path.stat().st_size,
+        "formal_result_loaded": False,
+        "scientific_outcome_fields_accessed": False,
+        "parent_not_modified": True,
+        "scientific_protocol_changed": False,
+    }
+    _write_json(revocation_path, revocation)
+    receipt = {
+        "schema_version": "task8b-phase-f-recovery-lineage-test-receipt-v2",
+        "recorded_at_utc": "2026-07-22T20:31:00Z",
+        "analysis_code_sha": "a" * 40,
+        "all_tests_passed": True,
+        "byte_identical_repeated_run": True,
+        "formal_result_loaded": False,
+        "scientific_outcome_fields_accessed": False,
+        "statistical_method_changed": False,
+        "tests": [{"command": "pytest", "status": "PASS"}],
+    }
+    _write_json(receipt_path, receipt)
+    actual_sha = task8b_analysis_module._sha256
+
+    def fixture_sha(path: Path) -> str:
+        if path == parent_path:
+            return "520aef84b044f5062cbf670e0a71c30f9fe53ec7f40d7776ddab4e525d0b32bf"
+        if path == amendment_path:
+            return "df90c343368433e2cdb19da826c0a0f7a1c67bb2fc8e13aa5ea0dcfea1c8bb3e"
+        if path == draft_path:
+            return "cc81d36df4a2dd05fc7b32437993a262b378bca68194f505d84c7b31ad177e5d"
+        return actual_sha(path)
+
+    monkeypatch.setattr(task8b_analysis_module, "_sha256", fixture_sha)
+    expected_verifiers = [
+        {"workers": ["P03"], "verifier_code_sha": "458a4fb7752e5601543a0705c856832a2f1e7efe"},
+        {
+            "workers": ["P01", "P02", "P04", "P05", "P06", "P07", "P08", "P09", "P10", "P11"],
+            "verifier_code_sha": "c00da5515af3d874b3499010a02addca2c75fbe4",
+        },
+    ]
+    source_rules = {
+        "pre_recovery_task1": {"raw_artifact_reused": True, "task1_rerun_performed": False},
+        "post_adoption_task2_plus": {"raw_artifact_reused": False, "task1_rerun_performed": False},
+        "standard": {"raw_artifact_reused": False, "task1_rerun_performed": False},
+    }
+    invariants = {
+        "n": 12,
+        "seeds_unchanged": True,
+        "planned_hands": 142200,
+        "endpoint_changed": False,
+        "paired_interaction_changed": False,
+        "bootstrap_changed": False,
+        "holm_changed": False,
+        "exclusion_rule_changed": False,
+        "attempt_rule_changed": False,
+        "conditional_or_deferred_experiments_started": False,
+    }
+    supplement = {
+        "schema_version": "task8b-phase-f-recovery-supplementary-freeze-v2",
+        "status": "CORRECTED_RECOVERY_LINEAGE_BINDING_BEFORE_FORMAL_RESULT",
+        "frozen_at_utc": "2026-07-22T20:32:00Z",
+        "parent_contract_id": "task8b-phase-f-v1",
+        "parent_manifest_relative_path": parent_path.relative_to(root).as_posix(),
+        "parent_manifest_sha256": fixture_sha(parent_path),
+        "parent_manifest_size": parent_path.stat().st_size,
+        "amendment_id": "TASK8B-VFPR-20260722",
+        "amendment_relative_path": amendment_path.relative_to(root).as_posix(),
+        "amendment_sha256": fixture_sha(amendment_path),
+        "amendment_size": amendment_path.stat().st_size,
+        "prior_non_authoritative_draft_relative_path": draft_path.relative_to(root).as_posix(),
+        "prior_non_authoritative_draft_sha256": fixture_sha(draft_path),
+        "prior_non_authoritative_draft_size": draft_path.stat().st_size,
+        "revocation_relative_path": revocation_path.relative_to(root).as_posix(),
+        "revocation_sha256": fixture_sha(revocation_path),
+        "revocation_size": revocation_path.stat().st_size,
+        "authoritative_statistical_freeze_sha256": fixture_sha(parent_path),
+        "recovery_policy_anchor_sha256": fixture_sha(amendment_path),
+        "binding_status": "BOUND_APPEND_ONLY_CORRECTED",
+        "recorded_before_effect_unblind": True,
+        "formal_result_loaded": False,
+        "scientific_outcome_fields_accessed": False,
+        "parent_not_modified": True,
+        "supersedes_none": False,
+        "supersedes_manifest_sha256": fixture_sha(draft_path),
+        "supersession_reason": "chronology_metadata_correction_only",
+        "scientific_execution_code_sha": "a1d1eb97efb41d52585057ab7c9594dcd19227ae",
+        "recovery_disposition": "VERIFIER_FALSE_POSITIVE_SAME_ATTEMPT_RECOVERY",
+        "verifier_may_generate_gpu_hands": False,
+        "analysis_code_sha": "a" * 40,
+        "analysis_commit_time_utc": "2026-07-22T20:30:00Z",
+        "analysis_code_dirty": False,
+        "analysis_code_files": [new_code, contract],
+        "phase_f_files": phase_rows,
+        "dependency_lock": {
+            "name": "uv.lock",
+            "size": lock_path.stat().st_size,
+            "sha256": _sha256(lock_path),
+            "verified_real_lock": True,
+        },
+        "changed_from_parent": [
+            {
+                "relative_path": old_code["relative_path"],
+                "old_size": 1,
+                "old_sha256": "1" * 64,
+                "new_size": new_code["size"],
+                "new_sha256": new_code["sha256"],
+            }
+        ],
+        "authorized_verifier_bindings": expected_verifiers,
+        "required_recovery_evidence_fields": list(task8b_analysis_module.RECOVERY_EVIDENCE_FIELDS),
+        "source_execution_rules": source_rules,
+        "protocol_invariants": invariants,
+        "test_receipt": {
+            "relative_path": receipt_path.relative_to(root).as_posix(),
+            "sha256": fixture_sha(receipt_path),
+            "size": receipt_path.stat().st_size,
+        },
+        "evidence_bindings": [
+            {
+                "relative_path": path.relative_to(root).as_posix(),
+                "sha256": fixture_sha(path),
+                "size": path.stat().st_size,
+            }
+            for path in evidence_paths
+        ],
+    }
+    manifest_path = records / "phase_f_recovery_supplementary_freeze_v2.json"
+    _write_json(manifest_path, supplement)
+    return manifest_path, supplement
+
+
+def test_phase_f_recovery_supplement_v2_positive_and_tamper_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path, supplement = _write_supplement_v2_fixture(tmp_path, monkeypatch)
+    assert task8b_analysis_module._validate_preunlock_manifest(manifest_path) == supplement
+
+    receipt_path = manifest_path.parent / "phase_f_recovery_lineage_test_receipt_v2.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["byte_identical_repeated_run"] = False
+    _write_json(receipt_path, receipt)
+    supplement["test_receipt"]["sha256"] = task8b_analysis_module._sha256(receipt_path)
+    supplement["test_receipt"]["size"] = receipt_path.stat().st_size
+    _write_json(manifest_path, supplement)
+    with pytest.raises(ConfigError, match="test receipt 语义门禁失败"):
+        task8b_analysis_module._validate_preunlock_manifest(manifest_path)
+
+
+def test_phase_f_input_builder_consumes_complete_recovery_supplement_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path, _ = _write_supplement_v2_fixture(tmp_path, monkeypatch)
+    root = manifest_path.parents[3]
+    repo = root / "agentmemeval_rebuild"
+    phase_f = manifest_path.parent / "phase_f_generated"
+    lock = repo / "uv.lock"
+    manifests = root / "manifests"
+    snapshots = root / "snapshots"
+    _write_json(manifests / "manifest_index.json", {"schema_version": "fixture"})
+    for index, seed in enumerate(range(2026090101, 2026090113), start=1):
+        for role in ("P", "S"):
+            worker_id = f"{role}{index:02d}"
+            _write_json(
+                manifests / f"{worker_id}.json",
+                {
+                    "protocol_status": "frozen/expedited-formal-candidate",
+                    "worker_id": worker_id,
+                    "pod_id": f"pod{index:02d}",
+                    "seed_bundle": seed,
+                    "common_identity": IDENTITY,
+                },
+            )
+            (snapshots / worker_id / str(seed) / "attempt_01").mkdir(parents=True)
+    monkeypatch.setattr(task8b_analysis_module, "_git_clean_head", lambda _repo: "a" * 40)
+    monkeypatch.setattr(
+        task8b_analysis_module,
+        "_git_commit_time",
+        lambda _repo, _sha: task8b_analysis_module._parse_aware_utc(
+            "2026-07-22T20:30:00Z", label="fixture"
+        ),
+    )
+    monkeypatch.setattr(
+        task8b_analysis_module, "_verify_frozen_contract_semantics", lambda _repo: None
+    )
+    monkeypatch.setattr(
+        task8b_analysis_module,
+        "_verify_frozen_analysis_implementation",
+        lambda _repo: None,
+    )
+
+    payload = build_task8b_analysis_input(
+        manifests,
+        snapshots,
+        root / "phase-f-input.json",
+        manifest_path,
+        repository_root=repo,
+        phase_f_dir=phase_f,
+        dependency_lock_path=lock,
+    )
+
+    assert payload["analysis_code_sha"] == "a" * 40
+    assert len(payload["workers"]) == 24
+
+
+def test_phase_f_frozen_contract_semantics_compare_parent_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    contract_path = repo / "configs" / "formal" / "task8b_phase_f_contract.json"
+    frozen = {
+        field: {"method": "seed_cluster_percentile"}
+        if field == "bootstrap"
+        else [2026090101, 2026090102]
+        if field == "seeds"
+        else f"frozen-{field}"
+        for field in task8b_analysis_module.PHASE_F_FROZEN_CONTRACT_FIELDS
+    }
+    _write_json(contract_path, frozen)
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps(frozen)
+
+    monkeypatch.setattr(task8b_analysis_module.subprocess, "run", lambda *args, **kwargs: Result())
+    task8b_analysis_module._verify_frozen_contract_semantics(repo)
+
+    changed = dict(frozen)
+    changed["primary_endpoint"] = "posthoc-endpoint"
+    _write_json(contract_path, changed)
+    with pytest.raises(ConfigError, match="statistical contract"):
+        task8b_analysis_module._verify_frozen_contract_semantics(repo)
+
+
+def test_phase_f_protected_analysis_implementation_rejects_code_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    source_path = repo / "src" / "agentmemeval" / "evaluation" / "task8b_analysis.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("def protected():\n    return 1\n", encoding="utf-8", newline="")
+
+    class Result:
+        returncode = 0
+        stdout = "def protected():\n    return 1\n"
+
+    monkeypatch.setattr(task8b_analysis_module.subprocess, "run", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(
+        task8b_analysis_module, "PHASE_F_PROTECTED_ANALYSIS_FUNCTIONS", ("protected",)
+    )
+    monkeypatch.setattr(
+        task8b_analysis_module, "PHASE_F_AUDITED_RECOVERY_OVERLAY_AST_SHA256", {}
+    )
+    task8b_analysis_module._verify_frozen_analysis_implementation(repo)
+
+    source_path.write_text("def protected():\n    return 2\n", encoding="utf-8", newline="")
+    with pytest.raises(ConfigError, match="protected statistical implementation"):
+        task8b_analysis_module._verify_frozen_analysis_implementation(repo)
+
+
+def test_phase_f_audited_recovery_overlay_rejects_code_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    source_path = repo / "src" / "agentmemeval" / "evaluation" / "task8b_analysis.py"
+    source_path.parent.mkdir(parents=True)
+    original = "def overlay():\n    return 1\n"
+    source_path.write_text(original, encoding="utf-8", newline="")
+
+    class Result:
+        returncode = 0
+        stdout = original
+
+    tree = task8b_analysis_module.ast.parse(original)
+    function_ast = task8b_analysis_module.ast.dump(tree.body[0], include_attributes=False)
+    expected = task8b_analysis_module.hashlib.sha256(function_ast.encode("utf-8")).hexdigest()
+    monkeypatch.setattr(task8b_analysis_module.subprocess, "run", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(task8b_analysis_module, "PHASE_F_PROTECTED_ANALYSIS_FUNCTIONS", ())
+    monkeypatch.setattr(
+        task8b_analysis_module,
+        "PHASE_F_AUDITED_RECOVERY_OVERLAY_AST_SHA256",
+        {"overlay": expected},
+    )
+    task8b_analysis_module._verify_frozen_analysis_implementation(repo)
+
+    source_path.write_text("def overlay():\n    return 2\n", encoding="utf-8", newline="")
+    with pytest.raises(ConfigError, match="audited recovery overlay"):
+        task8b_analysis_module._verify_frozen_analysis_implementation(repo)
+
+
+def test_phase_f_current_contract_and_protected_implementation_match_parent() -> None:
+    repo = Path(task8b_analysis_module.__file__).resolve().parents[3]
+    task8b_analysis_module._verify_frozen_contract_semantics(repo)
+    task8b_analysis_module._verify_frozen_analysis_implementation(repo)
 
 
 def _write_input_builder_fixture(
@@ -467,9 +852,7 @@ def _write_input_builder_fixture(
 def test_phase_f_input_separates_analysis_and_experiment_code_sha(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    phase_f, repo, lock, manifests, snapshots = _write_input_builder_fixture(
-        tmp_path, monkeypatch
-    )
+    phase_f, repo, lock, manifests, snapshots = _write_input_builder_fixture(tmp_path, monkeypatch)
     payload = build_task8b_analysis_input(
         manifests,
         snapshots,
@@ -501,9 +884,7 @@ def test_phase_f_input_rejects_tampered_preunlock_frozen_file(
     relative_path: str,
     message: str,
 ) -> None:
-    phase_f, repo, lock, manifests, snapshots = _write_input_builder_fixture(
-        tmp_path, monkeypatch
-    )
+    phase_f, repo, lock, manifests, snapshots = _write_input_builder_fixture(tmp_path, monkeypatch)
     target = repo / relative_path if relative_path.startswith("src/") else phase_f / relative_path
     target.write_text("tampered after pre-unlock freeze\n", encoding="utf-8", newline="")
 
@@ -522,9 +903,7 @@ def test_phase_f_input_rejects_tampered_preunlock_frozen_file(
 def test_phase_f_input_recomputes_preunlock_dependency_lock_hash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    phase_f, repo, lock, manifests, snapshots = _write_input_builder_fixture(
-        tmp_path, monkeypatch
-    )
+    phase_f, repo, lock, manifests, snapshots = _write_input_builder_fixture(tmp_path, monkeypatch)
     lock.write_text("tampered lock after pre-unlock freeze\n", encoding="utf-8", newline="")
 
     with pytest.raises(ConfigError, match="dependency lock hash 不匹配"):
@@ -913,9 +1292,7 @@ def test_phase_f_ledger_reason_must_match_observed_engineering_failure(
     tmp_path: Path,
 ) -> None:
     manifest, ledger, _, _ = _write_fixture(tmp_path)
-    text = ledger.read_text(encoding="utf-8").replace(
-        "EXECUTION_INVALID", "IDENTITY_MISMATCH"
-    )
+    text = ledger.read_text(encoding="utf-8").replace("EXECUTION_INVALID", "IDENTITY_MISMATCH")
     ledger.write_text(text, encoding="utf-8", newline="")
 
     with pytest.raises(ConfigError, match="reason|ledger|EXECUTION_INVALID"):
@@ -958,9 +1335,7 @@ def test_phase_f_incomplete_heldout_table_cell_does_not_enter_primary_effect(
 
     run_task8b_analysis(manifest, ledger, tmp_path / "analysis")
 
-    effects = (tmp_path / "analysis" / "primary_seed_effects.csv").read_text(
-        encoding="utf-8"
-    )
+    effects = (tmp_path / "analysis" / "primary_seed_effects.csv").read_text(encoding="utf-8")
     assert "Expr_vs_Fact" not in effects
 
 
@@ -1014,10 +1389,7 @@ def test_phase_f_lineage_and_inference_outputs_cover_frozen_schema(tmp_path: Pat
         "verification_status",
         "source_records",
     }
-    assert all(
-        all(str(row[field]).strip() for field in required_nonempty)
-        for row in lineage_rows
-    )
+    assert all(all(str(row[field]).strip() for field in required_nonempty) for row in lineage_rows)
     required_source_fields = {
         "run_id",
         "worker_id",
@@ -1112,9 +1484,7 @@ def test_primary_holm_family_is_unresolved_when_one_contrast_is_missing() -> Non
     assert {row["holm_adjusted_p"] for row in rows} == {"UNRESOLVED"}
     assert {row["holm_rank"] for row in rows} == {"UNRESOLVED"}
     assert {row["holm_reject_0_05"] for row in rows} == {"UNRESOLVED"}
-    assert next(row for row in rows if row["contrast"] == "Async_vs_Fact")[
-        "n_effective"
-    ] == 0
+    assert next(row for row in rows if row["contrast"] == "Async_vs_Fact")["n_effective"] == 0
 
 
 @pytest.mark.parametrize(
@@ -1160,9 +1530,7 @@ def test_formal_health_counter_ledger_priority_is_explicit() -> None:
         }
     )
 
-    assert task8b_analysis_module._ledger_reason_for(reasons) == (
-        "REVISION_FALLBACK_NONZERO"
-    )
+    assert task8b_analysis_module._ledger_reason_for(reasons) == ("REVISION_FALLBACK_NONZERO")
 
 
 def test_table3_lineage_uses_cell_specific_n_effective() -> None:
@@ -1399,17 +1767,12 @@ def test_table4_uses_fixed_50_hand_windows_and_50_hand_block_ols() -> None:
 
     assert expr["Actual Frozen"]["initial_transfer_bb100"] == "10.00000000"
     assert expr["Actual Frozen"]["final_bb100"] == "10.00000000"
-    assert (
-        expr["Actual Frozen"]["recovery_slope_bb100_per_100_hands"]
-        == "NA_NOT_APPLICABLE"
-    )
+    assert expr["Actual Frozen"]["recovery_slope_bb100_per_100_hands"] == "NA_NOT_APPLICABLE"
     assert expr["Online"]["initial_transfer_bb100"] == "24.50000000"
     assert expr["Online"]["final_bb100"] == "94.50000000"
     assert expr["Online"]["recovery_slope_bb100_per_100_hands"] == "100.00000000"
     assert expr["Online"]["paired_effect_vs_actual_frozen"] == "84.50000000"
-    assert expr["Without"]["recovery_slope_bb100_per_100_hands"] == (
-        "NA_NOT_APPLICABLE"
-    )
+    assert expr["Without"]["recovery_slope_bb100_per_100_hands"] == ("NA_NOT_APPLICABLE")
 
 
 def test_table1_marks_gpu_driver_as_observed_non_gating() -> None:
@@ -1467,9 +1830,7 @@ def test_phase_f_paper_renderer_emits_all_frozen_tables_figures_and_hashes(
     assert expected.issubset({path.name for path in output.iterdir() if path.is_file()})
     assert all((output / name).stat().st_size > 0 for name in expected)
 
-    with (output / "artifact_sha256.csv").open(
-        "r", encoding="utf-8", newline=""
-    ) as handle:
+    with (output / "artifact_sha256.csv").open("r", encoding="utf-8", newline="") as handle:
         checksum_rows = list(csv.DictReader(handle))
     by_path = {row["relative_path"]: row for row in checksum_rows}
     assert "artifact_sha256.csv" not in by_path
@@ -1616,15 +1977,11 @@ def test_phase_f_paper_renderer_emits_all_frozen_tables_figures_and_hashes(
         "status",
     }
 
-    with (output / "exclusion_retry_ledger.csv").open(
-        "r", encoding="utf-8", newline=""
-    ) as handle:
+    with (output / "exclusion_retry_ledger.csv").open("r", encoding="utf-8", newline="") as handle:
         exclusion_fields = next(csv.reader(handle))
     assert exclusion_fields == list(task8b_analysis_module.EXCLUSION_LEDGER_FIELDS)
 
-    analysis_manifest = json.loads(
-        (output / "analysis_manifest.json").read_text(encoding="utf-8")
-    )
+    analysis_manifest = json.loads((output / "analysis_manifest.json").read_text(encoding="utf-8"))
     assert analysis_manifest["analysis_code_sha"] == "e" * 40
     assert analysis_manifest["experiment_code_sha"] == IDENTITY["code_sha"]
     assert analysis_manifest["analysis_code_dirty"] is False
@@ -1637,13 +1994,9 @@ def test_phase_f_paper_renderer_emits_all_frozen_tables_figures_and_hashes(
     )
     assert len(analysis_manifest["planned_outputs"]) >= 11
 
-    with (output / "data_lineage.csv").open(
-        "r", encoding="utf-8", newline=""
-    ) as handle:
+    with (output / "data_lineage.csv").open("r", encoding="utf-8", newline="") as handle:
         lineage_rows = list(csv.DictReader(handle))
-    figure_rows = [
-        row for row in lineage_rows if row["output_artifact_id"].startswith("figure")
-    ]
+    figure_rows = [row for row in lineage_rows if row["output_artifact_id"].startswith("figure")]
     plotting_row_count = 0
     for index in range(1, 5):
         with (output / f"figure{index}_plotting_data.csv").open(
@@ -1703,14 +2056,10 @@ def test_supplementary_lineage_uses_only_authoritative_family_and_mode_sources()
         table_offset=5,
     )
     leave_one = next(
-        row
-        for row in rows
-        if row["output_artifact_id"] == "leave_one_seed_out_robustness.csv"
+        row for row in rows if row["output_artifact_id"] == "leave_one_seed_out_robustness.csv"
     )
     mixed = next(
-        row
-        for row in rows
-        if row["output_artifact_id"] == "secondary_mixed_ecological.csv"
+        row for row in rows if row["output_artifact_id"] == "secondary_mixed_ecological.csv"
     )
 
     assert {item["seed"] for item in json.loads(leave_one["source_records"])} == {2}

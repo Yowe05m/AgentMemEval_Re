@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import csv
 import datetime as dt
 import hashlib
@@ -192,6 +193,86 @@ PHASE_F_ANALYSIS_CODE_FILES = (
     "configs/formal/task8b_phase_f_contract.json",
 )
 DEPENDENCY_LOCK_NAMES = {"uv.lock", "poetry.lock", "pdm.lock", "pipfile.lock"}
+PHASE_F_PARENT_COMMIT = "429e3f39ceaf22f0f1269989776ca5821c678efb"
+PHASE_F_FROZEN_CONTRACT_FIELDS = (
+    "analysis_contract_id",
+    "attempt_selection",
+    "bootstrap",
+    "checkpoints",
+    "exclusion_codes",
+    "heldout_tables",
+    "holm_family",
+    "n_planned",
+    "n_source",
+    "new_power_pilot_run",
+    "primary_checkpoint",
+    "primary_endpoint",
+    "primary_mode",
+    "schema_version",
+    "seeds",
+    "statistical_unit",
+)
+PHASE_F_PROTECTED_ANALYSIS_FUNCTIONS = (
+    "_select_attempt",
+    "_assess_attempt",
+    "_assess_formal_worker",
+    "_formal_execution_health_reasons",
+    "_validate_selected_seed_pods",
+    "_validate_formal_task_topology",
+    "_validate_task_data_completeness",
+    "_primary_effect_rows",
+    "_validate_formal_primary_effects",
+    "_e6_rows",
+    "_formal_e6_rows",
+    "_formal_metric_record",
+    "_mechanism_by_target",
+    "_primary_inference_rows",
+    "_ledger_reason_for",
+    "_emit_paper_artifacts",
+    "_figure_lineage_rows",
+    "_seed_cells",
+    "_ci_text",
+    "_table2_rows",
+    "_table3_rows",
+    "_heldout_seed_values",
+    "_heldout_seed_trajectories",
+    "_table4_rows",
+    "_table5_rows",
+    "_leave_one_seed_out_rows",
+    "_secondary_mixed_rows",
+    "_figure3_rows",
+    "_checkpoint_table",
+    "_render_figure",
+    "_read_ledger",
+    "_read_files_manifest",
+    "_task_run_map",
+    "_directory_manifest",
+    "_inside_attempt",
+    "_verify_analysis_state",
+    "_attempt_number",
+    "_read_json",
+    "_read_jsonl",
+    "_write_csv",
+    "_json_bytes",
+    "_write_bytes_new",
+    "_mean",
+    "_fixed",
+    "_percentile",
+    "_rate",
+)
+PHASE_F_AUDITED_RECOVERY_OVERLAY_AST_SHA256 = {
+    "run_task8b_analysis": "1fa0259a25ef528b06265f3dbbe6ab859d84fdb8f14f9988e8a2d8852ab5209d",
+    "_metric_and_lineage_rows": "18758cb1ad97d8d8e0bd9c67621e90dbcc881ac048defe578be9c4c36940ab63",
+    "_formal_execution_health_reasons": (
+        "468a12309881b38348a2af90db32a2f8fb170eb3972df32c54c7a67968006d3f"
+    ),
+    "_formal_metric_rows": "94f089a226f11c2cb1cf9f54f6386c5930e6887c6d0b8c9277d91c18fe2525f1",
+    "_normalize_data_lineage_rows": (
+        "4bbfea8639e2b8883395b9008845378cc92bdcdf3f4dd98ad1feb44ec0f6a54a"
+    ),
+    "_compact_lineage_source": "c70843f8f8c632904c990d74b8c2bc7a01b6af56593f5622d2ac2dd108d50ae7",
+    "_paper_lineage_rows": "56a4b92482b9569762df4498c2771069d934145292f9c5bdc260c5d6f0491482",
+}
 
 
 def build_task8b_preunlock_manifest(
@@ -305,6 +386,88 @@ def _git_clean_head(repository_root: Path) -> str:
     return head.stdout.strip()
 
 
+def _git_commit_time(repository_root: Path, commit_sha: str) -> dt.datetime:
+    base = ["git", "-c", f"safe.directory={repository_root.as_posix()}"]
+    result = subprocess.run(
+        [*base, "show", "-s", "--format=%cI", commit_sha],
+        cwd=repository_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ConfigError("Phase F 无法取得 analysis commit timestamp")
+    try:
+        parsed = dt.datetime.fromisoformat(result.stdout.strip())
+    except ValueError as exc:
+        raise ConfigError("Phase F analysis commit timestamp 非法") from exc
+    if parsed.tzinfo is None:
+        raise ConfigError("Phase F analysis commit timestamp 缺时区")
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _verify_frozen_contract_semantics(repository_root: Path) -> None:
+    relative = "configs/formal/task8b_phase_f_contract.json"
+    current = _read_json(repository_root / relative)
+    base = ["git", "-c", f"safe.directory={repository_root.as_posix()}"]
+    result = subprocess.run(
+        [*base, "show", f"{PHASE_F_PARENT_COMMIT}:{relative}"],
+        cwd=repository_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    try:
+        parent = json.loads(result.stdout) if result.returncode == 0 else None
+    except json.JSONDecodeError as exc:
+        raise ConfigError("Phase F parent contract 无法解析") from exc
+    if not isinstance(parent, dict):
+        raise ConfigError("Phase F parent contract 无法取得")
+    if {field: current.get(field) for field in PHASE_F_FROZEN_CONTRACT_FIELDS} != {
+        field: parent.get(field) for field in PHASE_F_FROZEN_CONTRACT_FIELDS
+    }:
+        raise ConfigError("Phase F frozen statistical contract 与 parent 语义不一致")
+
+
+def _verify_frozen_analysis_implementation(repository_root: Path) -> None:
+    relative = "src/agentmemeval/evaluation/task8b_analysis.py"
+    current_source = (repository_root / relative).read_text(encoding="utf-8")
+    base = ["git", "-c", f"safe.directory={repository_root.as_posix()}"]
+    result = subprocess.run(
+        [*base, "show", f"{PHASE_F_PARENT_COMMIT}:{relative}"],
+        cwd=repository_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ConfigError("Phase F parent analysis implementation 无法取得")
+
+    def function_asts(source: str) -> dict[str, str]:
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            raise ConfigError("Phase F analysis implementation 无法解析") from exc
+        return {
+            node.name: ast.dump(node, include_attributes=False)
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+    current = function_asts(current_source)
+    parent = function_asts(result.stdout)
+    for name in PHASE_F_PROTECTED_ANALYSIS_FUNCTIONS:
+        if name not in current or name not in parent or current[name] != parent[name]:
+            raise ConfigError(f"Phase F protected statistical implementation 改变：{name}")
+    for name, expected_sha256 in PHASE_F_AUDITED_RECOVERY_OVERLAY_AST_SHA256.items():
+        observed_sha256 = hashlib.sha256(current.get(name, "").encode("utf-8")).hexdigest()
+        if observed_sha256 != expected_sha256:
+            raise ConfigError(f"Phase F audited recovery overlay implementation 改变：{name}")
+
+
 def _validate_preunlock_manifest(path: Path) -> dict[str, Any]:
     value = _read_json(path)
     frozen_at = str(value.get("frozen_at_utc", ""))
@@ -312,10 +475,25 @@ def _validate_preunlock_manifest(path: Path) -> dict[str, Any]:
         parsed_frozen_at = dt.datetime.fromisoformat(frozen_at.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ConfigError("Phase F pre-unlock freeze timestamp 非法") from exc
+    schema_version = value.get("schema_version")
+    if schema_version == "task8b-phase-f-pre-unlock-v1":
+        contract_id = value.get("analysis_contract_id")
+        manifest_status = value.get("manifest_status")
+        expected_status = "FROZEN_BEFORE_FORMAL_RESULT"
+    elif schema_version == "task8b-phase-f-recovery-supplementary-freeze-v1":
+        raise ConfigError(
+            "Phase F recovery supplementary v1 已登记为 non-authoritative chronology draft"
+        )
+    elif schema_version == "task8b-phase-f-recovery-supplementary-freeze-v2":
+        contract_id = value.get("parent_contract_id")
+        manifest_status = value.get("status")
+        expected_status = "CORRECTED_RECOVERY_LINEAGE_BINDING_BEFORE_FORMAL_RESULT"
+        _validate_recovery_supplement_bindings(path, value)
+    else:
+        raise ConfigError("Phase F pre-unlock manifest schema 非法")
     if (
-        value.get("schema_version") != "task8b-phase-f-pre-unlock-v1"
-        or value.get("analysis_contract_id") != "task8b-phase-f-v1"
-        or value.get("manifest_status") != "FROZEN_BEFORE_FORMAL_RESULT"
+        contract_id != "task8b-phase-f-v1"
+        or manifest_status != expected_status
         or value.get("formal_result_loaded") is not False
         or value.get("analysis_code_dirty") is not False
         or parsed_frozen_at.tzinfo is None
@@ -354,6 +532,294 @@ def _validate_preunlock_manifest(path: Path) -> dict[str, Any]:
     return value
 
 
+def _resolve_supplement_binding(manifest_path: Path, relative: str) -> Path:
+    relative_path = Path(relative)
+    if not relative or relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ConfigError("Phase F supplementary binding path 非法")
+    roots = [
+        ancestor
+        for ancestor in manifest_path.parents
+        if (ancestor / "agentmemeval_rebuild").is_dir()
+        and (ancestor / "docs" / "task-records" / "TASK8B").is_dir()
+    ]
+    if not roots:
+        raise ConfigError("Phase F supplementary workspace binding root 缺失")
+    root = roots[0].resolve()
+    expected_manifest_parent = root / "docs" / "task-records" / "TASK8B"
+    if manifest_path.parent.resolve() != expected_manifest_parent.resolve():
+        raise ConfigError("Phase F supplementary manifest 不在 canonical evidence root")
+    unresolved = root / relative_path
+    cursor = root
+    for part in relative_path.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ConfigError("Phase F supplementary binding 禁止 symlink")
+    candidate = unresolved.resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ConfigError("Phase F supplementary binding 越界") from exc
+    if not candidate.is_file():
+        raise ConfigError(f"Phase F supplementary binding 不存在：{relative}")
+    return candidate
+
+
+def _validate_recovery_supplement_bindings(manifest_path: Path, value: dict[str, Any]) -> None:
+    if (
+        value.get("binding_status") != "BOUND_APPEND_ONLY_CORRECTED"
+        or value.get("recorded_before_effect_unblind") is not True
+        or value.get("scientific_outcome_fields_accessed") is not False
+        or value.get("parent_not_modified") is not True
+        or value.get("supersedes_none") is not False
+        or value.get("supersedes_manifest_sha256")
+        != "cc81d36df4a2dd05fc7b32437993a262b378bca68194f505d84c7b31ad177e5d"
+        or value.get("supersession_reason") != "chronology_metadata_correction_only"
+        or value.get("scientific_execution_code_sha") != FROZEN_SCIENTIFIC_CODE_SHA
+        or value.get("recovery_disposition") != RECOVERY_DISPOSITION
+        or value.get("verifier_may_generate_gpu_hands") is not False
+    ):
+        raise ConfigError("Phase F recovery supplementary freeze 门禁非法")
+    bindings = (
+        (
+            "parent_manifest_relative_path",
+            "parent_manifest_sha256",
+            "parent_manifest_size",
+        ),
+        ("amendment_relative_path", "amendment_sha256", "amendment_size"),
+        (
+            "prior_non_authoritative_draft_relative_path",
+            "prior_non_authoritative_draft_sha256",
+            "prior_non_authoritative_draft_size",
+        ),
+        ("revocation_relative_path", "revocation_sha256", "revocation_size"),
+    )
+    for path_field, hash_field, size_field in bindings:
+        bound = _resolve_supplement_binding(manifest_path, str(value.get(path_field, "")))
+        if int(value.get(size_field, -1)) != bound.stat().st_size or str(
+            value.get(hash_field, "")
+        ) != _sha256(bound):
+            raise ConfigError(f"Phase F supplementary binding hash 不匹配：{path_field}")
+    if (
+        value.get("parent_manifest_sha256")
+        != "520aef84b044f5062cbf670e0a71c30f9fe53ec7f40d7776ddab4e525d0b32bf"
+        or value.get("amendment_id") != RECOVERY_PROTOCOL_AMENDMENT_ID
+        or value.get("amendment_sha256")
+        != "df90c343368433e2cdb19da826c0a0f7a1c67bb2fc8e13aa5ea0dcfea1c8bb3e"
+        or value.get("prior_non_authoritative_draft_sha256")
+        != "cc81d36df4a2dd05fc7b32437993a262b378bca68194f505d84c7b31ad177e5d"
+        or value.get("authoritative_statistical_freeze_sha256")
+        != value.get("parent_manifest_sha256")
+        or value.get("recovery_policy_anchor_sha256") != value.get("amendment_sha256")
+    ):
+        raise ConfigError("Phase F supplementary parent/amendment identity 非法")
+    revoked_path = _resolve_supplement_binding(
+        manifest_path,
+        str(value.get("prior_non_authoritative_draft_relative_path", "")),
+    )
+    revocation_path = _resolve_supplement_binding(
+        manifest_path, str(value.get("revocation_relative_path", ""))
+    )
+    revocation = _read_json(revocation_path)
+    if (
+        revocation.get("schema_version") != "task8b-phase-f-supplement-revocation-v1"
+        or revocation.get("disposition") != "NON_AUTHORITATIVE_DRAFT"
+        or revocation.get("reason_code") != "IMPOSSIBLE_PRECOMMIT_FREEZE_TIMESTAMP"
+        or revocation.get("revoked_manifest_sha256") != _sha256(revoked_path)
+        or int(revocation.get("revoked_manifest_size", -1)) != revoked_path.stat().st_size
+        or revocation.get("formal_result_loaded") is not False
+        or revocation.get("scientific_outcome_fields_accessed") is not False
+        or revocation.get("parent_not_modified") is not True
+        or revocation.get("scientific_protocol_changed") is not False
+    ):
+        raise ConfigError("Phase F supplementary revocation 语义门禁失败")
+    test_receipt = value.get("test_receipt")
+    if not isinstance(test_receipt, dict):
+        raise ConfigError("Phase F supplementary test receipt 缺失")
+    test_path = _resolve_supplement_binding(
+        manifest_path, str(test_receipt.get("relative_path", ""))
+    )
+    if (
+        str(test_receipt.get("sha256", "")) != _sha256(test_path)
+        or int(test_receipt.get("size", -1)) != test_path.stat().st_size
+    ):
+        raise ConfigError("Phase F supplementary test receipt hash 不匹配")
+    receipt = _read_json(test_path)
+    if (
+        receipt.get("schema_version") != "task8b-phase-f-recovery-lineage-test-receipt-v2"
+        or receipt.get("analysis_code_sha") != value.get("analysis_code_sha")
+        or receipt.get("all_tests_passed") is not True
+        or receipt.get("byte_identical_repeated_run") is not True
+        or receipt.get("formal_result_loaded") is not False
+        or receipt.get("scientific_outcome_fields_accessed") is not False
+        or receipt.get("statistical_method_changed") is not False
+    ):
+        raise ConfigError("Phase F supplementary test receipt 语义门禁失败")
+    tests = receipt.get("tests")
+    if (
+        not isinstance(tests, list)
+        or not tests
+        or any(not isinstance(row, dict) or row.get("status") != "PASS" for row in tests)
+    ):
+        raise ConfigError("Phase F supplementary test receipt 测试未全部通过")
+    commit_time = _parse_aware_utc(
+        str(value.get("analysis_commit_time_utc", "")),
+        label="analysis commit",
+    )
+    receipt_time = _parse_aware_utc(str(receipt.get("recorded_at_utc", "")), label="test receipt")
+    freeze_time = _parse_aware_utc(str(value.get("frozen_at_utc", "")), label="supplement freeze")
+    if not commit_time <= receipt_time <= freeze_time:
+        raise ConfigError("Phase F supplementary chronology 非法")
+    evidence_bindings = value.get("evidence_bindings")
+    expected_evidence_paths = {
+        "docs/task-records/TASK8B/0722_21_非实验性故障自动恢复与断点续跑协议修订.md",
+        "docs/task-records/TASK8B/0722_24_P03断点恢复与Legacy归档兼容记录.md",
+        "docs/task-records/TASK8B/current_worker_execution_ledger_v2.csv",
+    }
+    if (
+        not isinstance(evidence_bindings, list)
+        or {str(row.get("relative_path", "")) for row in evidence_bindings if isinstance(row, dict)}
+        != expected_evidence_paths
+    ):
+        raise ConfigError("Phase F supplementary evidence bindings 不完整")
+    for row in evidence_bindings:
+        if not isinstance(row, dict):
+            raise ConfigError("Phase F supplementary evidence binding 行非法")
+        bound = _resolve_supplement_binding(manifest_path, str(row.get("relative_path", "")))
+        if int(row.get("size", -1)) != bound.stat().st_size or str(
+            row.get("sha256", "")
+        ) != _sha256(bound):
+            raise ConfigError("Phase F supplementary evidence binding hash 不匹配")
+    expected_verifiers = {
+        "P03": "458a4fb7752e5601543a0705c856832a2f1e7efe",
+        **{
+            worker: "c00da5515af3d874b3499010a02addca2c75fbe4"
+            for worker in (
+                "P01",
+                "P02",
+                "P04",
+                "P05",
+                "P06",
+                "P07",
+                "P08",
+                "P09",
+                "P10",
+                "P11",
+            )
+        },
+    }
+    observed_verifiers = {}
+    for row in value.get("authorized_verifier_bindings", []):
+        if not isinstance(row, dict):
+            raise ConfigError("Phase F supplementary verifier binding 行非法")
+        for worker in row.get("workers", []):
+            if worker in observed_verifiers:
+                raise ConfigError("Phase F supplementary verifier worker 重复")
+            observed_verifiers[str(worker)] = str(row.get("verifier_code_sha", ""))
+    if observed_verifiers != expected_verifiers:
+        raise ConfigError("Phase F supplementary verifier bindings 不闭合")
+    if set(value.get("required_recovery_evidence_fields", [])) != set(RECOVERY_EVIDENCE_FIELDS):
+        raise ConfigError("Phase F supplementary recovery evidence 字段不闭合")
+    expected_source_rules = {
+        "pre_recovery_task1": {
+            "raw_artifact_reused": True,
+            "task1_rerun_performed": False,
+        },
+        "post_adoption_task2_plus": {
+            "raw_artifact_reused": False,
+            "task1_rerun_performed": False,
+        },
+        "standard": {
+            "raw_artifact_reused": False,
+            "task1_rerun_performed": False,
+        },
+    }
+    if value.get("source_execution_rules") != expected_source_rules:
+        raise ConfigError("Phase F supplementary source execution rules 非法")
+    expected_invariants = {
+        "n": 12,
+        "seeds_unchanged": True,
+        "planned_hands": 142200,
+        "endpoint_changed": False,
+        "paired_interaction_changed": False,
+        "bootstrap_changed": False,
+        "holm_changed": False,
+        "exclusion_rule_changed": False,
+        "attempt_rule_changed": False,
+        "conditional_or_deferred_experiments_started": False,
+    }
+    if value.get("protocol_invariants") != expected_invariants:
+        raise ConfigError("Phase F supplementary protocol invariants 非法")
+    parent = _read_json(
+        _resolve_supplement_binding(
+            manifest_path, str(value.get("parent_manifest_relative_path", ""))
+        )
+    )
+    if _inventory_delta(parent, value) != _declared_inventory_delta(value):
+        raise ConfigError("Phase F supplementary changed_from_parent 不精确")
+
+
+def _parse_aware_utc(raw: str, *, label: str) -> dt.datetime:
+    try:
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ConfigError(f"Phase F {label} timestamp 非法") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != dt.timedelta(0):
+        raise ConfigError(f"Phase F {label} timestamp 必须为 UTC")
+    return parsed
+
+
+def _inventory_rows(manifest: dict[str, Any]) -> dict[str, tuple[int, str]]:
+    rows: dict[str, tuple[int, str]] = {}
+    for group in ("analysis_code_files", "phase_f_files"):
+        raw_rows = manifest.get(group)
+        if not isinstance(raw_rows, list):
+            raise ConfigError("Phase F inventory 非法")
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                raise ConfigError("Phase F inventory 行非法")
+            relative = str(row.get("relative_path", ""))
+            if relative in rows:
+                raise ConfigError("Phase F inventory 路径重复")
+            rows[relative] = (int(row.get("size", -1)), str(row.get("sha256", "")))
+    return rows
+
+
+def _inventory_delta(
+    parent: dict[str, Any], current: dict[str, Any]
+) -> set[tuple[str, int, str, int, str]]:
+    old = _inventory_rows(parent)
+    new = _inventory_rows(current)
+    if set(old) != set(new):
+        raise ConfigError("Phase F supplementary inventory path set 改变")
+    return {
+        (path, old[path][0], old[path][1], new[path][0], new[path][1])
+        for path in old
+        if old[path] != new[path]
+    }
+
+
+def _declared_inventory_delta(
+    manifest: dict[str, Any],
+) -> set[tuple[str, int, str, int, str]]:
+    raw = manifest.get("changed_from_parent")
+    if not isinstance(raw, list):
+        raise ConfigError("Phase F supplementary changed_from_parent 非法")
+    rows = {
+        (
+            str(row.get("relative_path", "")),
+            int(row.get("old_size", -1)),
+            str(row.get("old_sha256", "")),
+            int(row.get("new_size", -1)),
+            str(row.get("new_sha256", "")),
+        )
+        for row in raw
+        if isinstance(row, dict)
+    }
+    if len(rows) != len(raw):
+        raise ConfigError("Phase F supplementary changed_from_parent 重复或非法")
+    return rows
+
+
 def _verify_preunlock_file_hashes(
     manifest: dict[str, Any],
     *,
@@ -387,10 +853,9 @@ def _verify_preunlock_file_hashes(
             source = (root / relative_path).resolve()
             if root.resolve() not in source.parents or not source.is_file():
                 raise ConfigError(f"Phase F pre-unlock {label} 文件缺失：{relative}")
-            if (
-                int(row.get("size", -1)) != source.stat().st_size
-                or str(row.get("sha256", "")) != _sha256(source)
-            ):
+            if int(row.get("size", -1)) != source.stat().st_size or str(
+                row.get("sha256", "")
+            ) != _sha256(source):
                 raise ConfigError(f"Phase F pre-unlock {label} 文件 hash 不匹配：{relative}")
     lock = manifest.get("dependency_lock")
     if not isinstance(lock, dict):
@@ -455,6 +920,18 @@ def build_task8b_analysis_input(
         phase_f_root=phase_root,
         dependency_lock_path=lock,
     )
+    if pre_unlock.get("schema_version") == "task8b-phase-f-recovery-supplementary-freeze-v2" and (
+        _git_clean_head(repo) != pre_unlock["analysis_code_sha"]
+        or _git_commit_time(repo, pre_unlock["analysis_code_sha"])
+        != _parse_aware_utc(
+            str(pre_unlock.get("analysis_commit_time_utc", "")),
+            label="analysis commit",
+        )
+    ):
+        raise ConfigError("Phase F supplementary analysis commit identity/time 不匹配")
+    if pre_unlock.get("schema_version") == "task8b-phase-f-recovery-supplementary-freeze-v2":
+        _verify_frozen_contract_semantics(repo)
+        _verify_frozen_analysis_implementation(repo)
     experiment_code_shas = {
         str(row.get("common_identity", {}).get("code_sha", "")) for row in worker_manifests
     }
@@ -623,10 +1100,7 @@ def run_task8b_analysis(
         r"[0-9a-f]{40}", experiment_code_sha
     ):
         raise ConfigError("Phase F analysis/experiment code SHA 必须为完整 40-char SHA")
-    if any(
-        str(item["identity"].get("code_sha", "")) != experiment_code_sha
-        for item in selected
-    ):
+    if any(str(item["identity"].get("code_sha", "")) != experiment_code_sha for item in selected):
         raise ConfigError("Phase F experiment_code_sha 与 worker identity 不一致")
     result = {
         "schema_version": "task8b-phase-f-analysis-manifest-v1",
@@ -646,9 +1120,7 @@ def run_task8b_analysis(
             "python": platform.python_version(),
             "platform": platform.platform(),
             "locked_dependencies_sha256": (
-                dependency_lock_sha
-                if dependency_lock_sha
-                else "UNVERIFIED_SYNTHETIC_TEST"
+                dependency_lock_sha if dependency_lock_sha else "UNVERIFIED_SYNTHETIC_TEST"
             ),
         },
         "protocol": {
@@ -975,9 +1447,7 @@ def _metric_and_lineage_rows(
             row = {**record, "seed": item["seed"], "worker_id": item["worker_id"]}
             metrics.append(row)
             identity = item["identity"]
-            recovery = _standard_lineage_recovery_context(
-                str(identity.get("code_sha", ""))
-            )
+            recovery = _standard_lineage_recovery_context(str(identity.get("code_sha", "")))
             lineage.append(
                 {
                     "run_id": item["worker_id"],
@@ -1146,11 +1616,7 @@ def _formal_execution_health_reasons(execution: dict[str, Any]) -> list[str]:
             "STACK_CONSERVATION_VIOLATION",
         ),
     )
-    return [
-        reason
-        for counter, reason in counter_reasons
-        if int(execution.get(counter, -1)) != 0
-    ]
+    return [reason for counter, reason in counter_reasons if int(execution.get(counter, -1)) != 0]
 
 
 def _validate_selected_seed_pods(selected: list[dict[str, Any]], *, enforce_formal: bool) -> None:
@@ -1439,9 +1905,7 @@ def _worker_recovery_lineage_context(item: dict[str, Any]) -> dict[str, Any]:
         return standard
     receipt = _read_json(receipt_path)
     recovery_intent = (
-        "recovery_adoption" in receipt
-        or "phase_f_evidence" in receipt
-        or recovery_root_present
+        "recovery_adoption" in receipt or "phase_f_evidence" in receipt or recovery_root_present
     )
     adoption = receipt.get("recovery_adoption")
     if adoption is None:
@@ -1486,9 +1950,7 @@ def _worker_recovery_lineage_context(item: dict[str, Any]) -> dict[str, Any]:
     }
     phase_f_without_certificate = {
         **phase_f_base,
-        "task1_adoption_attestation_sha256": evidence[
-            "task1_adoption_attestation_sha256"
-        ],
+        "task1_adoption_attestation_sha256": evidence["task1_adoption_attestation_sha256"],
     }
     if attestation.get("phase_f_evidence") != phase_f_base:
         raise ConfigError("Phase F recovery attestation evidence 不一致")
@@ -1503,8 +1965,7 @@ def _worker_recovery_lineage_context(item: dict[str, Any]) -> dict[str, Any]:
         or attestation.get("schema_version") != RECOVERY_ATTESTATION_SCHEMA
         or attestation.get("worker_id") != item["worker_id"]
         or attestation.get("task_id") != RECOVERY_TASK_ID
-        or attestation.get("protocol_amendment_id")
-        != RECOVERY_PROTOCOL_AMENDMENT_ID
+        or attestation.get("protocol_amendment_id") != RECOVERY_PROTOCOL_AMENDMENT_ID
         or certificate.get("schema_version") != RECOVERY_ADOPTION_SCHEMA
         or certificate.get("status") != "authorized-task1-adoption"
         or certificate.get("reason") != RECOVERY_REASON
@@ -1513,8 +1974,7 @@ def _worker_recovery_lineage_context(item: dict[str, Any]) -> dict[str, Any]:
         or certificate.get("protocol_amendment_id") != RECOVERY_PROTOCOL_AMENDMENT_ID
         or certificate.get("frozen_code_sha") != FROZEN_SCIENTIFIC_CODE_SHA
         or experiment_code_sha != FROZEN_SCIENTIFIC_CODE_SHA
-        or attestation.get("scientific_execution_code_sha")
-        != FROZEN_SCIENTIFIC_CODE_SHA
+        or attestation.get("scientific_execution_code_sha") != FROZEN_SCIENTIFIC_CODE_SHA
         or certificate.get("effect_fields_read") is not False
         or certificate.get("scientific_outcome_fields_accessed") is not False
         or attestation.get("scientific_outcome_fields_accessed") is not False
@@ -1531,15 +1991,12 @@ def _worker_recovery_lineage_context(item: dict[str, Any]) -> dict[str, Any]:
     if (
         adoption.get("schema_version") != RECOVERY_ADOPTION_SCHEMA
         or not str(adoption.get("authorization_id", "")).strip()
-        or re.fullmatch(r"[0-9a-f]{64}", str(adoption.get("authorization_sha256", "")))
-        is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(adoption.get("authorization_sha256", ""))) is None
         or adoption.get("authorization_id") != certificate.get("authorization_id")
-        or adoption.get("authorization_sha256")
-        != certificate.get("authorization_sha256")
+        or adoption.get("authorization_sha256") != certificate.get("authorization_sha256")
         or certificate.get("authorization_id") is None
         or certificate.get("authorization_sha256") is None
-        or adoption.get("recovery_certificate_sha256")
-        != evidence["recovery_certificate_sha256"]
+        or adoption.get("recovery_certificate_sha256") != evidence["recovery_certificate_sha256"]
     ):
         raise ConfigError("Phase F recovery adoption receipt hash 不匹配")
     identity_correction = certificate.get("identity_correction")
@@ -1552,25 +2009,17 @@ def _worker_recovery_lineage_context(item: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(identity_correction, dict) or (
         identity_correction.get("original_expected_sha256")
         != evidence["original_expected_config_sha256"]
-        or identity_correction.get("corrected_actual_sha256")
-        != evidence["corrected_config_sha256"]
-        or canonical.get("original_expected_sha256")
-        != evidence["original_expected_config_sha256"]
-        or canonical.get("corrected_actual_sha256")
-        != evidence["corrected_config_sha256"]
-        or evidence["corrected_config_sha256"]
-        != evidence["original_expected_config_sha256"]
+        or identity_correction.get("corrected_actual_sha256") != evidence["corrected_config_sha256"]
+        or canonical.get("original_expected_sha256") != evidence["original_expected_config_sha256"]
+        or canonical.get("corrected_actual_sha256") != evidence["corrected_config_sha256"]
+        or evidence["corrected_config_sha256"] != evidence["original_expected_config_sha256"]
         or re.fullmatch(r"[0-9a-f]{64}", str(canonical_legacy or "")) is None
         or canonical_legacy != certificate_legacy
         or canonical_legacy == evidence["original_expected_config_sha256"]
-        or canonical.get("semantic_equivalence_after_stringifying_mapping_keys")
+        or canonical.get("semantic_equivalence_after_stringifying_mapping_keys") is not True
+        or identity_correction.get("semantic_equivalence_after_stringifying_mapping_keys")
         is not True
-        or identity_correction.get(
-            "semantic_equivalence_after_stringifying_mapping_keys"
-        )
-        is not True
-        or canonical.get("only_authorized_difference")
-        != "integer-versus-string mapping keys"
+        or canonical.get("only_authorized_difference") != "integer-versus-string mapping keys"
         or identity_correction.get("only_authorized_difference")
         != "integer-versus-string mapping keys"
     ):
@@ -1590,29 +2039,21 @@ def _worker_recovery_lineage_context(item: dict[str, Any]) -> dict[str, Any]:
         "protocol_amendment_id": RECOVERY_PROTOCOL_AMENDMENT_ID,
         "protocol_amendment_sha256": evidence["protocol_amendment_sha256"],
         "pre_recovery_archive_sha256": evidence["pre_recovery_archive_sha256"],
-        "pre_recovery_file_manifest_sha256": evidence[
-            "pre_recovery_file_manifest_sha256"
-        ],
+        "pre_recovery_file_manifest_sha256": evidence["pre_recovery_file_manifest_sha256"],
         "original_terminal_state_sha256": evidence["original_terminal_state_sha256"],
-        "original_expected_config_sha256": evidence[
-            "original_expected_config_sha256"
-        ],
+        "original_expected_config_sha256": evidence["original_expected_config_sha256"],
         "corrected_config_sha256": evidence["corrected_config_sha256"],
         "canonicalization_equivalence_audit_sha256": evidence[
             "canonicalization_equivalence_audit_sha256"
         ],
         "recovery_certificate_sha256": evidence["recovery_certificate_sha256"],
-        "task1_adoption_attestation_sha256": evidence[
-            "task1_adoption_attestation_sha256"
-        ],
+        "task1_adoption_attestation_sha256": evidence["task1_adoption_attestation_sha256"],
         "scientific_execution_code_sha": experiment_code_sha,
         "task1_rerun_performed": False,
     }
 
 
-def _task_recovery_lineage_context(
-    worker_context: dict[str, Any], task_id: str
-) -> dict[str, Any]:
+def _task_recovery_lineage_context(worker_context: dict[str, Any], task_id: str) -> dict[str, Any]:
     context = dict(worker_context)
     if context["recovery_disposition"] == "NONE":
         return context
@@ -2193,8 +2634,7 @@ def _normalize_data_lineage_rows(
         worker_key = str(source.get("worker_id") or source.get("run_id", ""))
         one_source_per_worker.setdefault(worker_key, source)
     fallback_sources = [
-        _compact_lineage_source(one_source_per_worker[key])
-        for key in sorted(one_source_per_worker)
+        _compact_lineage_source(one_source_per_worker[key]) for key in sorted(one_source_per_worker)
     ]
     required_nonempty = (
         "lineage_id",
@@ -2296,32 +2736,22 @@ def _compact_lineage_source(source: dict[str, Any]) -> dict[str, Any]:
         "protocol_amendment_id": source.get("protocol_amendment_id"),
         "protocol_amendment_sha256": source.get("protocol_amendment_sha256"),
         "pre_recovery_archive_sha256": source.get("pre_recovery_archive_sha256"),
-        "pre_recovery_file_manifest_sha256": source.get(
-            "pre_recovery_file_manifest_sha256"
-        ),
-        "original_terminal_state_sha256": source.get(
-            "original_terminal_state_sha256"
-        ),
-        "original_expected_config_sha256": source.get(
-            "original_expected_config_sha256"
-        ),
+        "pre_recovery_file_manifest_sha256": source.get("pre_recovery_file_manifest_sha256"),
+        "original_terminal_state_sha256": source.get("original_terminal_state_sha256"),
+        "original_expected_config_sha256": source.get("original_expected_config_sha256"),
         "corrected_config_sha256": source.get("corrected_config_sha256"),
         "canonicalization_equivalence_audit_sha256": source.get(
             "canonicalization_equivalence_audit_sha256"
         ),
         "recovery_certificate_sha256": source.get("recovery_certificate_sha256"),
-        "task1_adoption_attestation_sha256": source.get(
-            "task1_adoption_attestation_sha256"
-        ),
+        "task1_adoption_attestation_sha256": source.get("task1_adoption_attestation_sha256"),
         "scientific_execution_code_sha": source.get(
             "scientific_execution_code_sha", standard["scientific_execution_code_sha"]
         ),
         "source_execution_stage": source.get(
             "source_execution_stage", standard["source_execution_stage"]
         ),
-        "raw_artifact_reused": source.get(
-            "raw_artifact_reused", standard["raw_artifact_reused"]
-        ),
+        "raw_artifact_reused": source.get("raw_artifact_reused", standard["raw_artifact_reused"]),
         "task1_rerun_performed": source.get(
             "task1_rerun_performed", standard["task1_rerun_performed"]
         ),
@@ -2375,8 +2805,7 @@ def _validate_compact_lineage_source(source: dict[str, Any]) -> None:
         or source["location"] not in {"Source", "Heldout"}
         or source["checkpoint_hand"] not in {30, 75, 150, 300}
         or source["heldout_table_id"] not in {"H01", "H02", "H03", None}
-        or re.fullmatch(r"(attempt_01|__attempt_[0-9]{2})", str(source["attempt"]))
-        is None
+        or re.fullmatch(r"(attempt_01|__attempt_[0-9]{2})", str(source["attempt"])) is None
         or source["exclusion_status"] not in {"eligible", "excluded", "missing"}
     ):
         raise ConfigError("Phase F compact sourceRecord identity/enum 非法")
@@ -2436,8 +2865,7 @@ def _validate_compact_lineage_source(source: dict[str, Any]) -> None:
         or re.fullmatch(r"[0-9a-f]{40}", str(source["verifier_code_sha"])) is None
         or source["protocol_amendment_id"] != RECOVERY_PROTOCOL_AMENDMENT_ID
         or any(
-            re.fullmatch(r"[0-9a-f]{64}", str(source[field])) is None
-            for field in recovery_hashes
+            re.fullmatch(r"[0-9a-f]{64}", str(source[field])) is None for field in recovery_hashes
         )
         or source["source_execution_stage"]
         not in {"pre_recovery_task1", "post_adoption_task2_plus"}
@@ -2598,9 +3026,7 @@ def _paper_lineage_rows(
                         "mechanism": source.get("mechanism", source.get("condition")),
                         "memory_mode": source.get("memory_mode"),
                         "location": source.get("location"),
-                        "checkpoint_hand": source.get(
-                            "checkpoint_hand", source.get("checkpoint")
-                        ),
+                        "checkpoint_hand": source.get("checkpoint_hand", source.get("checkpoint")),
                         "heldout_table_id": source.get("heldout_table_id") or None,
                         "attempt": source.get("attempt"),
                         "code_sha": source.get("code_sha"),
@@ -2668,9 +3094,7 @@ def _paper_lineage_rows(
                             sorted({str(source.get("source_file", "")) for source in cell_sources})
                         ),
                         "source_file_relative_path": ";".join(
-                            sorted(
-                                {str(source.get("source_file", "")) for source in cell_sources}
-                            )
+                            sorted({str(source.get("source_file", "")) for source in cell_sources})
                         ),
                         "source_file_sha256": ";".join(
                             sorted(
