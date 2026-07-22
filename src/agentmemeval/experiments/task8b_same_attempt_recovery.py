@@ -22,7 +22,6 @@ from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-
 FROZEN_CODE_SHA = "a1d1eb97efb41d52585057ab7c9594dcd19227ae"
 AUTHORIZATION_SCHEMA = "task8b-same-attempt-recovery-authorization-v1"
 ADOPTION_SCHEMA = "task8b-same-attempt-task-adoption-v1"
@@ -1087,13 +1086,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.receipt_root is None:
         raise RecoveryError("--receipt-root is required for activated recovery")
     authorization = _read_json(args.authorization.resolve())
+    frozen_checkout = args.frozen_checkout.resolve()
     runner, load_config = _load_frozen_runner(
-        args.frozen_checkout.resolve(),
+        frozen_checkout,
         str(authorization.get("formal_runner_sha256", "")),
     )
     original_canonicalizer = runner._semantic_config
+    original_cwd = Path.cwd()
     runner._semantic_config = canonicalize_resolved_config_identity
     try:
+        # The frozen runner's admission layer resolves runtime Git identity from
+        # Path.cwd().  Execute from the frozen checkout so a verifier checkout or
+        # orchestration shell cannot make the scientific commit appear unknown.
+        os.chdir(frozen_checkout)
         result = execute_recovery(
             runner=runner,
             load_config=load_config,
@@ -1112,6 +1117,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     finally:
         runner._semantic_config = original_canonicalizer
+        os.chdir(original_cwd)
     sys.stdout.write(json.dumps(result, ensure_ascii=False, sort_keys=True) + "\n")
     return 0
 

@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import tarfile
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -558,3 +559,51 @@ def test_deterministic_draft_activate_execute_chain(tmp_path, monkeypatch):
     kwargs["authorization_path"] = activated_path
     assert recovery.execute_recovery(**kwargs)["status"] == "continued"
     assert len(runner.resume_calls) == 1
+
+
+def test_main_executes_frozen_runner_from_frozen_checkout_and_restores_cwd(
+    tmp_path, monkeypatch, capsys
+):
+    frozen = tmp_path / "frozen"
+    frozen.mkdir()
+    authorization = tmp_path / "authorization.json"
+    authorization.write_bytes(_json_bytes({"formal_runner_sha256": "1" * 64}))
+    original_cwd = Path.cwd()
+    observed = {}
+    runner = type("Runner", (), {"_semantic_config": staticmethod(lambda value: value)})()
+    original_canonicalizer = runner._semantic_config
+
+    monkeypatch.setattr(
+        recovery,
+        "_parse_args",
+        lambda _argv: Namespace(
+            frozen_checkout=frozen,
+            manifest=tmp_path / "manifest.json",
+            receipt_root=tmp_path / "receipts",
+            attempt_root=tmp_path / "attempt",
+            baseline_manifest=tmp_path / "baseline.tsv",
+            authorization=authorization,
+            build_authorization=None,
+            activate_authorization=None,
+            activated_authorization_output=None,
+            protocol_amendment=tmp_path / "amendment.json",
+            protocol_amendment_id=recovery.PROTOCOL_AMENDMENT_ID,
+            parent_preunlock=tmp_path / "preunlock.json",
+            pre_recovery_archive=tmp_path / "archive.tar.gz",
+            pid_absence_evidence=tmp_path / "pid.json",
+            verifier_checkout=tmp_path / "verifier",
+        ),
+    )
+    monkeypatch.setattr(recovery, "_load_frozen_runner", lambda *_: (runner, object()))
+
+    def fake_execute_recovery(**_kwargs):
+        observed["cwd"] = Path.cwd()
+        return {"status": "continued"}
+
+    monkeypatch.setattr(recovery, "execute_recovery", fake_execute_recovery)
+
+    assert recovery.main([]) == 0
+    assert observed["cwd"] == frozen.resolve()
+    assert Path.cwd() == original_cwd
+    assert runner._semantic_config == original_canonicalizer
+    assert json.loads(capsys.readouterr().out) == {"status": "continued"}
