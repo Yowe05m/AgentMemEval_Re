@@ -438,6 +438,169 @@ def _canonical_identity(manifest: dict[str, Any]) -> tuple[str, int, str]:
     return worker_id, seed, role
 
 
+def render_authorization(
+    canonical_manifest_path: str | Path,
+    amendment_path: str | Path,
+    *,
+    physical_slot: str,
+    shard_role: str,
+    selected_task_ids: list[str],
+    scientific_checkout: str | Path,
+    approved_staging_root: str | Path,
+    approved_receipt_root: str | Path,
+    shard_id: str,
+    output_path: str | Path,
+) -> dict[str, Any]:
+    """Render one deterministic, non-overwriting paired-shard authorization."""
+
+    canonical_path = Path(os.path.abspath(canonical_manifest_path))
+    amendment = Path(os.path.abspath(amendment_path))
+    checkout = Path(os.path.abspath(scientific_checkout))
+    staging_root = _approved_root(
+        str(approved_staging_root),
+        label="approved_staging_root",
+    )
+    receipt_root = _approved_root(
+        str(approved_receipt_root),
+        label="approved_receipt_root",
+    )
+    canonical = _read_json(canonical_path)
+    worker_id, seed, role = _canonical_identity(canonical)
+    if role != "primary":
+        raise ConfigError(
+            "authorization renderer 当前只允许 primary；secondary 必须先绑定 bridge"
+        )
+    _verify_amendment(amendment, EXPECTED_AMENDMENT_SHA256)
+    _verify_scientific_checkout(checkout)
+    if shard_role not in {"low", "high"}:
+        raise ConfigError("authorization renderer shard_role 必须为 low/high")
+    if physical_slot != PHYSICAL_MAPPING[seed][shard_role]:
+        raise ConfigError("authorization renderer physical_slot 与 pair 不匹配")
+    selected = [str(task_id) for task_id in selected_task_ids]
+    canonical_order = [
+        str(task["task_id"]) for task in canonical["task_configs"]
+    ]
+    if (
+        not selected
+        or len(selected) != len(set(selected))
+        or selected
+        != [task_id for task_id in canonical_order if task_id in set(selected)]
+        or not set(selected).issubset(SIDE_TASKS[(role, shard_role)])
+    ):
+        raise ConfigError("authorization renderer selected tasks/顺序/side 非法")
+    if not shard_id.strip() or Path(shard_id).name != shard_id:
+        raise ConfigError("authorization renderer shard_id 非法")
+    canonical_output = Path(str(canonical["instance_identity"]["output_path"]))
+    if not canonical_output.is_absolute():
+        canonical_output = checkout / canonical_output
+    derived_base = staging_root / "paired_shards" / worker_id / shard_id
+    derived_output = _inside_approved(
+        staging_root,
+        derived_base / "output",
+        label="derived_output_path",
+    )
+    derived_cache = _inside_approved(
+        staging_root,
+        derived_base / "cache",
+        label="derived_cache_namespace",
+    )
+    receipt_relative = (
+        f"paired_shards/receipts/{worker_id}/{shard_id}.json"
+    )
+    identity_material = {
+        "amendment_sha256": EXPECTED_AMENDMENT_SHA256,
+        "canonical_manifest_sha256": _sha256(canonical_path),
+        "controller_sha256": _sha256(Path(__file__).resolve()),
+        "pair_id": PAIR_IDS[seed],
+        "physical_slot": physical_slot,
+        "role": role,
+        "seed": seed,
+        "selected_task_ids": selected,
+        "shard_id": shard_id,
+        "shard_role": shard_role,
+        "worker_id": worker_id,
+    }
+    authorization = {
+        "schema_version": AUTHORIZATION_SCHEMA,
+        "active": True,
+        "authorization_id": (
+            "auth-" + hashlib.sha256(_json_bytes(identity_material)).hexdigest()
+        ),
+        "amendment_id": AMENDMENT_ID,
+        "amendment_path": str(amendment),
+        "amendment_sha256": EXPECTED_AMENDMENT_SHA256,
+        "scientific_checkout": str(checkout),
+        "frozen_code_sha": FROZEN_CODE_SHA,
+        "frozen_formal_runner_sha256": FROZEN_FORMAL_RUNNER_SHA256,
+        "engineering_controller_sha256": _sha256(Path(__file__).resolve()),
+        "approved_staging_root": str(staging_root),
+        "approved_receipt_root": str(receipt_root),
+        "denied_partial_root": str(Path(os.path.abspath(canonical_output))),
+        "pair_id": PAIR_IDS[seed],
+        "physical_slot": physical_slot,
+        "shard_role": shard_role,
+        "partition_id": f"{PAIR_IDS[seed]}-{role}-{shard_role}",
+        "canonical_manifest_sha256": _sha256(canonical_path),
+        "worker_id": worker_id,
+        "seed": seed,
+        "shard_id": shard_id,
+        "seal_mode": "execution",
+        "selected_task_ids": selected,
+        "derived_output_path": str(derived_output),
+        "derived_cache_namespace": str(derived_cache),
+        "derived_receipt_relative_path": receipt_relative,
+        "primary_bridge_root": None,
+        "primary_bridge_receipt_relative_path": None,
+        "primary_bridge_receipt_sha256": None,
+        "effect_fields_read": False,
+        "scientific_protocol_changed": False,
+    }
+    _write_json_new(Path(os.path.abspath(output_path)), authorization)
+    return authorization
+
+
+def preflight_authorization(
+    canonical_manifest_path: str | Path,
+    authorization_path: str | Path,
+) -> dict[str, Any]:
+    """Validate and derive one shard without publishing files or running hands."""
+
+    derived = derive_authorized_manifest(
+        canonical_manifest_path,
+        authorization_path,
+    )
+    shard = dict(derived["paired_shard"])
+    _verify_scientific_checkout(Path(str(shard["scientific_checkout"])))
+    output = Path(str(derived["instance_identity"]["output_path"]))
+    cache = Path(str(derived["instance_identity"]["cache_namespace"]))
+    receipt = (
+        Path(str(shard["approved_receipt_root"]))
+        / str(derived["receipt_relative_path"])
+    )
+    if output.exists() or output.is_symlink():
+        raise ConfigError("preflight 拒绝既有 derived output")
+    if cache.exists() or cache.is_symlink():
+        raise ConfigError("preflight 拒绝既有 derived cache")
+    if derived["role"] == "primary" and (
+        receipt.exists() or receipt.is_symlink()
+    ):
+        raise ConfigError("preflight 拒绝既有 primary shard receipt")
+    return {
+        "status": "preflight_pass",
+        "authorization_sha256": shard["authorization_sha256"],
+        "worker_id": derived["worker_id"],
+        "seed": derived["seed_bundle"],
+        "pair_id": shard["pair_id"],
+        "physical_slot": shard["physical_slot"],
+        "shard_role": shard["shard_role"],
+        "selected_task_ids": shard["selected_task_ids"],
+        "derived_output_path": str(output),
+        "derived_cache_namespace": str(cache),
+        "effect_fields_read": False,
+        "hands_started": 0,
+    }
+
+
 def derive_authorized_manifest(
     canonical_manifest_path: str | Path,
     authorization_path: str | Path,
@@ -1652,6 +1815,26 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    render_parser = subparsers.add_parser("render-authorization")
+    render_parser.add_argument("--canonical-manifest", type=Path, required=True)
+    render_parser.add_argument("--amendment", type=Path, required=True)
+    render_parser.add_argument("--physical-slot", required=True)
+    render_parser.add_argument("--side", choices=("low", "high"), required=True)
+    render_parser.add_argument(
+        "--selected-task", action="append", required=True
+    )
+    render_parser.add_argument("--scientific-checkout", type=Path, required=True)
+    render_parser.add_argument("--staging-root", type=Path, required=True)
+    render_parser.add_argument("--receipt-root", type=Path, required=True)
+    render_parser.add_argument("--shard-id", required=True)
+    render_parser.add_argument("--output", type=Path, required=True)
+
+    preflight_parser = subparsers.add_parser("preflight")
+    preflight_parser.add_argument(
+        "--canonical-manifest", type=Path, required=True
+    )
+    preflight_parser.add_argument("--authorization", type=Path, required=True)
+
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--canonical-manifest", type=Path, required=True)
     run_parser.add_argument("--authorization", type=Path, required=True)
@@ -1689,7 +1872,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    if args.command == "run":
+    if args.command == "render-authorization":
+        result = render_authorization(
+            args.canonical_manifest,
+            args.amendment,
+            physical_slot=args.physical_slot,
+            shard_role=args.side,
+            selected_task_ids=args.selected_task,
+            scientific_checkout=args.scientific_checkout,
+            approved_staging_root=args.staging_root,
+            approved_receipt_root=args.receipt_root,
+            shard_id=args.shard_id,
+            output_path=args.output,
+        )
+    elif args.command == "preflight":
+        result = preflight_authorization(
+            args.canonical_manifest,
+            args.authorization,
+        )
+    elif args.command == "run":
         result = run_authorized_shard(
             args.canonical_manifest,
             args.authorization,

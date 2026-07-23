@@ -1000,3 +1000,158 @@ def test_approved_path_rejects_symlink_component_before_resolve(
             link / "child.json",
             label="test target",
         )
+
+
+@pytest.mark.parametrize(
+    ("seed", "physical_slot"),
+    [
+        (2026090108, "H02"),
+        (2026090111, "H05"),
+        (2026090112, "H06"),
+    ],
+)
+def test_render_authorization_is_deterministic_for_low_primary_slots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed: int,
+    physical_slot: str,
+) -> None:
+    canonical = _canonical_manifest(tmp_path, role="primary", seed=seed)
+    amendment = tmp_path / "amendment.md"
+    amendment.write_text("frozen amendment\n", encoding="utf-8")
+    checkout = tmp_path / "scientific"
+    staging = tmp_path / "staging"
+    receipts = tmp_path / "receipts"
+    checkout.mkdir()
+    staging.mkdir()
+    receipts.mkdir()
+    monkeypatch.setattr(
+        shards,
+        "_verify_scientific_checkout",
+        lambda path: Path(path) / "formal_runner.py",
+    )
+    first = tmp_path / "auth" / "first.json"
+    second = tmp_path / "auth" / "second.json"
+    kwargs = {
+        "physical_slot": physical_slot,
+        "shard_role": "low",
+        "selected_task_ids": ["isolation_async"],
+        "scientific_checkout": checkout,
+        "approved_staging_root": staging,
+        "approved_receipt_root": receipts,
+        "shard_id": "primary-low-async-v1",
+    }
+    rendered = shards.render_authorization(
+        canonical,
+        amendment,
+        output_path=first,
+        **kwargs,
+    )
+    shards.render_authorization(
+        canonical,
+        amendment,
+        output_path=second,
+        **kwargs,
+    )
+    assert first.read_bytes() == second.read_bytes()
+    assert rendered["worker_id"] == f"P{seed - 2026090100:02d}"
+    assert rendered["physical_slot"] == physical_slot
+    assert rendered["selected_task_ids"] == ["isolation_async"]
+    assert rendered["effect_fields_read"] is False
+    with pytest.raises(ConfigError, match="拒绝覆盖"):
+        shards.render_authorization(
+            canonical,
+            amendment,
+            output_path=first,
+            **kwargs,
+        )
+
+
+def test_render_high_mapping_and_preflight_never_runs_hands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = _canonical_manifest(
+        tmp_path,
+        role="primary",
+        seed=2026090107,
+    )
+    amendment = tmp_path / "amendment.md"
+    amendment.write_text("frozen amendment\n", encoding="utf-8")
+    checkout = tmp_path / "scientific"
+    staging = tmp_path / "staging"
+    receipts = tmp_path / "receipts"
+    checkout.mkdir()
+    staging.mkdir()
+    receipts.mkdir()
+    monkeypatch.setattr(
+        shards,
+        "_verify_scientific_checkout",
+        lambda path: Path(path) / "formal_runner.py",
+    )
+    authorization = tmp_path / "auth" / "high.json"
+    shards.render_authorization(
+        canonical,
+        amendment,
+        physical_slot="H07",
+        shard_role="high",
+        selected_task_ids=["isolation_sync"],
+        scientific_checkout=checkout,
+        approved_staging_root=staging,
+        approved_receipt_root=receipts,
+        shard_id="primary-high-sync-rerun-v1",
+        output_path=authorization,
+    )
+    called = False
+
+    def _forbidden_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        raise AssertionError("preflight must not invoke run_authorized_shard")
+
+    monkeypatch.setattr(shards, "run_authorized_shard", _forbidden_run)
+    result = shards.preflight_authorization(canonical, authorization)
+    assert result["status"] == "preflight_pass"
+    assert result["physical_slot"] == "H07"
+    assert result["selected_task_ids"] == ["isolation_sync"]
+    assert result["hands_started"] == 0
+    assert called is False
+    assert not Path(result["derived_output_path"]).exists()
+    assert not Path(result["derived_cache_namespace"]).exists()
+
+
+def test_render_authorization_rejects_wrong_physical_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = _canonical_manifest(
+        tmp_path,
+        role="primary",
+        seed=2026090108,
+    )
+    amendment = tmp_path / "amendment.md"
+    amendment.write_text("frozen amendment\n", encoding="utf-8")
+    checkout = tmp_path / "scientific"
+    staging = tmp_path / "staging"
+    receipts = tmp_path / "receipts"
+    checkout.mkdir()
+    staging.mkdir()
+    receipts.mkdir()
+    monkeypatch.setattr(
+        shards,
+        "_verify_scientific_checkout",
+        lambda path: Path(path) / "formal_runner.py",
+    )
+    with pytest.raises(ConfigError, match="physical_slot"):
+        shards.render_authorization(
+            canonical,
+            amendment,
+            physical_slot="H05",
+            shard_role="low",
+            selected_task_ids=["isolation_async"],
+            scientific_checkout=checkout,
+            approved_staging_root=staging,
+            approved_receipt_root=receipts,
+            shard_id="wrong-slot",
+            output_path=tmp_path / "auth.json",
+        )
