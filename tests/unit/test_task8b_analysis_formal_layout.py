@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from agentmemeval.core.errors import ConfigError
+from agentmemeval.evaluation import task8b_analysis
 from agentmemeval.evaluation.task8b_analysis import run_task8b_analysis
 from agentmemeval.experiments.formal_protocol import sha256_json
 from agentmemeval.experiments.formal_runner import append_worker_state
@@ -531,3 +532,352 @@ def test_seed_pod_identity_is_recomputed_from_authoritative_task_schedule_rows(
 
     with pytest.raises(ConfigError, match="schedule|CRN|identity"):
         task8b_analysis._validate_selected_seed_pods(selected, enforce_formal=True)
+
+
+def _six_seed_workers() -> list[dict[str, object]]:
+    workers: list[dict[str, object]] = []
+    for index in range(7, 13):
+        seed = 2026090100 + index
+        slots = [f"H{index - 6:02d}", f"H{index:02d}"]
+        for role in ("P", "S"):
+            worker_id = f"{role}{index:02d}"
+            if role == "P":
+                shard_role = "primary_isolation_partition"
+                partitions = (
+                    (
+                        "high",
+                        [
+                            "isolation_no_memory",
+                            "isolation_fact",
+                            "isolation_expr",
+                            "isolation_sync",
+                        ],
+                        5400,
+                    ),
+                    ("low", ["isolation_async"], 1350),
+                )
+            else:
+                shard_role = "secondary_mode_partition"
+                partitions = (
+                    ("low", ["mixed_ecological"], 2700),
+                    (
+                        "high",
+                        [
+                            "expr_online",
+                            "expr_without",
+                            "async_online",
+                            "async_without",
+                        ],
+                        2400,
+                    ),
+                )
+            shards = [
+                {
+                    "shard_id": f"{worker_id}-{slot}",
+                    "physical_slot": slot,
+                    "side": side,
+                    "shard_role": shard_role,
+                    "task_ids": task_ids,
+                    "actual_hands": hands,
+                    "shard_manifest_sha256": "a" * 64,
+                    "completion_receipt_sha256": "b" * 64,
+                }
+                for slot, (side, task_ids, hands) in zip(
+                    slots if role == "S" else reversed(slots),
+                    partitions,
+                    strict=True,
+                )
+            ]
+            workers.append(
+                {
+                    "worker_id": worker_id,
+                    "pod_id": f"pod{index:02d}",
+                    "seed": seed,
+                    "expected_worker_manifest_sha256": "c" * 64,
+                    "shard_lineage": {
+                        "pair_id": f"pair_{index:02d}",
+                        "paired_physical_slots": slots,
+                        "composition_receipt_path": (
+                            f"composition/{worker_id}.json"
+                        ),
+                        "composition_receipt_sha256": "d" * 64,
+                        "shards": shards,
+                    },
+                }
+            )
+    return workers
+
+
+def test_six_seed_contract_freezes_canonical_topology_and_budget() -> None:
+    protocol = task8b_analysis._load_six_seed_analysis_protocol()
+
+    assert protocol["seeds"] == tuple(range(2026090107, 2026090113))
+    assert protocol["n_planned"] == 6
+    assert protocol["planned_hands"] == 71100
+    assert protocol["worker_ids"] == tuple(
+        f"{role}{index:02d}" for role in ("P", "S") for index in range(7, 13)
+    )
+    task8b_analysis._validate_analysis_input_topology(
+        _six_seed_workers(), protocol
+    )
+
+
+def test_six_seed_contract_requires_pair_and_shard_lineage() -> None:
+    protocol = task8b_analysis._load_six_seed_analysis_protocol()
+    workers = _six_seed_workers()
+    workers[0]["shard_lineage"]["shards"][0].pop("shard_manifest_sha256")  # type: ignore[index]
+
+    with pytest.raises(ConfigError, match="shard lineage"):
+        task8b_analysis._validate_analysis_input_topology(workers, protocol)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("primary_endpoint", "posthoc_endpoint"),
+        ("primary_checkpoint", 150),
+        ("primary_mode", "Online"),
+        ("holm_family", ["Expr_vs_Fact"]),
+        ("bootstrap", {"cluster": "seed"}),
+        ("n_source", "power-verified"),
+        (
+            "sign_flip_holm_disclosure",
+            {
+                "alpha": 0.05,
+                "minimum_holm_adjusted_p": 0.01,
+                "rejection_possible": True,
+                "two_sided_exact_minimum_raw_p": 0.01,
+            },
+        ),
+    ),
+)
+def test_six_seed_contract_loader_rejects_statistical_semantic_drift(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    contract = json.loads(
+        task8b_analysis._six_seed_contract_path().read_text(encoding="utf-8")
+    )
+    contract[field] = value
+    path = tmp_path / "contract.json"
+    _write_json(path, contract)
+
+    with pytest.raises(ConfigError, match="语义不闭合"):
+        task8b_analysis._load_six_seed_analysis_protocol(path)
+
+
+def test_six_seed_input_rejects_legacy_contract_or_unbound_contract_sha() -> None:
+    workers = _six_seed_workers()
+    legacy = {
+        "analysis_contract_id": task8b_analysis.LEGACY_ANALYSIS_CONTRACT_ID,
+    }
+    with pytest.raises(ConfigError, match="topology"):
+        task8b_analysis._validate_analysis_input_topology(
+            workers, task8b_analysis._analysis_protocol_for_manifest(legacy)
+        )
+
+
+def _bind_composition_receipt(
+    root: Path, worker: dict[str, object]
+) -> None:
+    lineage = worker["shard_lineage"]
+    assert isinstance(lineage, dict)
+    sides = []
+    for shard in lineage["shards"]:
+        assert isinstance(shard, dict)
+        execution_path = (
+            root
+            / "composition"
+            / "execution"
+            / f"{worker['worker_id']}-{shard['side']}.json"
+        )
+        _write_json(execution_path, {"status": "complete"})
+        sides.append(
+            {
+                "side": shard["side"],
+                "physical_slot": shard["physical_slot"],
+                "task_ids": shard["task_ids"],
+                "actual_hands": shard["actual_hands"],
+                "execution_receipts": [
+                    {
+                        "path": f"execution/{execution_path.name}",
+                        "sha256": _sha256(execution_path),
+                    }
+                ],
+            }
+        )
+    composition_path = root / str(lineage["composition_receipt_path"])
+    _write_json(
+        composition_path,
+        {
+            "schema_version": "task8b-six-seed-composition-receipt-v1",
+            "worker_id": worker["worker_id"],
+            "seed": worker["seed"],
+            "pair_id": lineage["pair_id"],
+            "sides": sides,
+            "task_union": [
+                task_id for side in sides for task_id in side["task_ids"]
+            ],
+            "actual_hands": sum(int(side["actual_hands"]) for side in sides),
+        },
+    )
+    lineage["composition_receipt_sha256"] = _sha256(composition_path)
+
+
+def test_six_seed_composition_receipt_is_read_and_hash_bound(
+    tmp_path: Path,
+) -> None:
+    protocol = task8b_analysis._load_six_seed_analysis_protocol()
+    workers = _six_seed_workers()
+    worker = workers[0]
+    _bind_composition_receipt(tmp_path, worker)
+
+    task8b_analysis._validate_six_seed_shard_lineage(
+        worker, protocol, manifest_root=tmp_path
+    )
+    composition = (
+        tmp_path
+        / str(worker["shard_lineage"]["composition_receipt_path"])  # type: ignore[index]
+    )
+    value = json.loads(composition.read_text(encoding="utf-8"))
+    value["actual_hands"] = int(value["actual_hands"]) - 1
+    _write_json(composition, value)
+
+    with pytest.raises(ConfigError, match="SHA"):
+        task8b_analysis._validate_six_seed_shard_lineage(
+            worker, protocol, manifest_root=tmp_path
+        )
+
+
+def test_six_seed_table1_and_lineage_use_n_planned_six() -> None:
+    protocol = task8b_analysis._load_six_seed_analysis_protocol()
+    table1 = task8b_analysis._table1_rows(
+        [{"worker_id": "P07"}] * 12, protocol=protocol
+    )
+    assert (
+        next(row for row in table1 if row["field"] == "seed_count")[
+            "frozen_value"
+        ]
+        == "n=6"
+    )
+    lineage = task8b_analysis._paper_lineage_rows(
+        ([{"field": "seed_count", "value": "n=6"}],),
+        ("table1_protocol_identity",),
+        [],
+        n_planned=6,
+    )
+    assert lineage[0]["n_planned"] == 6
+
+
+def test_six_seed_preunlock_builder_binds_contract_file_and_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    phase_f = tmp_path / "phase-f"
+    for relative in task8b_analysis.PHASE_F_REQUIRED_FILES:
+        path = phase_f / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n", encoding="utf-8", newline="")
+    for relative in task8b_analysis.PHASE_F_ANALYSIS_CODE_FILES:
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n", encoding="utf-8", newline="")
+    source_contract = task8b_analysis._six_seed_contract_path()
+    contract = repo / task8b_analysis.SIX_SEED_ANALYSIS_CONTRACT_RELATIVE_PATH
+    contract.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_contract, contract)
+    lock = repo / "uv.lock"
+    lock.write_text("fixture\n", encoding="utf-8", newline="")
+    monkeypatch.setattr(task8b_analysis, "_git_clean_head", lambda _repo: "a" * 40)
+
+    payload = task8b_analysis.build_task8b_preunlock_manifest(
+        phase_f,
+        lock,
+        tmp_path / "preunlock.json",
+        repository_root=repo,
+        frozen_at_utc="2026-07-23T00:00:00+00:00",
+        analysis_contract_path=contract,
+    )
+
+    assert payload["analysis_contract_id"] == task8b_analysis.SIX_SEED_ANALYSIS_CONTRACT_ID
+    assert payload["analysis_contract_sha256"] == _sha256(contract)
+    code_paths = {row["relative_path"] for row in payload["analysis_code_files"]}
+    assert task8b_analysis.SIX_SEED_ANALYSIS_CONTRACT_RELATIVE_PATH in code_paths
+
+
+def test_six_seed_preunlock_to_input_selects_contract_workers_from_24(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    phase_f = tmp_path / "phase-f"
+    manifests = tmp_path / "worker-manifests"
+    snapshots = tmp_path / "snapshots"
+    manifests.mkdir()
+    _write_json(manifests / "manifest_index.json", {"schema_version": "fixture"})
+    for relative in task8b_analysis.PHASE_F_REQUIRED_FILES:
+        path = phase_f / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n", encoding="utf-8", newline="")
+    for relative in task8b_analysis.PHASE_F_ANALYSIS_CODE_FILES:
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n", encoding="utf-8", newline="")
+    contract = repo / task8b_analysis.SIX_SEED_ANALYSIS_CONTRACT_RELATIVE_PATH
+    contract.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(task8b_analysis._six_seed_contract_path(), contract)
+    lock = repo / "uv.lock"
+    lock.write_text("fixture\n", encoding="utf-8", newline="")
+    monkeypatch.setattr(task8b_analysis, "_git_clean_head", lambda _repo: "a" * 40)
+    preunlock = tmp_path / "preunlock.json"
+    task8b_analysis.build_task8b_preunlock_manifest(
+        phase_f,
+        lock,
+        preunlock,
+        repository_root=repo,
+        frozen_at_utc="2026-07-23T00:00:00+00:00",
+        analysis_contract_path=contract,
+    )
+    selected = {
+        str(worker["worker_id"]): worker for worker in _six_seed_workers()
+    }
+    for index in range(1, 13):
+        for role in ("P", "S"):
+            worker_id = f"{role}{index:02d}"
+            value = {
+                "protocol_status": "frozen/expedited-formal-candidate",
+                "worker_id": worker_id,
+                "pod_id": f"pod{index:02d}",
+                "seed_bundle": 2026090100 + index,
+                "common_identity": WORKER_IDENTITY,
+            }
+            if worker_id in selected:
+                worker = selected[worker_id]
+                _bind_composition_receipt(manifests, worker)
+                value["phase_f_shard_lineage"] = worker["shard_lineage"]
+                (snapshots / worker_id / str(worker["seed"]) / "attempt_01").mkdir(
+                    parents=True
+                )
+            _write_json(manifests / f"{worker_id}.json", value)
+
+    payload = task8b_analysis.build_task8b_analysis_input(
+        manifests,
+        snapshots,
+        tmp_path / "analysis-input.json",
+        preunlock,
+        repository_root=repo,
+        phase_f_dir=phase_f,
+        dependency_lock_path=lock,
+        analysis_contract_path=contract,
+    )
+
+    assert [row["worker_id"] for row in payload["workers"]] == sorted(selected)
+    assert payload["analysis_contract_sha256"] == _sha256(contract)
+
+    with pytest.raises(ConfigError, match="拒绝旧合同误跑"):
+        task8b_analysis._analysis_protocol_for_manifest(
+            {
+                "analysis_contract_id": (
+                    task8b_analysis.SIX_SEED_ANALYSIS_CONTRACT_ID
+                ),
+                "analysis_contract_sha256": "0" * 64,
+            }
+        )

@@ -27,6 +27,12 @@ from agentmemeval.experiments.formal_protocol import sha256_json, verify_schedul
 from agentmemeval.experiments.formal_runner import STATE_SCHEMA_VERSION
 
 FORMAL_SEEDS = tuple(range(2026090101, 2026090113))
+SIX_SEED_FORMAL_SEEDS = tuple(range(2026090107, 2026090113))
+LEGACY_ANALYSIS_CONTRACT_ID = "task8b-phase-f-v1"
+SIX_SEED_ANALYSIS_CONTRACT_ID = "task8b-phase-f-six-seed-v1"
+SIX_SEED_ANALYSIS_CONTRACT_RELATIVE_PATH = (
+    "configs/formal/task8b_six_seed_analysis_contract.json"
+)
 FORMAL_PRIMARY_TASKS = {
     f"isolation_{mechanism}": (1350, {"R1-E1-I", "R1-E2", "R1-E3"})
     for mechanism in ("no_memory", "fact", "expr", "sync", "async")
@@ -88,6 +94,15 @@ LINEAGE_FIELDS = (
     "run_id",
     "worker_id",
     "pod_id",
+    "pair_id",
+    "physical_slot",
+    "shard_id",
+    "shard_side",
+    "shard_role",
+    "paired_physical_slots",
+    "shard_manifest_sha256",
+    "composition_receipt_path",
+    "composition_receipt_sha256",
     "seed",
     "condition",
     "mechanism",
@@ -261,18 +276,431 @@ PHASE_F_PROTECTED_ANALYSIS_FUNCTIONS = (
     "_rate",
 )
 PHASE_F_AUDITED_RECOVERY_OVERLAY_AST_SHA256 = {
-    "run_task8b_analysis": "1fa0259a25ef528b06265f3dbbe6ab859d84fdb8f14f9988e8a2d8852ab5209d",
-    "_metric_and_lineage_rows": "18758cb1ad97d8d8e0bd9c67621e90dbcc881ac048defe578be9c4c36940ab63",
+    "run_task8b_analysis": "8125bc1bc407037ab2275025b3434a30dda19b3a8607b5812bdeef6dc4d9cede",
+    "_metric_and_lineage_rows": "a0cecc98fc64ab8f1a9aa1963f43cc12ad89cbfad7cd051835b8444013848c10",
     "_formal_execution_health_reasons": (
         "468a12309881b38348a2af90db32a2f8fb170eb3972df32c54c7a67968006d3f"
     ),
-    "_formal_metric_rows": "94f089a226f11c2cb1cf9f54f6386c5930e6887c6d0b8c9277d91c18fe2525f1",
+    "_formal_metric_rows": "049fc448f3c9f163c4e2e0b3a39d9d2a9829701a95fb06ebc762f8d0a7a8fe4f",
     "_normalize_data_lineage_rows": (
-        "4bbfea8639e2b8883395b9008845378cc92bdcdf3f4dd98ad1feb44ec0f6a54a"
+        "8721336f265d8ba3d71699fbafff49bed636bd17f7ebbcfb5a21a35cb5e50a95"
     ),
-    "_compact_lineage_source": "c70843f8f8c632904c990d74b8c2bc7a01b6af56593f5622d2ac2dd108d50ae7",
-    "_paper_lineage_rows": "56a4b92482b9569762df4498c2771069d934145292f9c5bdc260c5d6f0491482",
+    "_compact_lineage_source": "7f72ec412c753708f09ff9020bfd13c0221dc26feb4be4679fd2ad579ae7d3ba",
+    "_paper_lineage_rows": "a97ab3dffc34cbd98faa194680441df9c0c4bc01f7aaccbd1b405efd4cd0c515",
 }
+
+
+def _legacy_analysis_protocol() -> dict[str, Any]:
+    return {
+        "analysis_contract_id": LEGACY_ANALYSIS_CONTRACT_ID,
+        "seeds": FORMAL_SEEDS,
+        "n_planned": 12,
+        "worker_ids": tuple(
+            f"{role}{index:02d}" for role in ("P", "S") for index in range(1, 13)
+        ),
+        "planned_hands": 142200,
+        "n_source": "User-approved expedited protocol amendment before result unblinding",
+        "requires_shard_lineage": False,
+    }
+
+
+def _six_seed_contract_path() -> Path:
+    return Path(__file__).parents[3] / SIX_SEED_ANALYSIS_CONTRACT_RELATIVE_PATH
+
+
+def _load_six_seed_analysis_protocol(
+    contract_path: str | Path | None = None,
+) -> dict[str, Any]:
+    path = (
+        Path(contract_path).resolve()
+        if contract_path is not None
+        else _six_seed_contract_path().resolve()
+    )
+    if not path.is_file() or path.is_symlink():
+        raise ConfigError("TASK8B six-seed analysis contract 缺失或为 symlink")
+    contract = _read_json(path)
+    expected_workers = tuple(
+        f"{role}{index:02d}" for role in ("P", "S") for index in range(7, 13)
+    )
+    expected_n_source = (
+        "用户在正式结果揭盲前批准的 superseding expedited protocol amendment"
+    )
+    expected_bootstrap = {
+        "cluster": "seed",
+        "level": 0.95,
+        "method": "seed_cluster_percentile",
+        "prng": "PCG64",
+        "replicates": 10000,
+        "seed": 2026090199,
+    }
+    expected_holm = ["Expr_vs_Fact", "Async_vs_Fact"]
+    expected_disclosure = {
+        "alpha": 0.05,
+        "minimum_holm_adjusted_p": 0.0625,
+        "rejection_possible": False,
+        "two_sided_exact_minimum_raw_p": 0.03125,
+    }
+    if (
+        contract.get("schema_version")
+        != "task8b-phase-f-six-seed-frozen-contract-v1"
+        or contract.get("analysis_contract_id") != SIX_SEED_ANALYSIS_CONTRACT_ID
+        or tuple(int(seed) for seed in contract.get("seeds", []))
+        != SIX_SEED_FORMAL_SEEDS
+        or int(contract.get("n_planned", -1)) != 6
+        or tuple(str(worker) for worker in contract.get("canonical_workers", []))
+        != expected_workers
+        or int(contract.get("planned_hands", -1)) != 71100
+        or contract.get("statistical_unit") != "seed"
+        or contract.get("bootstrap_cluster") != "seed"
+        or contract.get("bootstrap") != expected_bootstrap
+        or contract.get("holm_family") != expected_holm
+        or contract.get("primary_endpoint") != "final_test_bb_per_100"
+        or int(contract.get("primary_checkpoint", -1)) != 300
+        or contract.get("primary_mode") != "Frozen"
+        or contract.get("n_source") != expected_n_source
+        or contract.get("sign_flip_holm_disclosure") != expected_disclosure
+        or contract.get("new_power_pilot_run") is not False
+        or contract.get("formal_effects_read") is not False
+    ):
+        raise ConfigError("TASK8B six-seed analysis contract 语义不闭合")
+    pairs = contract.get("seed_pairs")
+    if not isinstance(pairs, list) or len(pairs) != 6:
+        raise ConfigError("TASK8B six-seed contract 必须精确冻结 6 个 seed pairs")
+    expected_pairs = [
+        {
+            "pair_id": f"pair_{index:02d}",
+            "seed": 2026090100 + index,
+            "physical_slots": [f"H{index - 6:02d}", f"H{index:02d}"],
+            "workers": [f"P{index:02d}", f"S{index:02d}"],
+        }
+        for index in range(7, 13)
+    ]
+    if pairs != expected_pairs:
+        raise ConfigError("TASK8B six-seed pair/seed/worker mapping 不匹配")
+    return {
+        "analysis_contract_id": SIX_SEED_ANALYSIS_CONTRACT_ID,
+        "contract_path": path,
+        "contract_sha256": _sha256(path),
+        "seeds": SIX_SEED_FORMAL_SEEDS,
+        "n_planned": 6,
+        "worker_ids": expected_workers,
+        "planned_hands": 71100,
+        "n_source": str(contract["n_source"]),
+        "requires_shard_lineage": True,
+        "seed_pairs": pairs,
+        "sign_flip_holm_min_adjusted_p": "0.0625",
+    }
+
+
+def _analysis_protocol_for_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    contract_id = str(manifest.get("analysis_contract_id", ""))
+    if contract_id == LEGACY_ANALYSIS_CONTRACT_ID:
+        return _legacy_analysis_protocol()
+    if contract_id != SIX_SEED_ANALYSIS_CONTRACT_ID:
+        raise ConfigError("TASK8B Phase F analysis contract 未知")
+    protocol = _load_six_seed_analysis_protocol()
+    if manifest.get("analysis_contract_sha256") != protocol["contract_sha256"]:
+        raise ConfigError(
+            "TASK8B six-seed input 未绑定当前 six-seed contract SHA-256；拒绝旧合同误跑"
+        )
+    return protocol
+
+
+def _expected_six_seed_sides(
+    worker_id: str, pair: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    low_slot, high_slot = pair["physical_slots"]
+    if worker_id.startswith("P"):
+        return {
+            "high": {
+                "physical_slot": high_slot,
+                "task_ids": [
+                    "isolation_no_memory",
+                    "isolation_fact",
+                    "isolation_expr",
+                    "isolation_sync",
+                ],
+                "actual_hands": 5400,
+                "shard_role": "primary_isolation_partition",
+            },
+            "low": {
+                "physical_slot": low_slot,
+                "task_ids": ["isolation_async"],
+                "actual_hands": 1350,
+                "shard_role": "primary_isolation_partition",
+            },
+        }
+    return {
+        "low": {
+            "physical_slot": low_slot,
+            "task_ids": ["mixed_ecological"],
+            "actual_hands": 2700,
+            "shard_role": "secondary_mode_partition",
+        },
+        "high": {
+            "physical_slot": high_slot,
+            "task_ids": [
+                "expr_online",
+                "expr_without",
+                "async_online",
+                "async_without",
+            ],
+            "actual_hands": 2400,
+            "shard_role": "secondary_mode_partition",
+        },
+    }
+
+
+def _validated_composition_receipt(
+    *,
+    lineage: dict[str, Any],
+    worker_id: str,
+    seed: int,
+    pair: dict[str, Any],
+    manifest_root: Path,
+) -> dict[str, Any]:
+    relative = Path(str(lineage.get("composition_receipt_path", "")))
+    if not str(relative) or relative.is_absolute() or ".." in relative.parts:
+        raise ConfigError(f"six-seed worker {worker_id} composition receipt path 非法")
+    receipt_path = (manifest_root / relative).resolve()
+    if manifest_root not in receipt_path.parents or not receipt_path.is_file():
+        raise ConfigError(f"six-seed worker {worker_id} composition receipt 缺失或越界")
+    receipt_sha = _sha256(receipt_path)
+    if receipt_sha != lineage.get("composition_receipt_sha256"):
+        raise ConfigError(f"six-seed worker {worker_id} composition receipt SHA 不匹配")
+    receipt = _read_json(receipt_path)
+    if (
+        receipt.get("schema_version") != "task8b-six-seed-composition-receipt-v1"
+        or receipt.get("worker_id") != worker_id
+        or int(receipt.get("seed", -1)) != seed
+        or receipt.get("pair_id") != pair["pair_id"]
+    ):
+        raise ConfigError(f"six-seed worker {worker_id} composition receipt identity 非法")
+    sides = receipt.get("sides")
+    if not isinstance(sides, list) or len(sides) != 2:
+        raise ConfigError(f"six-seed worker {worker_id} composition receipt 必须有两侧")
+    expected_sides = _expected_six_seed_sides(worker_id, pair)
+    observed_sides: dict[str, dict[str, Any]] = {}
+    for side in sides:
+        if not isinstance(side, dict):
+            raise ConfigError(f"six-seed worker {worker_id} composition side 非法")
+        side_name = str(side.get("side", ""))
+        if side_name not in expected_sides or side_name in observed_sides:
+            raise ConfigError(f"six-seed worker {worker_id} composition side 重复或未知")
+        expected = expected_sides[side_name]
+        task_ids = [str(task_id) for task_id in side.get("task_ids", [])]
+        if (
+            side.get("physical_slot") != expected["physical_slot"]
+            or task_ids != expected["task_ids"]
+            or int(side.get("actual_hands", -1)) != expected["actual_hands"]
+        ):
+            raise ConfigError(
+                f"six-seed worker {worker_id} {side_name} side task/hands 不闭合"
+            )
+        execution_receipts = side.get("execution_receipts")
+        if not isinstance(execution_receipts, list) or not execution_receipts:
+            raise ConfigError(
+                f"six-seed worker {worker_id} {side_name} side 缺 execution receipts"
+            )
+        for row in execution_receipts:
+            if not isinstance(row, dict):
+                raise ConfigError(f"six-seed worker {worker_id} execution receipt 行非法")
+            execution_relative = Path(str(row.get("path", "")))
+            if (
+                not str(execution_relative)
+                or execution_relative.is_absolute()
+                or ".." in execution_relative.parts
+            ):
+                raise ConfigError(
+                    f"six-seed worker {worker_id} execution receipt path 非法"
+                )
+            execution_path = (receipt_path.parent / execution_relative).resolve()
+            if (
+                receipt_path.parent not in execution_path.parents
+                or not execution_path.is_file()
+                or _sha256(execution_path) != row.get("sha256")
+            ):
+                raise ConfigError(
+                    f"six-seed worker {worker_id} execution receipt SHA 不匹配"
+                )
+        observed_sides[side_name] = side
+    expected_union = [
+        task
+        for side_name in ("high", "low")
+        if side_name in expected_sides
+        for task in expected_sides[side_name]["task_ids"]
+    ]
+    if (
+        set(receipt.get("task_union", [])) != set(expected_union)
+        or int(receipt.get("actual_hands", -1))
+        != sum(side["actual_hands"] for side in expected_sides.values())
+    ):
+        raise ConfigError(f"six-seed worker {worker_id} composition aggregate 不闭合")
+    return receipt
+
+
+def _validate_six_seed_shard_lineage(
+    worker: dict[str, Any],
+    protocol: dict[str, Any],
+    *,
+    manifest_root: Path | None = None,
+) -> None:
+    worker_id = str(worker.get("worker_id", ""))
+    seed = int(worker.get("seed", -1))
+    pair = next(
+        (
+            item
+            for item in protocol["seed_pairs"]
+            if seed == int(item["seed"]) and worker_id in item["workers"]
+        ),
+        None,
+    )
+    lineage = worker.get("shard_lineage")
+    if pair is None or not isinstance(lineage, dict):
+        raise ConfigError(f"six-seed worker {worker_id} 缺 pair/shard lineage")
+    slots = list(pair["physical_slots"])
+    if (
+        lineage.get("pair_id") != pair["pair_id"]
+        or lineage.get("paired_physical_slots") != slots
+        or not str(lineage.get("composition_receipt_path", "")).strip()
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(lineage.get("composition_receipt_sha256", ""))
+        )
+        is None
+    ):
+        raise ConfigError(f"six-seed worker {worker_id} pair/composition lineage 非法")
+    shards = lineage.get("shards")
+    if not isinstance(shards, list) or len(shards) != 2:
+        raise ConfigError(f"six-seed worker {worker_id} 必须精确包含两个 shards")
+    expected_tasks = (
+        set(FORMAL_PRIMARY_TASKS)
+        if worker_id.startswith("P")
+        else set(FORMAL_SECONDARY_TASKS)
+    )
+    seen_tasks: set[str] = set()
+    seen_slots: set[str] = set()
+    planned_hands = 0
+    expected_sides = _expected_six_seed_sides(worker_id, pair)
+    seen_sides: set[str] = set()
+    for shard in shards:
+        if not isinstance(shard, dict):
+            raise ConfigError(f"six-seed worker {worker_id} shard 行非法")
+        task_ids = [str(task_id) for task_id in shard.get("task_ids", [])]
+        side_name = str(shard.get("side", ""))
+        expected_side = expected_sides.get(side_name)
+        if (
+            not task_ids
+            or seen_tasks.intersection(task_ids)
+            or expected_side is None
+            or side_name in seen_sides
+            or str(shard.get("physical_slot", "")) not in slots
+            or str(shard.get("physical_slot", "")) in seen_slots
+            or str(shard.get("shard_role", ""))
+            not in {"primary_isolation_partition", "secondary_mode_partition"}
+            or re.fullmatch(r"[0-9a-f]{64}", str(shard.get("shard_manifest_sha256", "")))
+            is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(shard.get("completion_receipt_sha256", ""))
+            )
+            is None
+            or not str(shard.get("shard_id", "")).strip()
+            or task_ids != expected_side["task_ids"]
+            or shard.get("physical_slot") != expected_side["physical_slot"]
+            or int(shard.get("actual_hands", -1)) != expected_side["actual_hands"]
+            or shard.get("shard_role") != expected_side["shard_role"]
+        ):
+            raise ConfigError(f"six-seed worker {worker_id} shard lineage 非法")
+        seen_tasks.update(task_ids)
+        seen_slots.add(str(shard["physical_slot"]))
+        seen_sides.add(side_name)
+        planned_hands += int(shard.get("actual_hands", -1))
+    expected_hands = 6750 if worker_id.startswith("P") else 5100
+    if (
+        seen_tasks != expected_tasks
+        or seen_slots != set(slots)
+        or seen_sides != {"high", "low"}
+        or planned_hands != expected_hands
+    ):
+        raise ConfigError(f"six-seed worker {worker_id} shard task/hands closure 不匹配")
+    if manifest_root is not None:
+        _validated_composition_receipt(
+            lineage=lineage,
+            worker_id=worker_id,
+            seed=seed,
+            pair=pair,
+            manifest_root=manifest_root,
+        )
+
+
+def _validate_analysis_input_topology(
+    workers: list[dict[str, Any]],
+    protocol: dict[str, Any],
+    *,
+    manifest_root: Path | None = None,
+) -> None:
+    seeds = [int(worker.get("seed", -1)) for worker in workers]
+    worker_ids = {str(worker.get("worker_id", "")) for worker in workers}
+    expected_seeds = tuple(protocol["seeds"])
+    if (
+        len(workers) != len(protocol["worker_ids"])
+        or worker_ids != set(protocol["worker_ids"])
+        or sorted(set(seeds)) != list(expected_seeds)
+        or any(seeds.count(seed) != 2 for seed in expected_seeds)
+    ):
+        raise ConfigError(
+            f"{protocol['analysis_contract_id']} worker/seed topology 不匹配"
+        )
+    for worker in workers:
+        worker_id = str(worker.get("worker_id", ""))
+        expected_seed = 2026090100 + int(worker_id[1:])
+        if (
+            int(worker.get("seed", -1)) != expected_seed
+            or not str(worker.get("expected_worker_manifest_sha256", ""))
+        ):
+            raise ConfigError(
+                f"{protocol['analysis_contract_id']} worker/seed identity 不匹配"
+            )
+        if protocol["requires_shard_lineage"]:
+            _validate_six_seed_shard_lineage(
+                worker, protocol, manifest_root=manifest_root
+            )
+
+
+def _lineage_shard_context(item: dict[str, Any], task_id: str) -> dict[str, Any]:
+    lineage = item.get("shard_lineage")
+    if not isinstance(lineage, dict):
+        return {
+            "pair_id": "",
+            "physical_slot": "",
+            "shard_id": "",
+            "shard_side": "",
+            "shard_role": "",
+            "paired_physical_slots": "",
+            "shard_manifest_sha256": "",
+            "composition_receipt_path": "",
+            "composition_receipt_sha256": "",
+        }
+    matches = [
+        shard
+        for shard in lineage.get("shards", [])
+        if isinstance(shard, dict) and task_id in shard.get("task_ids", [])
+    ]
+    if len(matches) != 1:
+        raise ConfigError(f"task {task_id} 必须精确绑定一个 physical shard")
+    shard = matches[0]
+    return {
+        "pair_id": lineage["pair_id"],
+        "physical_slot": shard["physical_slot"],
+        "shard_id": shard["shard_id"],
+        "shard_side": shard["side"],
+        "shard_role": shard["shard_role"],
+        "paired_physical_slots": json.dumps(
+            lineage["paired_physical_slots"], separators=(",", ":")
+        ),
+        "shard_manifest_sha256": shard["shard_manifest_sha256"],
+        "composition_receipt_path": lineage["composition_receipt_path"],
+        "composition_receipt_sha256": lineage["composition_receipt_sha256"],
+    }
 
 
 def build_task8b_preunlock_manifest(
@@ -282,6 +710,7 @@ def build_task8b_preunlock_manifest(
     *,
     repository_root: str | Path | None = None,
     frozen_at_utc: str | None = None,
+    analysis_contract_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Freeze Phase F files and code identity without loading any Formal result."""
 
@@ -316,8 +745,16 @@ def build_task8b_preunlock_manifest(
     if parsed_frozen_at.tzinfo is None:
         raise ConfigError("frozen_at_utc 必须为带时区 ISO-8601")
     analysis_code_sha = _git_clean_head(repo)
+    protocol = (
+        _load_six_seed_analysis_protocol(analysis_contract_path)
+        if analysis_contract_path is not None
+        else _legacy_analysis_protocol()
+    )
+    analysis_code_paths = list(PHASE_F_ANALYSIS_CODE_FILES)
+    if protocol["requires_shard_lineage"]:
+        analysis_code_paths.append(SIX_SEED_ANALYSIS_CONTRACT_RELATIVE_PATH)
     code_files = []
-    for relative_path in PHASE_F_ANALYSIS_CODE_FILES:
+    for relative_path in analysis_code_paths:
         path = repo / relative_path
         if not path.is_file():
             raise ConfigError(f"Phase F analysis code file 缺失：{relative_path}")
@@ -339,7 +776,12 @@ def build_task8b_preunlock_manifest(
     ]
     payload = {
         "schema_version": "task8b-phase-f-pre-unlock-v1",
-        "analysis_contract_id": "task8b-phase-f-v1",
+        "analysis_contract_id": str(protocol["analysis_contract_id"]),
+        **(
+            {"analysis_contract_sha256": str(protocol["contract_sha256"])}
+            if protocol["requires_shard_lineage"]
+            else {}
+        ),
         "manifest_status": "FROZEN_BEFORE_FORMAL_RESULT",
         "frozen_at_utc": frozen_at,
         "formal_result_loaded": False,
@@ -492,7 +934,8 @@ def _validate_preunlock_manifest(path: Path) -> dict[str, Any]:
     else:
         raise ConfigError("Phase F pre-unlock manifest schema 非法")
     if (
-        contract_id != "task8b-phase-f-v1"
+        contract_id
+        not in {LEGACY_ANALYSIS_CONTRACT_ID, SIX_SEED_ANALYSIS_CONTRACT_ID}
         or manifest_status != expected_status
         or value.get("formal_result_loaded") is not False
         or value.get("analysis_code_dirty") is not False
@@ -500,6 +943,12 @@ def _validate_preunlock_manifest(path: Path) -> dict[str, Any]:
         or not re.fullmatch(r"[0-9a-f]{40}", str(value.get("analysis_code_sha", "")))
     ):
         raise ConfigError("Phase F pre-unlock manifest 未满足揭盲前冻结门禁")
+    if contract_id == SIX_SEED_ANALYSIS_CONTRACT_ID:
+        protocol = _load_six_seed_analysis_protocol()
+        if value.get("analysis_contract_sha256") != protocol["contract_sha256"]:
+            raise ConfigError("Phase F six-seed pre-unlock contract SHA-256 不匹配")
+    elif "analysis_contract_sha256" in value:
+        raise ConfigError("Phase F legacy pre-unlock 不得携带 six-seed contract SHA")
     dependency_lock = value.get("dependency_lock")
     if (
         not isinstance(dependency_lock, dict)
@@ -520,9 +969,12 @@ def _validate_preunlock_manifest(path: Path) -> dict[str, Any]:
     }
     if not set(PHASE_F_REQUIRED_FILES).issubset(phase_paths):
         raise ConfigError("Phase F pre-unlock manifest 必需文件 SHA 清单不完整")
+    expected_code_files = set(PHASE_F_ANALYSIS_CODE_FILES)
+    if contract_id == SIX_SEED_ANALYSIS_CONTRACT_ID:
+        expected_code_files.add(SIX_SEED_ANALYSIS_CONTRACT_RELATIVE_PATH)
     if not isinstance(code_files, list) or {
         str(row.get("relative_path", "")) for row in code_files if isinstance(row, dict)
-    } != set(PHASE_F_ANALYSIS_CODE_FILES):
+    } != expected_code_files:
         raise ConfigError("Phase F pre-unlock manifest analysis code SHA 清单不完整")
     for row in [*phase_files, *code_files]:
         if not isinstance(row, dict) or not re.fullmatch(
@@ -878,6 +1330,7 @@ def build_task8b_analysis_input(
     repository_root: str | Path | None = None,
     phase_f_dir: str | Path | None = None,
     dependency_lock_path: str | Path | None = None,
+    analysis_contract_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build the formal Phase F input manifest from frozen manifests and recovered attempts."""
 
@@ -886,19 +1339,47 @@ def build_task8b_analysis_input(
     destination = Path(output_path).absolute()
     if destination.exists() or destination.is_symlink():
         raise FileExistsError(destination)
-    worker_manifests = []
+    all_worker_manifests = []
     for path in sorted(manifest_dir.glob("[PS][0-1][0-9].json")):
         value = _read_json(path)
         if value.get("protocol_status") != "frozen/expedited-formal-candidate":
             raise ConfigError(f"Phase F input 拒绝非 expedited formal manifest：{path.name}")
-        worker_manifests.append(value)
-    if len(worker_manifests) != 24:
-        raise ConfigError("Phase F input builder 要求精确 24 worker manifests")
-    expected_worker_ids = {f"{role}{index:02d}" for role in ("P", "S") for index in range(1, 13)}
-    if {str(row.get("worker_id", "")) for row in worker_manifests} != expected_worker_ids:
-        raise ConfigError("Phase F input builder worker IDs 必须为 P01-P12/S01-S12")
+        all_worker_manifests.append((path, value))
+    protocol = (
+        _load_six_seed_analysis_protocol(analysis_contract_path)
+        if analysis_contract_path is not None
+        else _legacy_analysis_protocol()
+    )
+    selected_ids = set(protocol["worker_ids"])
+    selected_entries = [
+        (path, row)
+        for path, row in all_worker_manifests
+        if str(row.get("worker_id", "")) in selected_ids
+    ]
+    selected_counts = {
+        worker_id: sum(
+            str(row.get("worker_id", "")) == worker_id
+            for _, row in selected_entries
+        )
+        for worker_id in selected_ids
+    }
+    if any(count != 1 for count in selected_counts.values()):
+        raise ConfigError(
+            f"Phase F input builder worker IDs 缺失或重复：{protocol['analysis_contract_id']}"
+        )
+    worker_manifests = [row for _, row in selected_entries]
     pre_unlock_path = Path(pre_unlock_manifest_path).resolve()
     pre_unlock = _validate_preunlock_manifest(pre_unlock_path)
+    pre_unlock_contract_id = (
+        pre_unlock.get("parent_contract_id")
+        if pre_unlock.get("schema_version")
+        == "task8b-phase-f-recovery-supplementary-freeze-v2"
+        else pre_unlock.get("analysis_contract_id")
+    )
+    if pre_unlock_contract_id != protocol["analysis_contract_id"]:
+        raise ConfigError(
+            "Phase F pre-unlock manifest 与所选 analysis contract 不匹配；拒绝旧合同误跑"
+        )
     repo = (
         Path(repository_root).resolve()
         if repository_root is not None
@@ -941,6 +1422,9 @@ def build_task8b_analysis_input(
         raise ConfigError("Phase F worker experiment code SHA 必须全局唯一且为完整 SHA")
     experiment_code_sha = next(iter(experiment_code_shas))
     workers = []
+    manifest_paths = {
+        str(row["worker_id"]): path for path, row in selected_entries
+    }
     for manifest in sorted(worker_manifests, key=lambda row: str(row["worker_id"])):
         worker_id = str(manifest["worker_id"])
         seed = int(manifest["seed_bundle"])
@@ -961,19 +1445,56 @@ def build_task8b_analysis_input(
                 attempts.append({"attempt": attempt.name, "relative_path": relative.as_posix()})
         if not attempts:
             raise ConfigError(f"Phase F input 缺 recovered attempts：{worker_id}/{seed}")
+        shard_lineage: dict[str, Any] | None = None
+        if protocol["requires_shard_lineage"]:
+            raw_lineage = manifest.get("phase_f_shard_lineage")
+            if not isinstance(raw_lineage, dict):
+                raise ConfigError(f"six-seed worker {worker_id} 缺 phase_f_shard_lineage")
+            source_manifest_path = manifest_paths[worker_id]
+            composition_source = (
+                source_manifest_path.parent
+                / Path(str(raw_lineage.get("composition_receipt_path", "")))
+            ).resolve()
+            try:
+                composition_relative = composition_source.relative_to(
+                    destination.parent.resolve()
+                )
+            except ValueError as exc:
+                raise ConfigError(
+                    "composition receipt 必须位于 analysis input manifest 祖先目录下"
+                ) from exc
+            shard_lineage = {
+                **raw_lineage,
+                "composition_receipt_path": composition_relative.as_posix(),
+            }
         workers.append(
             {
                 "worker_id": worker_id,
                 "pod_id": str(manifest["pod_id"]),
                 "seed": seed,
                 "expected_identity": dict(manifest["common_identity"]),
-                "expected_worker_manifest_sha256": _sha256(manifest_dir / f"{worker_id}.json"),
+                "expected_worker_manifest_sha256": _sha256(
+                    manifest_paths[worker_id]
+                ),
                 "attempts": attempts,
+                **(
+                    {"shard_lineage": shard_lineage}
+                    if protocol["requires_shard_lineage"]
+                    else {}
+                ),
             }
         )
+    _validate_analysis_input_topology(
+        workers, protocol, manifest_root=destination.parent.resolve()
+    )
     payload = {
         "schema_version": "task8b-phase-f-input-v1",
-        "analysis_contract_id": "task8b-phase-f-v1",
+        "analysis_contract_id": str(protocol["analysis_contract_id"]),
+        **(
+            {"analysis_contract_sha256": str(protocol["contract_sha256"])}
+            if protocol["requires_shard_lineage"]
+            else {}
+        ),
         "synthetic_test_mode": False,
         "analysis_code_sha": str(pre_unlock["analysis_code_sha"]),
         "analysis_code_dirty": bool(pre_unlock["analysis_code_dirty"]),
@@ -1003,33 +1524,18 @@ def run_task8b_analysis(
     manifest = _read_json(manifest_path)
     if manifest.get("schema_version") != "task8b-phase-f-input-v1":
         raise ConfigError("TASK8B Phase F input schema 不匹配")
-    if manifest.get("analysis_contract_id") != "task8b-phase-f-v1":
-        raise ConfigError("analysis contract 必须为 task8b-phase-f-v1")
+    protocol = _analysis_protocol_for_manifest(manifest)
     workers = manifest.get("workers")
     if not isinstance(workers, list) or not workers:
         raise ConfigError("TASK8B Phase F input 缺 workers")
     if not bool(manifest.get("synthetic_test_mode", False)):
-        seeds = sorted(int(worker.get("seed", -1)) for worker in workers)
-        worker_ids = {str(worker.get("worker_id", "")) for worker in workers}
-        expected_ids = {f"{role}{index:02d}" for role in ("P", "S") for index in range(1, 13)}
-        pod_seed_counts = {
-            seed: sum(int(worker.get("seed", -1)) == seed for worker in workers)
-            for seed in FORMAL_SEEDS
-        }
-        if (
-            len(workers) != 24
-            or sorted(set(seeds)) != list(FORMAL_SEEDS)
-            or worker_ids != expected_ids
-            or set(pod_seed_counts.values()) != {2}
-        ):
-            raise ConfigError("正式 Phase F 输入必须为 24 workers 和精确 12 seeds")
-        for worker in workers:
-            worker_id = str(worker.get("worker_id", ""))
-            expected_seed = FORMAL_SEEDS[int(worker_id[1:]) - 1]
-            if int(worker.get("seed", -1)) != expected_seed or not str(
-                worker.get("expected_worker_manifest_sha256", "")
-            ):
-                raise ConfigError("正式 Phase F worker/seed/topology freeze 不匹配")
+        _validate_analysis_input_topology(
+            workers, protocol, manifest_root=manifest_path.parent
+        )
+    elif protocol["requires_shard_lineage"]:
+        _validate_analysis_input_topology(
+            workers, protocol, manifest_root=manifest_path.parent
+        )
     ledger = _read_ledger(ledger_path)
     selected: list[dict[str, Any]] = []
     exclusions: list[dict[str, str]] = []
@@ -1039,6 +1545,8 @@ def run_task8b_analysis(
             manifest_root=manifest_path.parent,
             ledger=ledger,
         )
+        if protocol["requires_shard_lineage"]:
+            chosen = {**chosen, "shard_lineage": worker["shard_lineage"]}
         selected.append(chosen)
         exclusions.extend(rejected)
     synthetic_mode = bool(manifest.get("synthetic_test_mode", False))
@@ -1050,7 +1558,15 @@ def run_task8b_analysis(
     if not synthetic_mode and not str(manifest.get("analysis_frozen_at_utc", "")):
         raise ConfigError("正式 Phase F input 缺 pre-unlock freeze timestamp")
     if all((item["root"] / "worker_manifest.json").is_file() for item in selected):
-        _validate_selected_seed_pods(selected, enforce_formal=not synthetic_mode)
+        if protocol["requires_shard_lineage"] and not synthetic_mode:
+            _validate_six_seed_selected_seed_pods(
+                selected, expected_planned_hands=int(protocol["planned_hands"])
+            )
+        else:
+            _validate_selected_seed_pods(
+                selected,
+                enforce_formal=not synthetic_mode,
+            )
 
     destination = Path(output_dir)
     if destination.exists() and any(destination.iterdir()):
@@ -1061,6 +1577,11 @@ def run_task8b_analysis(
     effect_rows = _primary_effect_rows(metric_rows)
     e6_rows = _e6_rows(selected)
     inference_rows = _primary_inference_rows(effect_rows)
+    if protocol["requires_shard_lineage"]:
+        inference_rows = [
+            {**row, "n_planned": int(protocol["n_planned"])}
+            for row in inference_rows
+        ]
     input_sha = _sha256(manifest_path)
     input_ledger_sha = _sha256(ledger_path)
     normalized_exclusions = [
@@ -1089,7 +1610,12 @@ def run_task8b_analysis(
     )
     generated_ledger_sha = _sha256(generated_ledger_path)
     if not synthetic_mode:
-        _validate_formal_primary_effects(effect_rows)
+        if protocol["requires_shard_lineage"]:
+            _validate_six_seed_formal_primary_effects(
+                effect_rows, seeds=tuple(protocol["seeds"])
+            )
+        else:
+            _validate_formal_primary_effects(effect_rows)
     analysis_code_sha = str(
         manifest.get("analysis_code_sha") or selected[0]["identity"].get("code_sha", "")
     )
@@ -1124,9 +1650,9 @@ def run_task8b_analysis(
             ),
         },
         "protocol": {
-            "n_planned": 12,
-            "n_source": "User-approved expedited protocol amendment before result unblinding",
-            "seeds": list(FORMAL_SEEDS),
+            "n_planned": int(protocol["n_planned"]),
+            "n_source": str(protocol["n_source"]),
+            "seeds": list(protocol["seeds"]),
             "new_power_pilot_run": False,
             "mde_status": "historical_planning_candidate_only",
             "checkpoints": [30, 75, 150, 300],
@@ -1162,7 +1688,9 @@ def run_task8b_analysis(
             "input_manifest_sha256": input_sha,
             "per_file_hash_verification": "verified",
             "worker_count_verified": len(selected),
-            "hands_budget_verified": "142200" if not synthetic_mode else "synthetic",
+            "hands_budget_verified": (
+                str(protocol["planned_hands"]) if not synthetic_mode else "synthetic"
+            ),
         },
         "input_artifacts": [
             {
@@ -1225,14 +1753,14 @@ def run_task8b_analysis(
     for row in lineage:
         row.update(
             {
-                "analysis_contract_id": "task8b-phase-f-v1",
+                "analysis_contract_id": str(protocol["analysis_contract_id"]),
                 "analysis_code_sha": analysis_code_sha,
                 "experiment_code_sha": experiment_code_sha,
                 "analysis_manifest_sha256": manifest_sha,
                 "input_manifest_sha256": input_sha,
                 "exclusion_ledger_sha256": generated_ledger_sha,
                 "statistical_unit": "seed",
-                "n_planned": 12,
+                "n_planned": int(protocol["n_planned"]),
                 "n_effective": n_effective,
                 "verification_status": "VERIFIED",
             }
@@ -1246,20 +1774,30 @@ def run_task8b_analysis(
     _write_csv(destination / "primary_seed_effects.csv", effect_rows)
     _write_csv(destination / "primary_inference.csv", inference_rows)
     _write_csv(destination / "e6_metrics.csv", e6_rows)
-    paper_lineage = _emit_paper_artifacts(
-        destination=destination,
-        selected_rows=selected_rows,
-        metric_rows=metric_rows,
-        effect_rows=effect_rows,
-        inference_rows=inference_rows,
-        e6_rows=e6_rows,
-        render_figures=not bool(manifest.get("synthetic_test_mode", False)),
-        source_lineage=lineage,
+    paper_emitter = (
+        _emit_six_seed_paper_artifacts
+        if protocol["requires_shard_lineage"]
+        else _emit_paper_artifacts
+    )
+    paper_kwargs = {
+        "destination": destination,
+        "selected_rows": selected_rows,
+        "metric_rows": metric_rows,
+        "effect_rows": effect_rows,
+        "inference_rows": inference_rows,
+        "e6_rows": e6_rows,
+        "render_figures": not bool(manifest.get("synthetic_test_mode", False)),
+        "source_lineage": lineage,
+    }
+    if protocol["requires_shard_lineage"]:
+        paper_kwargs["protocol"] = protocol
+    paper_lineage = paper_emitter(
+        **paper_kwargs,
     )
     for row in paper_lineage:
         row.update(
             {
-                "analysis_contract_id": "task8b-phase-f-v1",
+                "analysis_contract_id": str(protocol["analysis_contract_id"]),
                 "analysis_code_sha": analysis_code_sha,
                 "experiment_code_sha": experiment_code_sha,
                 "analysis_manifest_sha256": manifest_sha,
@@ -1482,6 +2020,9 @@ def _metric_and_lineage_rows(
                     "source_file_sha256": _sha256(item["root"] / "metrics.json"),
                     "row_selector": f"records[{index}]",
                     "exclusion_status": "eligible",
+                    **_lineage_shard_context(
+                        item, str(record.get("task_id", "synthetic"))
+                    ),
                     **recovery,
                 }
             )
@@ -1619,7 +2160,84 @@ def _formal_execution_health_reasons(execution: dict[str, Any]) -> list[str]:
     return [reason for counter, reason in counter_reasons if int(execution.get(counter, -1)) != 0]
 
 
-def _validate_selected_seed_pods(selected: list[dict[str, Any]], *, enforce_formal: bool) -> None:
+def _validate_six_seed_selected_seed_pods(
+    selected: list[dict[str, Any]], *, expected_planned_hands: int
+) -> None:
+    by_seed: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for item in selected:
+        by_seed[int(item["seed"])].append(item)
+    for seed, pod in by_seed.items():
+        if len(pod) != 2:
+            raise ConfigError(f"seed {seed} P/S pod 不完整")
+        item_by_role: dict[str, dict[str, Any]] = {}
+        manifest_by_role: dict[str, dict[str, Any]] = {}
+        for item in pod:
+            worker_manifest = _read_json(item["root"] / "worker_manifest.json")
+            role = str(worker_manifest.get("role", ""))
+            if role in item_by_role:
+                raise ConfigError(f"seed {seed} P/S role 不闭合")
+            item_by_role[role] = item
+            manifest_by_role[role] = worker_manifest
+        if set(item_by_role) != {"primary", "secondary"}:
+            raise ConfigError(f"seed {seed} P/S role 不闭合")
+        schedule_rows = []
+        for role in ("primary", "secondary"):
+            item = item_by_role[role]
+            worker_manifest = manifest_by_role[role]
+            _validate_formal_task_topology(worker_manifest, role=role)
+            task_runs = _task_run_map(item["root"], worker_id=str(item["worker_id"]))
+            for task in worker_manifest.get("task_configs", []):
+                task_id = str(task.get("task_id", ""))
+                schedule = _read_json(task_runs[task_id] / "schedule_manifest.json")
+                schedule_sha = verify_schedule_manifest(schedule)
+                if schedule_sha != task.get("expected_identity", {}).get(
+                    "schedule_sha256"
+                ):
+                    raise ConfigError(
+                        f"seed {seed} task {task_id} schedule identity mismatch"
+                    )
+                schedule_rows.append(
+                    {
+                        "worker_role": role,
+                        "task_id": task_id,
+                        "schedule_sha256": schedule_sha,
+                    }
+                )
+        recomputed = {
+            "seed_bundle": seed,
+            "schedule_sha256": sha256_json(
+                {
+                    "schema_version": "task8b-seed-pod-schedule-bundle-v1",
+                    "seed_bundle": seed,
+                    "task_schedules": schedule_rows,
+                }
+            ),
+            "task_schedules": schedule_rows,
+        }
+        primary = manifest_by_role["primary"]
+        secondary = manifest_by_role["secondary"]
+        if (
+            primary.get("seed_pod_identity") != secondary.get("seed_pod_identity")
+            or primary.get("seed_pod_identity") != recomputed
+            or primary.get("receipt_identity")
+            != secondary.get("dependency_receipt_identity")
+            or secondary.get("depends_on") != primary.get("worker_id")
+        ):
+            raise ConfigError(f"seed {seed} CRN/receipt dependency mismatch")
+    planned_hands = sum(
+        int(task.get("planned_hands", 0))
+        for item in selected
+        for task in _read_json(item["root"] / "worker_manifest.json").get(
+            "task_configs", []
+        )
+    )
+    if planned_hands != expected_planned_hands:
+        raise ConfigError(f"Phase F formal planned hands 未闭合：{planned_hands}")
+
+
+def _validate_selected_seed_pods(
+    selected: list[dict[str, Any]], *, enforce_formal: bool
+) -> None:
     by_seed: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for item in selected:
         by_seed[int(item["seed"])].append(item)
@@ -1855,6 +2473,7 @@ def _formal_metric_rows(
                     "source_file_sha256": source_sha,
                     "row_selector": f"derived_group[{index}]",
                     "exclusion_status": "eligible",
+                    **_lineage_shard_context(item, task_id),
                     **_task_recovery_lineage_context(worker_recovery, task_id),
                 }
             )
@@ -2193,6 +2812,24 @@ def _validate_formal_primary_effects(effect_rows: list[dict[str, Any]]) -> None:
     if len(observed) != len(set(observed)) or sorted(observed) != sorted(expected):
         raise ConfigError(
             "formal primary endpoint 必须包含每个 seed 的 Expr/Async vs Fact 完整 paired cells"
+        )
+
+
+def _validate_six_seed_formal_primary_effects(
+    effect_rows: list[dict[str, Any]], *, seeds: tuple[int, ...]
+) -> None:
+    observed = [
+        (int(row.get("seed", -1)), str(row.get("contrast", "")))
+        for row in effect_rows
+    ]
+    expected = [
+        (seed, contrast)
+        for seed in seeds
+        for contrast in ("Expr_vs_Fact", "Async_vs_Fact")
+    ]
+    if len(observed) != len(set(observed)) or sorted(observed) != sorted(expected):
+        raise ConfigError(
+            "six-seed formal primary endpoint 必须包含每个 seed 的完整 paired cells"
         )
 
 
@@ -2567,6 +3204,120 @@ def _emit_paper_artifacts(
     return [*main_lineage, *figure_lineage, *supplementary_lineage]
 
 
+def _emit_six_seed_paper_artifacts(
+    *,
+    destination: Path,
+    selected_rows: list[dict[str, Any]],
+    metric_rows: list[dict[str, Any]],
+    effect_rows: list[dict[str, Any]],
+    inference_rows: list[dict[str, Any]],
+    e6_rows: list[dict[str, Any]],
+    render_figures: bool,
+    source_lineage: list[dict[str, Any]],
+    protocol: dict[str, Any],
+) -> list[dict[str, Any]]:
+    planned_seeds = tuple(protocol["seeds"])
+    n_planned = int(protocol["n_planned"])
+    table1 = _table1_rows(selected_rows, protocol=protocol)
+    table2 = _six_seed_table2_rows(
+        metric_rows, inference_rows, planned_seeds=planned_seeds
+    )
+    table3 = _six_seed_table3_rows(
+        metric_rows, planned_seeds=planned_seeds
+    )
+    table4, figure4_rows = _six_seed_table4_rows(
+        metric_rows, n_planned=n_planned
+    )
+    table5 = _six_seed_table5_rows(e6_rows, n_planned=n_planned)
+    leave_one_seed_out = _leave_one_seed_out_rows(e6_rows)
+    secondary_mixed = _six_seed_secondary_mixed_rows(
+        metric_rows, n_planned=n_planned
+    )
+    _write_csv_union(destination / "leave_one_seed_out_robustness.csv", leave_one_seed_out)
+    _write_csv_union(destination / "secondary_mixed_ecological.csv", secondary_mixed)
+    tables = (table1, table2, table3, table4, table5)
+    names = (
+        "table1_protocol_identity",
+        "table2_core_adaptation_generalization",
+        "table3_checkpoint_scan",
+        "table4_frozen_online_without",
+        "table5_behavior_robustness",
+    )
+    markdown_parts = ["# 论文主表与主图空模板（TASK8B Phase F 已填充副本）", ""]
+    for index, (name, rows) in enumerate(zip(names, tables, strict=True), start=1):
+        _write_csv_union(destination / f"{name}.csv", rows)
+        markdown = _markdown_table(rows)
+        _write_text_new(destination / f"{name}.md", f"# Table {index}\n\n{markdown}\n")
+        markdown_parts.extend((f"## Table {index}", "", markdown, ""))
+
+    figure_data = (
+        _figure1_flow_rows(),
+        table3,
+        _figure3_rows(effect_rows, inference_rows),
+        figure4_rows,
+    )
+    for index, rows in enumerate(figure_data, start=1):
+        _write_csv_union(destination / f"figure{index}_plotting_data.csv", rows)
+        if render_figures:
+            _render_figure(destination, index, rows)
+        _write_text_new(
+            destination / f"figure{index}_caption.md",
+            _figure_caption(index, rows, n_planned=n_planned),
+        )
+        _write_bytes_new(
+            destination / f"figure{index}_manifest.json",
+            _json_bytes(
+                {
+                    "schema_version": "task8b-phase-f-plot-manifest-v1",
+                    "analysis_contract_id": str(protocol["analysis_contract_id"]),
+                    "figure": index,
+                    "statistical_unit": "seed",
+                    "n_planned": n_planned,
+                    "ci": "seed_cluster_percentile_95_10000_PCG64_2026090199",
+                    "plotting_data": f"figure{index}_plotting_data.csv",
+                }
+            ),
+        )
+        markdown_parts.extend(
+            (
+                f"## Figure {index}",
+                "",
+                (
+                    f"Plotting data: `figure{index}_plotting_data.csv`; formats: PNG/SVG/PDF."
+                    if render_figures
+                    else f"Plotting data: `figure{index}_plotting_data.csv`; synthetic test mode."
+                ),
+                "",
+            )
+        )
+    _write_text_new(
+        destination / "论文主表与主图空模板_filled.md",
+        "\n".join(markdown_parts),
+    )
+    review = (
+        "# Automated table/plot consistency precheck\n\n"
+        "Status: VERIFIED (mechanical precheck only; "
+        "independent reviewer sign-off remains required).\n\n"
+        "Each Figure 1-4 was rendered directly from its adjacent plotting-data CSV source rows; "
+        "no manual numeric transcription was used.\n"
+    )
+    _write_text_new(destination / "automated_consistency_precheck.md", review)
+    main_lineage = _paper_lineage_rows(
+        tables, names, source_lineage, n_planned=n_planned
+    )
+    figure_lineage = _six_seed_figure_lineage_rows(
+        figure_data, source_lineage, n_planned=n_planned
+    )
+    supplementary_lineage = _paper_lineage_rows(
+        (leave_one_seed_out, secondary_mixed),
+        ("leave_one_seed_out_robustness", "secondary_mixed_ecological"),
+        source_lineage,
+        table_offset=5,
+        n_planned=n_planned,
+    )
+    return [*main_lineage, *figure_lineage, *supplementary_lineage]
+
+
 def _figure_lineage_rows(
     figure_data: tuple[list[dict[str, Any]], ...],
     source_lineage: list[dict[str, Any]],
@@ -2588,6 +3339,65 @@ def _figure_lineage_rows(
                 ([row],),
                 (source_name,),
                 source_lineage,
+            )
+            lineage = dict(candidates[0]) if candidates else {}
+            lineage.update(
+                {
+                    "lineage_id": f"figure{figure_index}:mark:{row_index}",
+                    "output_artifact_id": f"figure{figure_index}_plotting_data.csv",
+                    "output_element_id": f"row={row_index}",
+                    "output_kind": (
+                        "figure_line"
+                        if figure_index in {1, 2}
+                        else "figure_interval"
+                        if str(row.get("row_type", "")) == "summary"
+                        else "figure_point"
+                    ),
+                    "row_selector": f"plotting_rows[{row_index - 1}]",
+                    "transformation": "frozen_figure_mark_from_plotting_row",
+                    "display_value": json.dumps(
+                        row,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                }
+            )
+            cluster_ids = str(lineage.get("cluster_ids", ""))
+            if "n_effective" in row:
+                lineage["n_effective"] = row["n_effective"]
+            elif row.get("seed") not in {None, ""}:
+                lineage["n_effective"] = 1
+            elif cluster_ids:
+                lineage["n_effective"] = len(cluster_ids.split(";"))
+            output.append(lineage)
+    return output
+
+
+def _six_seed_figure_lineage_rows(
+    figure_data: tuple[list[dict[str, Any]], ...],
+    source_lineage: list[dict[str, Any]],
+    *,
+    n_planned: int = 12,
+) -> list[dict[str, Any]]:
+    """Emit one lineage record for every machine-readable Figure 1-4 mark."""
+
+    source_names = (
+        "table1_protocol_identity",
+        "table3_checkpoint_scan",
+        "table2_core_adaptation_generalization",
+        "table4_frozen_online_without",
+    )
+    output: list[dict[str, Any]] = []
+    for figure_index, (rows, source_name) in enumerate(
+        zip(figure_data, source_names, strict=True), start=1
+    ):
+        for row_index, row in enumerate(rows, start=1):
+            candidates = _paper_lineage_rows(
+                ([row],),
+                (source_name,),
+                source_lineage,
+                n_planned=n_planned,
             )
             lineage = dict(candidates[0]) if candidates else {}
             lineage.update(
@@ -2666,6 +3476,23 @@ def _normalize_data_lineage_rows(
         if not source_records:
             raise ConfigError("Phase F lineage 每个输出单元必须具有 source_records")
         source_records = [_compact_lineage_source(record) for record in source_records]
+        if row.get("analysis_contract_id") == SIX_SEED_ANALYSIS_CONTRACT_ID:
+            shard_fields = (
+                "pair_id",
+                "physical_slot",
+                "shard_id",
+                "shard_side",
+                "shard_role",
+                "paired_physical_slots",
+                "shard_manifest_sha256",
+                "composition_receipt_path",
+                "composition_receipt_sha256",
+            )
+            for record in source_records:
+                if any(not str(record.get(field, "")).strip() for field in shard_fields):
+                    raise ConfigError(
+                        "TASK8B six-seed lineage source 缺 pair/shard 必填字段"
+                    )
         row["source_records"] = json.dumps(
             source_records,
             ensure_ascii=False,
@@ -2708,6 +3535,17 @@ def _compact_lineage_source(source: dict[str, Any]) -> dict[str, Any]:
         "run_id": source.get("run_id", "synthetic"),
         "worker_id": source.get("worker_id", ""),
         "pod_id": source.get("pod_id", ""),
+        "pair_id": source.get("pair_id", ""),
+        "physical_slot": source.get("physical_slot", ""),
+        "shard_id": source.get("shard_id", ""),
+        "shard_side": source.get("shard_side", ""),
+        "shard_role": source.get("shard_role", ""),
+        "paired_physical_slots": source.get("paired_physical_slots", ""),
+        "shard_manifest_sha256": source.get("shard_manifest_sha256", ""),
+        "composition_receipt_path": source.get("composition_receipt_path", ""),
+        "composition_receipt_sha256": source.get(
+            "composition_receipt_sha256", ""
+        ),
         "seed": source.get("seed"),
         "condition": source.get("condition", ""),
         "task_id": source.get("task_id", "synthetic"),
@@ -2765,6 +3603,15 @@ def _validate_compact_lineage_source(source: dict[str, Any]) -> None:
         "run_id",
         "worker_id",
         "pod_id",
+        "pair_id",
+        "physical_slot",
+        "shard_id",
+        "shard_side",
+        "shard_role",
+        "paired_physical_slots",
+        "shard_manifest_sha256",
+        "composition_receipt_path",
+        "composition_receipt_sha256",
         "seed",
         "condition",
         "task_id",
@@ -2883,6 +3730,7 @@ def _paper_lineage_rows(
     source_lineage: list[dict[str, Any]],
     *,
     table_offset: int = 0,
+    n_planned: int = 12,
 ) -> list[dict[str, Any]]:
     output = []
     for table_index, (name, rows) in enumerate(
@@ -2965,7 +3813,12 @@ def _paper_lineage_rows(
             if name == "table1_protocol_identity":
                 one_per_worker: dict[str, dict[str, Any]] = {}
                 for source in sources:
-                    identity = str(source.get("worker_id") or source.get("run_id", ""))
+                    identity = ":".join(
+                        (
+                            str(source.get("worker_id") or source.get("run_id", "")),
+                            str(source.get("shard_id", "")),
+                        )
+                    )
                     one_per_worker.setdefault(identity, source)
                 sources = [one_per_worker[key] for key in sorted(one_per_worker)]
             for field, value in row.items():
@@ -3019,6 +3872,23 @@ def _paper_lineage_rows(
                         "run_id": source.get("run_id"),
                         "worker_id": source.get("worker_id"),
                         "pod_id": source.get("pod_id"),
+                        "pair_id": source.get("pair_id"),
+                        "physical_slot": source.get("physical_slot"),
+                        "shard_id": source.get("shard_id"),
+                        "shard_side": source.get("shard_side"),
+                        "shard_role": source.get("shard_role"),
+                        "paired_physical_slots": source.get(
+                            "paired_physical_slots"
+                        ),
+                        "shard_manifest_sha256": source.get(
+                            "shard_manifest_sha256"
+                        ),
+                        "composition_receipt_path": source.get(
+                            "composition_receipt_path"
+                        ),
+                        "composition_receipt_sha256": source.get(
+                            "composition_receipt_sha256"
+                        ),
                         "seed": source.get("seed"),
                         "condition": source.get("condition"),
                         "task_id": source.get("task_id"),
@@ -3074,6 +3944,23 @@ def _paper_lineage_rows(
                         "run_id": first.get("run_id", "protocol"),
                         "worker_id": first.get("worker_id", ""),
                         "pod_id": first.get("pod_id", ""),
+                        "pair_id": first.get("pair_id", ""),
+                        "physical_slot": first.get("physical_slot", ""),
+                        "shard_id": first.get("shard_id", ""),
+                        "shard_side": first.get("shard_side", ""),
+                        "shard_role": first.get("shard_role", ""),
+                        "paired_physical_slots": first.get(
+                            "paired_physical_slots", ""
+                        ),
+                        "shard_manifest_sha256": first.get(
+                            "shard_manifest_sha256", ""
+                        ),
+                        "composition_receipt_path": first.get(
+                            "composition_receipt_path", ""
+                        ),
+                        "composition_receipt_sha256": first.get(
+                            "composition_receipt_sha256", ""
+                        ),
                         "seed": first.get("seed", ""),
                         "condition": mechanism or str(row.get("field", "protocol")),
                         "mechanism": mechanism,
@@ -3107,7 +3994,7 @@ def _paper_lineage_rows(
                         "row_selector": f"table_rows[{row_index - 1}].{field}",
                         "exclusion_status": "eligible",
                         "statistical_unit": "seed",
-                        "n_planned": 12,
+                        "n_planned": n_planned,
                         "n_effective": cell_n_effective,
                         "verification_status": "UNVERIFIED",
                         "input_snapshot_id": "frozen_local_recovery",
@@ -3132,7 +4019,13 @@ def _paper_lineage_rows(
     return output
 
 
-def _table1_rows(selected_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _table1_rows(
+    selected_rows: list[dict[str, Any]],
+    *,
+    protocol: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    legacy_default = protocol is None
+    protocol = protocol or _legacy_analysis_protocol()
     fields = (
         ("code", "per-worker verified identity", "worker identity gate"),
         ("qwen", "Qwen3.5-9B frozen fingerprint", "worker identity gate"),
@@ -3153,12 +4046,24 @@ def _table1_rows(selected_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ("memory_modes", "Actual Frozen,Online,Without", "TASK8B matrix"),
         (
             "seed_count",
-            "n=12",
-            "User-approved expedited protocol amendment before result unblinding",
+            f"n={protocol['n_planned']}",
+            str(protocol["n_source"]),
         ),
-        ("seed_list", "2026090101-2026090112", "TASK8B v2.0"),
+        (
+            "seed_list",
+            (
+                "2026090101-2026090112"
+                if legacy_default
+                else ",".join(str(seed) for seed in protocol["seeds"])
+            ),
+            "TASK8B v2.0" if legacy_default else str(protocol["analysis_contract_id"]),
+        ),
         ("worker_count", str(len(selected_rows)), "Phase F completion gate"),
-        ("hands_budget", "142200", "TASK8B frozen required matrix"),
+        (
+            "hands_budget",
+            str(protocol["planned_hands"]),
+            "TASK8B frozen required matrix",
+        ),
         ("primary_endpoint", "final_test_bb_per_100", "task8b-phase-f-v1"),
         ("primary_checkpoint", "300", "task8b-phase-f-v1"),
         ("primary_family", "Expr_vs_Fact;Async_vs_Fact", "task8b-phase-f-v1"),
@@ -3298,6 +4203,26 @@ def _table2_rows(
     return output
 
 
+def _six_seed_table2_rows(
+    metric_rows: list[dict[str, Any]],
+    inference_rows: list[dict[str, Any]],
+    *,
+    planned_seeds: tuple[int, ...],
+) -> list[dict[str, Any]]:
+    rows = _table2_rows(metric_rows, inference_rows)
+    for row in rows:
+        seeds = {
+            int(cell["seed"])
+            for cell in _seed_cells(metric_rows, 300)
+            if cell["mechanism"] == row["mechanism"]
+        }
+        row["n_planned"] = len(planned_seeds)
+        row["missing_seed_ids"] = ";".join(
+            str(seed) for seed in planned_seeds if seed not in seeds
+        )
+    return rows
+
+
 def _table3_rows(metric_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     output = []
     for mechanism in ("NoMemory", "Fact", "Expr", "Sync", "Async"):
@@ -3354,6 +4279,26 @@ def _table3_rows(metric_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             row["checkpoint_slope"] = f"{slope:.8f}" if slope is not None else "NA_NOT_ESTIMABLE"
         output.extend(mechanism_rows)
     return output
+
+
+def _six_seed_table3_rows(
+    metric_rows: list[dict[str, Any]],
+    *,
+    planned_seeds: tuple[int, ...],
+) -> list[dict[str, Any]]:
+    rows = _table3_rows(metric_rows)
+    for row in rows:
+        cells = [
+            cell
+            for cell in _seed_cells(metric_rows, int(row["checkpoint_hand"]))
+            if cell["mechanism"] == row["mechanism"]
+        ]
+        seeds = {int(cell["seed"]) for cell in cells}
+        row["seed_clusters_planned"] = len(planned_seeds)
+        row["missing_reason_codes"] = (
+            "" if seeds == set(planned_seeds) else "MISSING_SEED_CELL"
+        )
+    return rows
 
 
 def _heldout_seed_values(
@@ -3529,6 +4474,18 @@ def _table4_rows(
     return output, plotting
 
 
+def _six_seed_table4_rows(
+    metric_rows: list[dict[str, Any]], *, n_planned: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows, plotting = _table4_rows(metric_rows)
+    for row in rows:
+        row["n_planned"] = n_planned
+        row["missing_reason_codes"] = (
+            "" if int(row["n_effective"]) == n_planned else "MISSING_SEED_CELL"
+        )
+    return rows, plotting
+
+
 def _table5_rows(e6_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     field_map = {
         "raw_bb100": "raw_bb_per_100",
@@ -3595,6 +4552,18 @@ def _table5_rows(e6_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return output
+
+
+def _six_seed_table5_rows(
+    e6_rows: list[dict[str, Any]], *, n_planned: int
+) -> list[dict[str, Any]]:
+    rows = _table5_rows(e6_rows)
+    for row in rows:
+        row["n_planned"] = n_planned
+        row["missing_reason_codes"] = (
+            "" if int(row["n_effective"]) == n_planned else "MISSING_SEED_CELL"
+        )
+    return rows
 
 
 def _leave_one_seed_out_rows(e6_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3677,6 +4646,15 @@ def _secondary_mixed_rows(metric_rows: list[dict[str, Any]]) -> list[dict[str, A
     return output
 
 
+def _six_seed_secondary_mixed_rows(
+    metric_rows: list[dict[str, Any]], *, n_planned: int
+) -> list[dict[str, Any]]:
+    rows = _secondary_mixed_rows(metric_rows)
+    for row in rows:
+        row["n_planned"] = n_planned
+    return rows
+
+
 def _figure1_flow_rows() -> list[dict[str, Any]]:
     nodes = (
         "source train",
@@ -3701,10 +4679,13 @@ def _figure3_rows(
     return rows
 
 
-def _figure_caption(index: int, rows: list[dict[str, Any]]) -> str:
+def _figure_caption(
+    index: int, rows: list[dict[str, Any]], *, n_planned: int = 12
+) -> str:
     return (
         f"# Figure {index} caption\n\n"
-        "Analysis unit: seed; n_planned=12. CI: seed-cluster percentile 95%, "
+        f"Analysis unit: seed; n_planned={n_planned}. "
+        "CI: seed-cluster percentile 95%, "
         "10,000 PCG64 replicates, seed 2026090199. Missing/exclusion follows the frozen "
         f"ledger. Plotting rows: {len(rows)}.\n"
     )
