@@ -63,6 +63,39 @@ def _matrix(path: Path) -> Path:
     return path
 
 
+def test_task8b_mixed_config_evaluates_complete_roster_without_stale_target(
+    tmp_path: Path,
+) -> None:
+    base = task8b_bundle_module.load_raw_config(
+        "configs/formal/task8b_expedited_base.yaml"
+    )
+    configs = task8b_bundle_module._write_task_configs(
+        base, tmp_path / "configs", is_canary=False
+    )
+
+    mixed = load_config(configs["mixed"])
+    mixed_experiment = mixed["experiment"]
+    assert mixed_experiment["evaluate_all_train_agents"] is True
+    assert [item["agent_id"] for item in mixed_experiment["agent_roster"]] == [
+        "fact_00",
+        "fact_01",
+        "expr_00",
+        "expr_01",
+        "sync_00",
+        "sync_01",
+        "async_00",
+        "async_01",
+    ]
+    assert "target_agent_id" not in mixed_experiment
+    assert "evaluation_target_ids" not in mixed_experiment
+
+    isolation = load_config(configs["no_memory"])
+    isolation_experiment = isolation["experiment"]
+    assert isolation_experiment["evaluate_all_train_agents"] is False
+    assert isolation_experiment["target_agent_id"] == "agent_00"
+    assert isolation_experiment["evaluation_target_ids"] == ["agent_00"]
+
+
 def test_task8b_embedding_fingerprint_excludes_only_task_local_namespace() -> None:
     common = {
         "backend": "sentence_transformers",

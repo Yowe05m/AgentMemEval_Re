@@ -297,6 +297,8 @@ def _write_task_configs(
         {"agent_id": "async_01", "mechanism": "fact_expr_async"},
     ]
     experiment["evaluate_all_train_agents"] = True
+    experiment.pop("target_agent_id", None)
+    experiment.pop("evaluation_target_ids", None)
     _apply_budget(experiment, is_canary=is_canary, mixed=True)
     path = destination / "mixed_ecological.yaml"
     _write_yaml_new(path, mixed)
