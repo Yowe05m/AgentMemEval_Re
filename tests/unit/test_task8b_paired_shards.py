@@ -1194,6 +1194,8 @@ def _completed_recovery_fixture(
     invalid_health_detail: bool = False,
     invalid_validity_detail: bool = False,
     extra_expected_field: bool = False,
+    extra_receipt_identity_field: bool = False,
+    receipt_config_override: str | None = None,
     legacy_controller: bool = False,
     archive_prefix: str | None = None,
 ) -> dict[str, Path]:
@@ -1235,6 +1237,15 @@ def _completed_recovery_fixture(
     }
     for field in formal_runner.FLEET_COMMON_IDENTITY_FIELDS:
         manifest["common_identity"][field] = expected[field]
+    manifest["receipt_identity"] = {
+        field: expected[field]
+        for field in formal_runner.REQUIRED_IDENTITY_FIELDS
+    }
+    manifest["receipt_identity"]["resolved_config_sha256"] = (
+        receipt_config_override or "6" * 64
+    )
+    if extra_receipt_identity_field:
+        manifest["receipt_identity"]["unexpected"] = "forbidden"
     if extra_expected_field:
         expected["unexpected_identity_field"] = "forbidden"
     for task in manifest["task_configs"]:
@@ -1412,12 +1423,16 @@ def _mock_frozen_standard_resume(monkeypatch: pytest.MonkeyPatch) -> None:
         receipt_root: Path,
         legacy_audit_path: Path | None = None,
         legacy_audit_sha256: str | None = None,
+        legacy_receipt_config_sha256: str | None = None,
+        corrected_receipt_config_sha256: str | None = None,
     ) -> dict[str, object]:
         del (
             scientific_checkout,
             receipt_root,
             legacy_audit_path,
             legacy_audit_sha256,
+            legacy_receipt_config_sha256,
+            corrected_receipt_config_sha256,
         )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         root = Path(manifest["instance_identity"]["output_path"])
@@ -1550,6 +1565,22 @@ def test_recover_completed_execution_is_idempotent_and_sealable(
     )
     assert certificate["identity_correction_audit_sha256"] == _sha(
         recovery_audit_path
+    )
+    checkpoint_correction = {
+        "applied": True,
+        "old_resolved_config_sha256": "6" * 64,
+        "new_resolved_config_sha256": marker["task_row"][
+            "identity_audit"
+        ]["resolved_config_sha256"],
+        "only_authorized_field": "resolved_config_sha256",
+    }
+    assert (
+        recovery_audit["checkpoint_receipt_identity_correction"]
+        == checkpoint_correction
+    )
+    assert (
+        certificate["checkpoint_receipt_identity_correction"]
+        == checkpoint_correction
     )
     frozen = {
         path: path.read_bytes()
@@ -1698,6 +1729,8 @@ def test_h12_expr_recovery_does_not_forge_sync_completion(
         receipt_root: Path,
         legacy_audit_path: Path | None = None,
         legacy_audit_sha256: str | None = None,
+        legacy_receipt_config_sha256: str | None = None,
+        corrected_receipt_config_sha256: str | None = None,
     ) -> dict[str, object]:
         del (
             manifest_path,
@@ -1705,6 +1738,8 @@ def test_h12_expr_recovery_does_not_forge_sync_completion(
             receipt_root,
             legacy_audit_path,
             legacy_audit_sha256,
+            legacy_receipt_config_sha256,
+            corrected_receipt_config_sha256,
         )
         raise ConfigError("simulated interruption before frozen Sync execution")
 
@@ -1754,6 +1789,18 @@ def test_recovery_requires_exact_identity_and_health_field_sets(
     )
     with pytest.raises(ConfigError, match="expected_identity 字段集合"):
         _run_completed_recovery(identity)
+    receipt_identity = _completed_recovery_fixture(
+        tmp_path / "receipt-identity",
+        extra_receipt_identity_field=True,
+    )
+    with pytest.raises(ConfigError, match="receipt_identity 字段集合"):
+        _run_completed_recovery(receipt_identity)
+    non_hex_receipt = _completed_recovery_fixture(
+        tmp_path / "non-hex-receipt",
+        receipt_config_override="z" * 64,
+    )
+    with pytest.raises(ConfigError, match="receipt config identity"):
+        _run_completed_recovery(non_hex_receipt)
     health = _completed_recovery_fixture(
         tmp_path / "health",
         extra_health_field=True,
@@ -1923,11 +1970,17 @@ def test_frozen_recovery_resume_runs_in_isolated_subprocess(
         "_semantic_config = None\n"
         "def _write_json_same_or_new(path, value):\n"
         "    del path, value\n"
+        "def _receipt_identity(manifest, *, consumer=False):\n"
+        "    del consumer\n"
+        "    return dict(manifest.get('receipt_identity', {}))\n"
         "def run_worker_manifest(path, *, receipt_root, resume_existing):\n"
+        "    manifest = json.loads(path.read_text(encoding='utf-8'))\n"
         f"    Path({str(trace)!r}).write_text("
         "json.dumps({'manifest': str(path), "
         "'receipt_root': str(receipt_root), "
         "'resume_existing': resume_existing, "
+        "'receipt_config': _receipt_identity(manifest)"
+        ".get('resolved_config_sha256'), "
         "'canonicalizer_patched': callable(_semantic_config)}), "
         "encoding='utf-8')\n"
         "    return {'status': 'subprocess-pass'}\n",
@@ -1936,22 +1989,70 @@ def test_frozen_recovery_resume_runs_in_isolated_subprocess(
     manifest = tmp_path / "derived.json"
     receipt_root = tmp_path / "receipts"
     receipt_root.mkdir()
-    _write_json(manifest, {"worker_id": "P12"})
+    _write_json(
+        manifest,
+        {
+            "worker_id": "P12",
+            "receipt_identity": {"resolved_config_sha256": "6" * 64},
+        },
+    )
     monkeypatch.setattr(
         shards,
         "_verify_scientific_checkout",
         lambda _path: package / "formal_runner.py",
     )
+    manifest_before = manifest.read_bytes()
     result = shards._resume_recovered_execution(
         manifest,
         scientific_checkout=checkout.resolve(),
         receipt_root=receipt_root.resolve(),
+        legacy_receipt_config_sha256="6" * 64,
+        corrected_receipt_config_sha256="7" * 64,
     )
     observed = json.loads(trace.read_text(encoding="utf-8"))
     assert result == {"status": "subprocess-pass"}
     assert observed["resume_existing"] is True
     assert observed["canonicalizer_patched"] is True
+    assert observed["receipt_config"] == "7" * 64
     assert Path(observed["manifest"]) == manifest
+    assert manifest.read_bytes() == manifest_before
+
+    already_new = json.loads(manifest.read_text(encoding="utf-8"))
+    already_new["receipt_identity"]["resolved_config_sha256"] = "7" * 64
+    _write_json(manifest, already_new)
+    already_new_bytes = manifest.read_bytes()
+    result = shards._resume_recovered_execution(
+        manifest,
+        scientific_checkout=checkout.resolve(),
+        receipt_root=receipt_root.resolve(),
+        legacy_receipt_config_sha256="6" * 64,
+        corrected_receipt_config_sha256="7" * 64,
+    )
+    observed = json.loads(trace.read_text(encoding="utf-8"))
+    assert result == {"status": "subprocess-pass"}
+    assert observed["receipt_config"] == "7" * 64
+    assert manifest.read_bytes() == already_new_bytes
+
+    third = json.loads(manifest.read_text(encoding="utf-8"))
+    third["receipt_identity"]["resolved_config_sha256"] = "8" * 64
+    _write_json(manifest, third)
+    with pytest.raises(ConfigError, match="frozen resume failed"):
+        shards._resume_recovered_execution(
+            manifest,
+            scientific_checkout=checkout.resolve(),
+            receipt_root=receipt_root.resolve(),
+            legacy_receipt_config_sha256="6" * 64,
+            corrected_receipt_config_sha256="7" * 64,
+        )
+
+    with pytest.raises(ConfigError, match="bridge SHA 非法"):
+        shards._resume_recovered_execution(
+            manifest,
+            scientific_checkout=checkout.resolve(),
+            receipt_root=receipt_root.resolve(),
+            legacy_receipt_config_sha256="7" * 64,
+            corrected_receipt_config_sha256="7" * 64,
+        )
 
 
 def test_frozen_resume_bridge_preserves_exact_legacy_recovery_audit(
@@ -1969,6 +2070,9 @@ def test_frozen_resume_bridge_preserves_exact_legacy_recovery_audit(
     (package / "formal_runner.py").write_text(
         "import json\n"
         "_semantic_config = None\n"
+        "def _receipt_identity(manifest, *, consumer=False):\n"
+        "    del consumer\n"
+        "    return dict(manifest.get('receipt_identity', {}))\n"
         "def _write_json_same_or_new(path, value):\n"
         "    content = json.dumps(value, ensure_ascii=False, "
         "sort_keys=True, separators=(',', ':')).encode('utf-8') + b'\\n'\n"

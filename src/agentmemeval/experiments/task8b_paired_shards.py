@@ -146,6 +146,14 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _json_bytes(value: Any) -> bytes:
     return (
         json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
@@ -441,6 +449,8 @@ formal_runner._semantic_config = preserving_mapping_keys
 original_write_json_same_or_new = formal_runner._write_json_same_or_new
 legacy_audit_raw_path = pathlib.Path(sys.argv[4]) if sys.argv[4] else None
 legacy_audit_sha256 = sys.argv[5] or None
+legacy_receipt_config_sha256 = sys.argv[6] or None
+corrected_receipt_config_sha256 = sys.argv[7] or None
 
 def has_symlink_component(path):
     return any(candidate.is_symlink() for candidate in (path, *path.parents))
@@ -500,6 +510,23 @@ def write_json_with_legacy_recovery_audit_bridge(path, value):
     original_write_json_same_or_new(path, value)
 
 formal_runner._write_json_same_or_new = write_json_with_legacy_recovery_audit_bridge
+original_receipt_identity = formal_runner._receipt_identity
+
+def receipt_identity_with_recovered_config(manifest, *, consumer=False):
+    identity = original_receipt_identity(manifest, consumer=consumer)
+    if legacy_receipt_config_sha256 is None:
+        return identity
+    observed = identity.get("resolved_config_sha256")
+    if observed == corrected_receipt_config_sha256:
+        return identity
+    if observed != legacy_receipt_config_sha256:
+        raise RuntimeError("legacy checkpoint receipt identity mismatch")
+    return {
+        **identity,
+        "resolved_config_sha256": corrected_receipt_config_sha256,
+    }
+
+formal_runner._receipt_identity = receipt_identity_with_recovered_config
 result = formal_runner.run_worker_manifest(
     pathlib.Path(sys.argv[2]),
     receipt_root=pathlib.Path(sys.argv[3]),
@@ -1693,12 +1720,25 @@ def _resume_recovered_execution(
     receipt_root: Path,
     legacy_audit_path: Path | None = None,
     legacy_audit_sha256: str | None = None,
+    legacy_receipt_config_sha256: str | None = None,
+    corrected_receipt_config_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Resume with the frozen runner after publishing the recovered task receipt."""
 
     _verify_scientific_checkout(scientific_checkout)
     if (legacy_audit_path is None) != (legacy_audit_sha256 is None):
         raise ConfigError("paired recovery legacy audit bridge 参数不闭合")
+    if (legacy_receipt_config_sha256 is None) != (
+        corrected_receipt_config_sha256 is None
+    ):
+        raise ConfigError("paired recovery receipt identity bridge 参数不闭合")
+    if legacy_receipt_config_sha256 is not None and (
+        not _is_sha256(legacy_receipt_config_sha256)
+        or not _is_sha256(corrected_receipt_config_sha256)
+        or legacy_receipt_config_sha256
+        == corrected_receipt_config_sha256
+    ):
+        raise ConfigError("paired recovery receipt identity bridge SHA 非法")
     if legacy_audit_path is not None:
         if not legacy_audit_path.is_file() or legacy_audit_path.is_symlink():
             raise ConfigError("paired recovery legacy audit bridge 路径非法")
@@ -1716,6 +1756,8 @@ def _resume_recovered_execution(
                 str(receipt_root),
                 str(legacy_audit_path) if legacy_audit_path is not None else "",
                 legacy_audit_sha256 or "",
+                legacy_receipt_config_sha256 or "",
+                corrected_receipt_config_sha256 or "",
             ],
             cwd=str(scientific_checkout),
             check=True,
@@ -1723,9 +1765,44 @@ def _resume_recovered_execution(
             text=True,
         )
         result = json.loads(completed.stdout)
+    except subprocess.CalledProcessError as exc:
+        stderr = str(exc.stderr or "")
+        stderr_sha256 = hashlib.sha256(stderr.encode("utf-8")).hexdigest()
+        exception_lines = [
+            line.strip() for line in stderr.splitlines() if line.strip()
+        ]
+        diagnostic = (
+            receipt_root
+            / "frozen_resume_diagnostics"
+            / (
+                f"{manifest_path.stem}-{stderr_sha256[:16]}"
+                ".diagnostic.json"
+            )
+        )
+        _same_or_new_json(
+            diagnostic,
+            {
+                "schema_version": (
+                    "task8b-paired-frozen-resume-diagnostic-v1"
+                ),
+                "status": "failed",
+                "manifest_path": str(manifest_path),
+                "returncode": int(exc.returncode),
+                "stderr_sha256": stderr_sha256,
+                "innermost_exception": (
+                    exception_lines[-1] if exception_lines else None
+                ),
+                "stderr": stderr,
+                "effect_fields_read": False,
+            },
+        )
+        raise ConfigError(
+            "paired recovery frozen resume failed；"
+            f"innermost={exception_lines[-1] if exception_lines else 'unknown'}；"
+            f"diagnostic={diagnostic}"
+        ) from exc
     except (
         OSError,
-        subprocess.CalledProcessError,
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
@@ -1984,7 +2061,6 @@ def recover_completed_execution(
         legacy_audit_bridge = existing_audit != standard_audit
     else:
         _same_or_new_json(audit_path, standard_audit)
-    _same_or_new_json(recovery_audit, recovery_audit_body)
     task_row = {
         "task_id": task_id,
         "memory_mode": task.get("memory_mode"),
@@ -2007,6 +2083,59 @@ def recover_completed_execution(
     }
     marker_path = root / "task_receipts" / f"{task_id}.json"
     _same_or_new_json(marker_path, marker)
+    receipt_identity = manifest.get("receipt_identity")
+    legacy_receipt_config_sha256: str | None = None
+    corrected_receipt_config_sha256: str | None = None
+    checkpoint_receipt_identity_correction = {
+        "applied": False,
+        "old_resolved_config_sha256": None,
+        "new_resolved_config_sha256": None,
+        "only_authorized_field": "resolved_config_sha256",
+    }
+    if manifest["role"] == "primary":
+        if not isinstance(receipt_identity, dict):
+            raise ConfigError("paired recovery primary receipt_identity 缺失")
+        if set(receipt_identity) != set(
+            formal_runner.REQUIRED_IDENTITY_FIELDS
+        ):
+            raise ConfigError(
+                "paired recovery primary receipt_identity 字段集合非法"
+            )
+        for field in formal_runner.REQUIRED_IDENTITY_FIELDS:
+            if field == "resolved_config_sha256":
+                continue
+            if receipt_identity.get(field) != actual[field]:
+                raise ConfigError(
+                    f"paired recovery receipt identity mismatch：{field}"
+                )
+        observed_receipt_config = receipt_identity.get(
+            "resolved_config_sha256"
+        )
+        if observed_receipt_config != actual["resolved_config_sha256"]:
+            if not _is_sha256(observed_receipt_config) or not _is_sha256(
+                actual["resolved_config_sha256"]
+            ):
+                raise ConfigError(
+                    "paired recovery legacy receipt config identity 非法"
+                )
+            legacy_receipt_config_sha256 = observed_receipt_config
+            corrected_receipt_config_sha256 = actual[
+                "resolved_config_sha256"
+            ]
+            checkpoint_receipt_identity_correction = {
+                "applied": True,
+                "old_resolved_config_sha256": (
+                    legacy_receipt_config_sha256
+                ),
+                "new_resolved_config_sha256": (
+                    corrected_receipt_config_sha256
+                ),
+                "only_authorized_field": "resolved_config_sha256",
+            }
+    recovery_audit_body["checkpoint_receipt_identity_correction"] = (
+        checkpoint_receipt_identity_correction
+    )
+    _same_or_new_json(recovery_audit, recovery_audit_body)
     selected = list(shard["selected_task_ids"])
     pre_recovery_relative_paths = {
         str(row["relative_path"]) for row in pre_files
@@ -2026,6 +2155,8 @@ def recover_completed_execution(
         legacy_audit_sha256=(
             _sha256(audit_path) if legacy_audit_bridge else None
         ),
+        legacy_receipt_config_sha256=legacy_receipt_config_sha256,
+        corrected_receipt_config_sha256=corrected_receipt_config_sha256,
     )
     completion_path = root / "completion_receipt.json"
     files_path = root / "files.tsv"
@@ -2089,6 +2220,9 @@ def recover_completed_execution(
         "identity_correction_audit_sha256": _sha256(recovery_audit),
         "task_receipt_sha256": _sha256(marker_path),
         "identity_correction": correction,
+        "checkpoint_receipt_identity_correction": (
+            checkpoint_receipt_identity_correction
+        ),
         "health": health,
         "recovered_task_scientific_files_modified": False,
         "standard_resume_task_ids": standard_resume_task_ids,
