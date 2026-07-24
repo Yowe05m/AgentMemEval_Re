@@ -209,6 +209,7 @@ def _verify_recovery_archive(
     if len(expected) != len(expected_rows):
         raise ConfigError("paired recovery baseline file path 重复")
     observed: dict[str, dict[str, Any]] = {}
+    prefix_mode: bool | None = None
     try:
         with tarfile.open(archive, mode="r:*") as handle:
             for member in handle.getmembers():
@@ -223,11 +224,26 @@ def _verify_recovery_archive(
                     raise ConfigError("paired recovery archive member path 非法")
                 if member.isdir():
                     continue
+                has_output_prefix = pure.parts[0] == "output"
+                if prefix_mode is None:
+                    prefix_mode = has_output_prefix
+                elif prefix_mode != has_output_prefix:
+                    raise ConfigError(
+                        "paired recovery archive member root prefix 不一致"
+                    )
+                if has_output_prefix:
+                    if len(pure.parts) == 1:
+                        raise ConfigError(
+                            "paired recovery archive output member path 非法"
+                        )
+                    normalized_name = PurePosixPath(*pure.parts[1:]).as_posix()
+                else:
+                    normalized_name = pure.as_posix()
                 if (
                     not member.isfile()
                     or member.issym()
                     or member.islnk()
-                    or member.name in observed
+                    or normalized_name in observed
                 ):
                     raise ConfigError("paired recovery archive member type/duplicate 非法")
                 extracted = handle.extractfile(member)
@@ -241,7 +257,7 @@ def _verify_recovery_archive(
                         break
                     size += len(block)
                     digest.update(block)
-                observed[member.name] = {
+                observed[normalized_name] = {
                     "size": size,
                     "sha256": digest.hexdigest(),
                 }

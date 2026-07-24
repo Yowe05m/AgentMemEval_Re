@@ -1193,6 +1193,7 @@ def _completed_recovery_fixture(
     extra_validity_field: bool = False,
     extra_expected_field: bool = False,
     legacy_controller: bool = False,
+    archive_prefix: str | None = None,
 ) -> dict[str, Path]:
     selected = selected or [recovered_task_id]
     canonical = _canonical_manifest(tmp_path, role="primary", seed=seed)
@@ -1322,9 +1323,14 @@ def _completed_recovery_fixture(
     archive = tmp_path / "pre-recovery.tar.gz"
     with tarfile.open(archive, mode="w:gz") as handle:
         for row in shards._directory_manifest(root):
+            relative = row["relative_path"]
             handle.add(
-                root / row["relative_path"],
-                arcname=row["relative_path"],
+                root / relative,
+                arcname=(
+                    f"{archive_prefix}/{relative}"
+                    if archive_prefix
+                    else relative
+                ),
                 recursive=False,
             )
     auth = json.loads(authorization.read_text(encoding="utf-8"))
@@ -1657,6 +1663,66 @@ def test_recovery_archive_rejects_path_escape_and_symlink(
         _write_json(paths["baseline"], baseline)
         with pytest.raises(ConfigError, match="archive member"):
             _run_completed_recovery(paths)
+
+
+def test_recovery_archive_accepts_only_frozen_output_root_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_frozen_standard_resume(monkeypatch)
+    frozen = _completed_recovery_fixture(
+        tmp_path / "output-prefix",
+        archive_prefix="output",
+    )
+    assert _run_completed_recovery(frozen)["shard_closed"] is True
+
+    other = _completed_recovery_fixture(
+        tmp_path / "other-prefix",
+        archive_prefix="other",
+    )
+    with pytest.raises(ConfigError, match="archive 与 baseline files 不闭合"):
+        _run_completed_recovery(other)
+
+
+@pytest.mark.parametrize(
+    ("mode", "message"),
+    [
+        ("mixed", "root prefix 不一致"),
+        ("normalized-duplicate", "type/duplicate 非法"),
+    ],
+)
+def test_recovery_archive_rejects_mixed_or_normalized_duplicate_paths(
+    tmp_path: Path,
+    mode: str,
+    message: str,
+) -> None:
+    paths = _completed_recovery_fixture(tmp_path / mode)
+    rows = shards._directory_manifest(paths["root"])
+    first = rows[0]["relative_path"]
+    second = rows[1]["relative_path"]
+    with tarfile.open(paths["archive"], mode="w:gz") as handle:
+        handle.add(
+            paths["root"] / first,
+            arcname=f"output/{first}",
+            recursive=False,
+        )
+        if mode == "mixed":
+            handle.add(
+                paths["root"] / second,
+                arcname=second,
+                recursive=False,
+            )
+        else:
+            handle.add(
+                paths["root"] / first,
+                arcname=f"output/{first}",
+                recursive=False,
+            )
+    baseline = json.loads(paths["baseline"].read_text(encoding="utf-8"))
+    baseline["pre_recovery_archive_sha256"] = _sha(paths["archive"])
+    _write_json(paths["baseline"], baseline)
+    with pytest.raises(ConfigError, match=message):
+        _run_completed_recovery(paths)
 
 
 def test_recovery_accepts_only_fixed_legacy_controller_compatibility(
