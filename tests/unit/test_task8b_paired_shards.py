@@ -1611,6 +1611,72 @@ def test_recover_completed_execution_is_idempotent_and_sealable(
     assert receipt["effect_fields_read"] is False
 
 
+def test_legacy_recovered_execution_seal_requires_bound_certificate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_frozen_standard_resume(monkeypatch)
+    paths = _completed_recovery_fixture(
+        tmp_path,
+        recovered_task_id="isolation_sync",
+        legacy_controller=True,
+    )
+    _run_completed_recovery(paths)
+
+    with pytest.raises(
+        ConfigError,
+        match="必须绑定 recovery certificate",
+    ):
+        shards.build_shard_receipt(
+            paths["derived"],
+            paths["root"],
+            paths["shard_receipt"],
+        )
+
+    certificate_bytes = paths["certificate"].read_bytes()
+    certificate = json.loads(certificate_bytes)
+    certificate["shard_closed"] = False
+    _write_json(paths["certificate"], certificate)
+    with pytest.raises(
+        ConfigError,
+        match="certificate binding failed",
+    ):
+        shards.build_shard_receipt(
+            paths["derived"],
+            paths["root"],
+            paths["shard_receipt"],
+            paths["certificate"],
+        )
+
+    certificate = json.loads(certificate_bytes)
+    certificate["recovery_tool_sha256"] = "0" * 64
+    _write_json(paths["certificate"], certificate)
+    with pytest.raises(
+        ConfigError,
+        match="certificate binding failed",
+    ):
+        shards.build_shard_receipt(
+            paths["derived"],
+            paths["root"],
+            paths["shard_receipt"],
+            paths["certificate"],
+        )
+
+    certificate["recovery_tool_sha256"] = (
+        shards.RECOVERY_COMPLETION_CONTROLLER_SHA256
+    )
+    _write_json(paths["certificate"], certificate)
+    receipt = shards.build_shard_receipt(
+        paths["derived"],
+        paths["root"],
+        paths["shard_receipt"],
+        paths["certificate"],
+    )
+    assert receipt["status"] == "complete"
+    assert receipt["selected_task_ids"] == ["isolation_sync"]
+    assert receipt["effect_fields_read"] is False
+
+
 def test_recovery_preserves_exact_legacy_custom_identity_audit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

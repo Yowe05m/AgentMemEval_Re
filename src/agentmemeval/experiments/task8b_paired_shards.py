@@ -44,6 +44,9 @@ COMPLETED_RECOVERY_REASON = "resolved-config-integer-key-canonicalization"
 RECOVERY_SOURCE_CONTROLLER_SHA256 = (
     "ac1a57480ab8b6366c9f00356cc3a1ec7a512b5716c5c282d51e42ddebed7f8c"
 )
+RECOVERY_COMPLETION_CONTROLLER_SHA256 = (
+    "224cfc525abb97760f53d9694173b63cbe94e1151ad47c411162da6f4535d751"
+)
 HEALTH_ZERO_FIELDS = (
     "fallback_count",
     "memory_revision_fallback_count",
@@ -2268,6 +2271,7 @@ def build_shard_receipt(
     derived_manifest_path: str | Path,
     run_dir: str | Path,
     output_path: str | Path,
+    recovery_certificate_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Seal a deterministic shard receipt without parsing metric values."""
 
@@ -2280,12 +2284,6 @@ def build_shard_receipt(
         raise ConfigError("derived manifest 缺 paired_shard identity")
     if shard.get("seal_mode") != "execution":
         raise ConfigError("execution seal 拒绝 historical adoption manifest")
-    rebuilt = derive_authorized_manifest(
-        str(shard.get("canonical_manifest_path", "")),
-        str(shard.get("authorization_path", "")),
-    )
-    if _json_bytes(rebuilt) != _json_bytes(manifest):
-        raise ConfigError("derived manifest 不再匹配冻结 authorization")
     staging_root = _approved_root(
         str(shard["approved_staging_root"]),
         label="approved_staging_root",
@@ -2294,6 +2292,104 @@ def build_shard_receipt(
         str(shard["approved_receipt_root"]),
         label="approved_receipt_root",
     )
+    source_controller_sha256 = str(
+        shard.get("engineering_controller_sha256", "")
+    )
+    current_controller_sha256 = _sha256(Path(__file__).resolve())
+    if source_controller_sha256 == RECOVERY_SOURCE_CONTROLLER_SHA256:
+        if recovery_certificate_path is None:
+            raise ConfigError(
+                "legacy recovered execution seal 必须绑定 recovery certificate"
+            )
+        certificate_path = _inside_approved(
+            approved_receipts,
+            Path(recovery_certificate_path),
+            label="recovered execution seal certificate",
+        )
+        certificate = _read_json(certificate_path)
+        selected = [str(item) for item in shard.get("selected_task_ids", [])]
+        if len(selected) != 1:
+            raise ConfigError(
+                "legacy recovered execution seal 仅允许单 task recovery"
+            )
+        task_id = selected[0]
+        task_receipt = root / "task_receipts" / f"{task_id}.json"
+        identity_audit = root / "runs" / task_id / "task_identity_audit.json"
+        correction_audit = Path(
+            str(certificate.get("identity_correction_audit_path", ""))
+        )
+        correction_audit = _inside_approved(
+            approved_receipts,
+            correction_audit,
+            label="recovered execution seal correction audit",
+        )
+        if (
+            not task_receipt.is_file()
+            or task_receipt.is_symlink()
+            or not identity_audit.is_file()
+            or identity_audit.is_symlink()
+            or not correction_audit.is_file()
+            or correction_audit.is_symlink()
+        ):
+            raise ConfigError(
+                "legacy recovered execution seal evidence 缺失或为 symlink"
+            )
+        recovery_tool_sha256 = certificate.get("recovery_tool_sha256")
+        if (
+            certificate.get("schema_version")
+            != COMPLETED_RECOVERY_CERTIFICATE_SCHEMA
+            or certificate.get("status") != "execution_complete_recovered"
+            or certificate.get("worker_id") != worker_id
+            or int(certificate.get("seed", -1)) != seed
+            or certificate.get("role") != role
+            or certificate.get("task_id") != task_id
+            or certificate.get("attempt_root") != str(root)
+            or certificate.get("derived_manifest_sha256")
+            != _sha256(manifest_path)
+            or certificate.get("authorization_sha256")
+            != _sha256(Path(str(shard["authorization_path"])))
+            or recovery_tool_sha256
+            not in {
+                current_controller_sha256,
+                RECOVERY_COMPLETION_CONTROLLER_SHA256,
+            }
+            or certificate.get("task_identity_audit_sha256")
+            != _sha256(identity_audit)
+            or certificate.get("identity_correction_audit_sha256")
+            != _sha256(correction_audit)
+            or certificate.get("task_receipt_sha256")
+            != _sha256(task_receipt)
+            or certificate.get("recovered_task_scientific_files_modified")
+            is not False
+            or certificate.get("standard_resume_used_frozen_runner")
+            is not True
+            or certificate.get("shard_closed") is not True
+            or certificate.get("unrecovered_selected_task_ids") != []
+            or certificate.get("effect_fields_read") is not False
+        ):
+            raise ConfigError(
+                "legacy recovered execution seal certificate binding failed"
+            )
+        rebuilt = derive_authorized_manifest(
+            str(shard.get("canonical_manifest_path", "")),
+            str(shard.get("authorization_path", "")),
+            _recovery_source_controller_sha256=(
+                RECOVERY_SOURCE_CONTROLLER_SHA256
+            ),
+        )
+    elif source_controller_sha256 == current_controller_sha256:
+        if recovery_certificate_path is not None:
+            raise ConfigError(
+                "current-controller execution seal 拒绝 recovery certificate"
+            )
+        rebuilt = derive_authorized_manifest(
+            str(shard.get("canonical_manifest_path", "")),
+            str(shard.get("authorization_path", "")),
+        )
+    else:
+        raise ConfigError("execution seal source controller SHA 未获授权")
+    if _json_bytes(rebuilt) != _json_bytes(manifest):
+        raise ConfigError("derived manifest 不再匹配冻结 authorization")
     _inside_approved(staging_root, root, label="shard attempt_root")
     if root.is_symlink():
         raise ConfigError("paired-shard attempt_root 为 symlink")
@@ -3004,6 +3100,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     seal_parser.add_argument("--derived-manifest", type=Path, required=True)
     seal_parser.add_argument("--run-dir", type=Path, required=True)
     seal_parser.add_argument("--output", type=Path, required=True)
+    seal_parser.add_argument("--recovery-certificate", type=Path)
 
     recovery_parser = subparsers.add_parser("recover-completed-execution")
     recovery_parser.add_argument(
@@ -3077,6 +3174,7 @@ def main(argv: list[str] | None = None) -> int:
             args.derived_manifest,
             args.run_dir,
             args.output,
+            args.recovery_certificate,
         )
     elif args.command == "recover-completed-execution":
         result = recover_completed_execution(
