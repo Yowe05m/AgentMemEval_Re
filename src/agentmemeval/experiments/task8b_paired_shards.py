@@ -1237,9 +1237,29 @@ def run_authorized_shard(
             text=True,
         )
         result = json.loads(completed.stdout)
+    except subprocess.CalledProcessError as exc:
+        diagnostic_root = approved_receipts / "runner_diagnostics"
+        material = {
+            "authorization_id": shard_identity["authorization_id"],
+            "derived_manifest_sha256": _sha256(manifest_output),
+            "returncode": int(exc.returncode),
+            "stdout": exc.stdout,
+            "stderr": exc.stderr,
+            "effect_fields_read": False,
+        }
+        diagnostic_path = diagnostic_root / (
+            hashlib.sha256(_json_bytes(material)).hexdigest()
+            + ".diagnostic.json"
+        )
+        _write_json_new(diagnostic_path, material)
+        innermost = str(exc.stderr or "").strip().splitlines()
+        detail = innermost[-1] if innermost else type(exc).__name__
+        raise ConfigError(
+            "paired-shard frozen subprocess runner failed；"
+            f"innermost={detail}；diagnostic={diagnostic_path}"
+        ) from exc
     except (
         OSError,
-        subprocess.CalledProcessError,
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:

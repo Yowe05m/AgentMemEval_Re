@@ -990,6 +990,57 @@ def test_primary_bridge_accepts_imported_cross_host_approved_roots(
     assert bridge_receipt.is_file()
 
 
+def test_run_authorized_shard_preserves_frozen_stderr_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = _canonical_manifest(tmp_path, role="primary")
+    authorization = _authorization(
+        tmp_path,
+        canonical,
+        selected=["isolation_async"],
+        shard_id="diagnostic",
+    )
+    monkeypatch.setattr(
+        shards,
+        "_verify_scientific_checkout",
+        lambda checkout: checkout / "src/agentmemeval/experiments/formal_runner.py",
+    )
+    monkeypatch.setattr(
+        shards.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            shards.subprocess.CalledProcessError(
+                1,
+                ["python", "bootstrap.py"],
+                output="",
+                stderr="Traceback\nValueError: exact inner failure\n",
+            )
+        ),
+    )
+    with pytest.raises(
+        ConfigError,
+        match="ValueError: exact inner failure",
+    ):
+        shards.run_authorized_shard(
+            canonical,
+            authorization,
+            derived_manifest_output=(
+                tmp_path / "approved_staging" / "diagnostic.json"
+            ),
+            receipt_root=tmp_path / "approved_receipts",
+        )
+    diagnostics = list(
+        (tmp_path / "approved_receipts" / "runner_diagnostics").glob(
+            "*.diagnostic.json"
+        )
+    )
+    assert len(diagnostics) == 1
+    value = json.loads(diagnostics[0].read_text(encoding="utf-8"))
+    assert value["stderr"].endswith("ValueError: exact inner failure\n")
+    assert value["effect_fields_read"] is False
+
+
 def test_reservation_rechecks_authorization_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
