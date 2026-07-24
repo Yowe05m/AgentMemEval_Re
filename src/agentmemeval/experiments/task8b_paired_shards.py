@@ -47,6 +47,10 @@ RECOVERY_SOURCE_CONTROLLER_SHA256 = (
 RECOVERY_COMPLETION_CONTROLLER_SHA256 = (
     "224cfc525abb97760f53d9694173b63cbe94e1151ad47c411162da6f4535d751"
 )
+RECOVERY_COMPLETION_CONTROLLER_SHA256S = {
+    RECOVERY_COMPLETION_CONTROLLER_SHA256,
+    "3fd0b92db3928c45f59a22ca0c68d4fabb9321e7dac01033a2de7d8240c9f110",
+}
 SEALED_SOURCE_CONTROLLER_SHA256S = {
     RECOVERY_SOURCE_CONTROLLER_SHA256,
     "736f67d95812f872dda4ceff16702301ecad81669e6088484e104587591d9e29",
@@ -2453,7 +2457,7 @@ def build_shard_receipt(
             or recovery_tool_sha256
             not in {
                 current_controller_sha256,
-                RECOVERY_COMPLETION_CONTROLLER_SHA256,
+                *RECOVERY_COMPLETION_CONTROLLER_SHA256S,
             }
             or certificate.get("task_identity_audit_sha256")
             != _sha256(identity_audit)

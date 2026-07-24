@@ -1773,6 +1773,13 @@ def test_recovery_corrects_receipt_to_checkpoint_publisher_identity(
     assert correction["new_resolved_config_sha256"] != recovered_marker[
         "task_row"
     ]["identity_audit"]["resolved_config_sha256"]
+    certificate = json.loads(
+        paths["certificate"].read_text(encoding="utf-8")
+    )
+    certificate["recovery_tool_sha256"] = (
+        "3fd0b92db3928c45f59a22ca0c68d4fabb9321e7dac01033a2de7d8240c9f110"
+    )
+    _write_json(paths["certificate"], certificate)
     receipt = shards.build_shard_receipt(
         paths["derived"],
         paths["root"],
