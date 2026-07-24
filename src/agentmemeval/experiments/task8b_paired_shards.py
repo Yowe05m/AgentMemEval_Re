@@ -2410,11 +2410,11 @@ def build_shard_receipt(
         )
         certificate = _read_json(certificate_path)
         selected = [str(item) for item in shard.get("selected_task_ids", [])]
-        if len(selected) != 1:
+        task_id = str(certificate.get("task_id", ""))
+        if not selected or task_id not in selected:
             raise ConfigError(
-                "legacy recovered execution seal 仅允许单 task recovery"
+                "legacy recovered execution seal recovery task 不在 shard"
             )
-        task_id = selected[0]
         task_receipt = root / "task_receipts" / f"{task_id}.json"
         identity_audit = root / "runs" / task_id / "task_identity_audit.json"
         correction_audit = Path(

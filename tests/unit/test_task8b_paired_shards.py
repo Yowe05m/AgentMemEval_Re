@@ -1740,6 +1740,7 @@ def test_recovery_corrects_receipt_to_checkpoint_publisher_identity(
         selected=["isolation_expr", "isolation_sync"],
         recovered_task_id="isolation_expr",
         receipt_config_override="9" * 64,
+        legacy_controller=True,
     )
     result = _run_completed_recovery(paths)
     manifest = json.loads(paths["derived"].read_text(encoding="utf-8"))
@@ -1772,6 +1773,17 @@ def test_recovery_corrects_receipt_to_checkpoint_publisher_identity(
     assert correction["new_resolved_config_sha256"] != recovered_marker[
         "task_row"
     ]["identity_audit"]["resolved_config_sha256"]
+    receipt = shards.build_shard_receipt(
+        paths["derived"],
+        paths["root"],
+        paths["shard_receipt"],
+        paths["certificate"],
+    )
+    assert receipt["selected_task_ids"] == [
+        "isolation_expr",
+        "isolation_sync",
+    ]
+    assert receipt["effect_fields_read"] is False
 
 
 def test_legacy_recovered_execution_seal_requires_bound_certificate(
