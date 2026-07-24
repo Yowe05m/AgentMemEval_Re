@@ -16,16 +16,40 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
+import tarfile
+from pathlib import Path, PurePosixPath
 from typing import Any
+
+import yaml
 
 from agentmemeval.config.loader import ConfigError
 from agentmemeval.experiments import formal_runner
+from agentmemeval.experiments.formal_protocol import (
+    sha256_json,
+    task8b_embedding_fingerprint,
+)
 
 AUTHORIZATION_SCHEMA = "task8b-paired-shard-authorization-v1"
 SHARD_RECEIPT_SCHEMA = "task8b-paired-shard-receipt-v1"
 COMPOSITION_SCHEMA = "task8b-paired-shard-composition-v1"
 PRIMARY_BRIDGE_SCHEMA = "task8b-primary-checkpoint-bridge-v1"
+COMPLETED_RECOVERY_BASELINE_SCHEMA = (
+    "task8b-paired-completed-recovery-baseline-v1"
+)
+COMPLETED_RECOVERY_CERTIFICATE_SCHEMA = (
+    "task8b-paired-completed-recovery-certificate-v1"
+)
+COMPLETED_RECOVERY_LEDGER_SCHEMA = "task8b-paired-recovery-ledger-entry-v1"
+COMPLETED_RECOVERY_REASON = "resolved-config-integer-key-canonicalization"
+RECOVERY_SOURCE_CONTROLLER_SHA256 = (
+    "ac1a57480ab8b6366c9f00356cc3a1ec7a512b5716c5c282d51e42ddebed7f8c"
+)
+HEALTH_ZERO_FIELDS = (
+    "fallback_count",
+    "memory_revision_fallback_count",
+    "reward_conservation_violation_count",
+    "stack_conservation_violation_count",
+)
 AMENDMENT_ID = "TASK8B-SIX-SEED-PAIR-SHARD-20260723"
 EXPECTED_AMENDMENT_SHA256 = (
     "041922a51234bfb9fd83d2e2f0a1cefb7736189fa6693ba7e9c4df39a0b6e2be"
@@ -171,6 +195,62 @@ def _directory_manifest(root: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _verify_recovery_archive(
+    archive: Path,
+    expected_rows: list[dict[str, Any]],
+) -> None:
+    expected = {
+        str(row["relative_path"]): {
+            "size": int(row["size"]),
+            "sha256": str(row["sha256"]),
+        }
+        for row in expected_rows
+    }
+    if len(expected) != len(expected_rows):
+        raise ConfigError("paired recovery baseline file path 重复")
+    observed: dict[str, dict[str, Any]] = {}
+    try:
+        with tarfile.open(archive, mode="r:*") as handle:
+            for member in handle.getmembers():
+                pure = PurePosixPath(member.name)
+                if (
+                    not member.name
+                    or pure.is_absolute()
+                    or ".." in pure.parts
+                    or "." in pure.parts
+                    or "\\" in member.name
+                ):
+                    raise ConfigError("paired recovery archive member path 非法")
+                if member.isdir():
+                    continue
+                if (
+                    not member.isfile()
+                    or member.issym()
+                    or member.islnk()
+                    or member.name in observed
+                ):
+                    raise ConfigError("paired recovery archive member type/duplicate 非法")
+                extracted = handle.extractfile(member)
+                if extracted is None:
+                    raise ConfigError("paired recovery archive member 无法读取")
+                digest = hashlib.sha256()
+                size = 0
+                while True:
+                    block = extracted.read(1024 * 1024)
+                    if not block:
+                        break
+                    size += len(block)
+                    digest.update(block)
+                observed[member.name] = {
+                    "size": size,
+                    "sha256": digest.hexdigest(),
+                }
+    except (OSError, tarfile.TarError) as exc:
+        raise ConfigError("paired recovery pre-recovery archive 非法") from exc
+    if observed != expected:
+        raise ConfigError("paired recovery archive 与 baseline files 不闭合")
+
+
 def _verify_files_tsv(root: Path) -> list[dict[str, Any]]:
     """Recompute every files.tsv row and require complete manifest coverage."""
 
@@ -313,6 +393,42 @@ result = formal_runner.run_worker_manifest(
 print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 """
 
+_FROZEN_RECOVERY_RESUME_BOOTSTRAP = """\
+import copy
+import json
+import pathlib
+import sys
+
+checkout = pathlib.Path(sys.argv[1]).resolve()
+checkout_src = (checkout / "src").resolve()
+sys.path.insert(0, str(checkout_src))
+from agentmemeval.experiments import formal_runner
+
+loaded = pathlib.Path(formal_runner.__file__).resolve()
+if checkout_src not in loaded.parents:
+    raise RuntimeError("formal_runner import escaped frozen scientific checkout")
+
+def preserving_mapping_keys(config):
+    value = copy.deepcopy(config)
+    value.pop("_config_path", None)
+    experiment = dict(value.get("experiment", {}))
+    for field in ("output_root", "run_id", "initial_memory_snapshots", "admission_audit"):
+        experiment.pop(field, None)
+    value["experiment"] = experiment
+    agent = dict(value.get("agent", {}))
+    agent.pop("embedding_cache_path", None)
+    value["agent"] = agent
+    return value
+
+formal_runner._semantic_config = preserving_mapping_keys
+result = formal_runner.run_worker_manifest(
+    pathlib.Path(sys.argv[2]),
+    receipt_root=pathlib.Path(sys.argv[3]),
+    resume_existing=True,
+)
+print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+"""
+
 
 def _safe_relative(value: str, *, label: str) -> Path:
     path = Path(value)
@@ -438,6 +554,27 @@ def _canonical_identity(manifest: dict[str, Any]) -> tuple[str, int, str]:
     return worker_id, seed, role
 
 
+def _authorization_id(
+    authorization: dict[str, Any],
+    *,
+    role: str,
+) -> str:
+    identity_material = {
+        "amendment_sha256": authorization["amendment_sha256"],
+        "canonical_manifest_sha256": authorization["canonical_manifest_sha256"],
+        "controller_sha256": authorization["engineering_controller_sha256"],
+        "pair_id": authorization["pair_id"],
+        "physical_slot": authorization["physical_slot"],
+        "role": role,
+        "seed": authorization["seed"],
+        "selected_task_ids": authorization["selected_task_ids"],
+        "shard_id": authorization["shard_id"],
+        "shard_role": authorization["shard_role"],
+        "worker_id": authorization["worker_id"],
+    }
+    return "auth-" + hashlib.sha256(_json_bytes(identity_material)).hexdigest()
+
+
 def render_authorization(
     canonical_manifest_path: str | Path,
     amendment_path: str | Path,
@@ -507,25 +644,10 @@ def render_authorization(
     receipt_relative = (
         f"paired_shards/receipts/{worker_id}/{shard_id}.json"
     )
-    identity_material = {
-        "amendment_sha256": EXPECTED_AMENDMENT_SHA256,
-        "canonical_manifest_sha256": _sha256(canonical_path),
-        "controller_sha256": _sha256(Path(__file__).resolve()),
-        "pair_id": PAIR_IDS[seed],
-        "physical_slot": physical_slot,
-        "role": role,
-        "seed": seed,
-        "selected_task_ids": selected,
-        "shard_id": shard_id,
-        "shard_role": shard_role,
-        "worker_id": worker_id,
-    }
     authorization = {
         "schema_version": AUTHORIZATION_SCHEMA,
         "active": True,
-        "authorization_id": (
-            "auth-" + hashlib.sha256(_json_bytes(identity_material)).hexdigest()
-        ),
+        "authorization_id": "",
         "amendment_id": AMENDMENT_ID,
         "amendment_path": str(amendment),
         "amendment_sha256": EXPECTED_AMENDMENT_SHA256,
@@ -555,6 +677,10 @@ def render_authorization(
         "effect_fields_read": False,
         "scientific_protocol_changed": False,
     }
+    authorization["authorization_id"] = _authorization_id(
+        authorization,
+        role=role,
+    )
     _write_json_new(Path(os.path.abspath(output_path)), authorization)
     return authorization
 
@@ -604,6 +730,8 @@ def preflight_authorization(
 def derive_authorized_manifest(
     canonical_manifest_path: str | Path,
     authorization_path: str | Path,
+    *,
+    _recovery_source_controller_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Derive one fail-closed staging manifest from an active authorization."""
 
@@ -615,6 +743,14 @@ def derive_authorized_manifest(
     missing = sorted(AUTHORIZATION_FIELDS - set(authorization))
     if missing:
         raise ConfigError(f"paired-shard authorization 缺字段：{', '.join(missing)}")
+    expected_controller_sha256 = _sha256(Path(__file__).resolve())
+    if _recovery_source_controller_sha256 is not None:
+        if (
+            _recovery_source_controller_sha256
+            != RECOVERY_SOURCE_CONTROLLER_SHA256
+        ):
+            raise ConfigError("paired-shard recovery source controller 非法")
+        expected_controller_sha256 = RECOVERY_SOURCE_CONTROLLER_SHA256
     if (
         authorization.get("schema_version") != AUTHORIZATION_SCHEMA
         or authorization.get("active") is not True
@@ -623,7 +759,7 @@ def derive_authorized_manifest(
         or authorization.get("frozen_formal_runner_sha256")
         != FROZEN_FORMAL_RUNNER_SHA256
         or authorization.get("engineering_controller_sha256")
-        != _sha256(Path(__file__).resolve())
+        != expected_controller_sha256
         or authorization.get("pair_id") != PAIR_IDS[seed]
         or authorization.get("worker_id") != worker_id
         or int(authorization.get("seed", -1)) != seed
@@ -670,6 +806,11 @@ def derive_authorized_manifest(
         or seal_mode not in {"execution", "historical_adoption"}
     ):
         raise ConfigError("paired-shard high/low task mapping 不匹配")
+    if authorization.get("authorization_id") != _authorization_id(
+        authorization,
+        role=role,
+    ):
+        raise ConfigError("paired-shard authorization_id identity binding failed")
     if seal_mode == "historical_adoption" and (role != "primary" or shard_role != "high"):
         raise ConfigError("historical adoption 仅允许 primary high 历史任务")
 
@@ -1101,6 +1242,717 @@ def _base_shard_receipt(
         "attempt_root": str(root),
         "selected_task_ids": list(shard["selected_task_ids"]),
         "tasks": rows,
+        "effect_fields_read": False,
+    }
+
+
+def _canonicalize_preserving_mapping_keys(config: dict[str, Any]) -> dict[str, Any]:
+    value = copy.deepcopy(config)
+    value.pop("_config_path", None)
+    experiment = dict(value.get("experiment", {}))
+    for field in (
+        "output_root",
+        "run_id",
+        "initial_memory_snapshots",
+        "admission_audit",
+    ):
+        experiment.pop(field, None)
+    value["experiment"] = experiment
+    agent = dict(value.get("agent", {}))
+    agent.pop("embedding_cache_path", None)
+    value["agent"] = agent
+    return value
+
+
+def _canonicalize_legacy_json_roundtrip(
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    value = json.loads(json.dumps(config, ensure_ascii=False))
+    return _canonicalize_preserving_mapping_keys(value)
+
+
+def _stringify_mapping_keys(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _stringify_mapping_keys(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_stringify_mapping_keys(item) for item in value]
+    return value
+
+
+def _mapping_key_diff(
+    corrected: Any,
+    legacy: Any,
+    *,
+    path: str = "$",
+) -> list[dict[str, str]]:
+    """Prove that JSON round-trip changed only non-bool integer mapping keys."""
+
+    if isinstance(corrected, dict):
+        if not isinstance(legacy, dict):
+            raise ConfigError("paired recovery canonicalization container mismatch")
+        expected_legacy_keys: set[str] = set()
+        rows: list[dict[str, str]] = []
+        for key, value in corrected.items():
+            if isinstance(key, bool) or not isinstance(key, (str, int)):
+                raise ConfigError("paired recovery canonicalization 含非法 mapping key")
+            legacy_key = str(key)
+            if legacy_key in expected_legacy_keys:
+                raise ConfigError("paired recovery canonicalization mapping key collision")
+            expected_legacy_keys.add(legacy_key)
+            if legacy_key not in legacy:
+                raise ConfigError("paired recovery canonicalization key 缺失")
+            if isinstance(key, int):
+                if str(key) in corrected:
+                    raise ConfigError(
+                        "paired recovery canonicalization int/string key collision"
+                    )
+                rows.append(
+                    {
+                        "path": path,
+                        "original_key": str(key),
+                        "original_key_type": "integer",
+                        "legacy_key": legacy_key,
+                        "legacy_key_type": "string",
+                    }
+                )
+            child_path = f"{path}.{legacy_key}"
+            rows.extend(
+                _mapping_key_diff(value, legacy[legacy_key], path=child_path)
+            )
+        if set(legacy) != expected_legacy_keys or any(
+            not isinstance(key, str) for key in legacy
+        ):
+            raise ConfigError("paired recovery canonicalization key set mismatch")
+        return rows
+    if isinstance(corrected, list):
+        if not isinstance(legacy, list) or len(corrected) != len(legacy):
+            raise ConfigError("paired recovery canonicalization list mismatch")
+        rows = []
+        for index, (left, right) in enumerate(zip(corrected, legacy, strict=True)):
+            rows.extend(_mapping_key_diff(left, right, path=f"{path}[{index}]"))
+        return rows
+    if type(corrected) is not type(legacy) or corrected != legacy:
+        raise ConfigError("paired recovery canonicalization scalar mismatch")
+    return []
+
+
+def _read_yaml_object(path: Path) -> dict[str, Any]:
+    if not path.is_file() or path.is_symlink():
+        raise ConfigError(f"paired recovery YAML 缺失或为 symlink：{path}")
+    try:
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ConfigError(f"paired recovery YAML 非法：{path}") from exc
+    if not isinstance(value, dict):
+        raise ConfigError(f"paired recovery YAML 顶层必须为对象：{path}")
+    return value
+
+
+def _same_or_new_json(path: Path, value: dict[str, Any]) -> None:
+    content = _json_bytes(value)
+    if path.exists():
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != content:
+            raise ConfigError(f"paired recovery 拒绝修改既有证据：{path}")
+        return
+    _write_json_new(path, value)
+
+
+def _same_or_new_bytes(path: Path, content: bytes) -> None:
+    if path.exists():
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != content:
+            raise ConfigError(f"paired recovery 拒绝修改既有证据：{path}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("xb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError as exc:
+        raise ConfigError(f"paired recovery 拒绝覆盖：{path}") from exc
+
+
+def _state_rows(path: Path) -> list[dict[str, str]]:
+    if not path.is_file() or path.is_symlink():
+        raise ConfigError("paired recovery state.tsv 缺失或为 symlink")
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            expected = [
+                "schema_version",
+                "created_at_utc",
+                "status",
+                "detail",
+                "previous_sha256",
+                "row_sha256",
+            ]
+            if reader.fieldnames != expected:
+                raise ConfigError("paired recovery state.tsv header 非法")
+            rows = list(reader)
+    except (OSError, UnicodeError, csv.Error) as exc:
+        raise ConfigError("paired recovery state.tsv 无法解析") from exc
+    previous = "GENESIS"
+    for row in rows:
+        body = {
+            field: row[field]
+            for field in (
+                "schema_version",
+                "created_at_utc",
+                "status",
+                "detail",
+                "previous_sha256",
+            )
+        }
+        digest = sha256_json(body)
+        if row["previous_sha256"] != previous or row["row_sha256"] != digest:
+            raise ConfigError("paired recovery state.tsv hash chain mismatch")
+        previous = digest
+    if not rows:
+        raise ConfigError("paired recovery state.tsv 为空")
+    return rows
+
+
+def _recovery_state_rows(
+    existing: list[dict[str, str]],
+    *,
+    recovery_id: str,
+    created_at_utc: str,
+    close_execution: bool,
+) -> list[dict[str, str]]:
+    statuses = ["recovered"] + (["complete"] if close_execution else [])
+    previous = existing[-1]["row_sha256"]
+    rows: list[dict[str, str]] = []
+    for status in statuses:
+        body = {
+            "schema_version": existing[-1]["schema_version"],
+            "created_at_utc": created_at_utc,
+            "status": status,
+            "detail": (
+                f"{recovery_id}:verifier-only-completed-task"
+                if status == "recovered"
+                else f"{recovery_id}:all-selected-tasks-complete"
+            ),
+            "previous_sha256": previous,
+        }
+        row = {**body, "row_sha256": sha256_json(body)}
+        rows.append(row)
+        previous = row["row_sha256"]
+    return rows
+
+
+def _write_state_rows_same_or_append(
+    path: Path,
+    original: list[dict[str, str]],
+    appended: list[dict[str, str]],
+) -> None:
+    observed = _state_rows(path)
+    if observed == original + appended:
+        return
+    if observed != original:
+        raise ConfigError("paired recovery state.tsv 已偏离 pre-recovery baseline")
+    fieldnames = list(original[0])
+    with path.open("r+b") as handle:
+        current = handle.read()
+        newline = b"\r\n" if current.endswith(b"\r\n") else b"\n"
+        handle.seek(0, os.SEEK_END)
+        suffix = b"".join(
+            "\t".join(row[field] for field in fieldnames).encode("utf-8")
+            + newline
+            for row in appended
+        )
+        handle.write(suffix)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if _state_rows(path) != original + appended:
+        raise ConfigError("paired recovery state.tsv append 后校验失败")
+
+
+def _files_tsv_bytes(root: Path) -> bytes:
+    rows = _directory_manifest(root)
+    excluded = {"state.tsv", "files.tsv", "completion_receipt.json"}
+    content = "relative_path\tsize\tsha256\n"
+    for row in rows:
+        if row["relative_path"] in excluded:
+            continue
+        content += (
+            f"{row['relative_path']}\t{row['size']}\t{row['sha256']}\n"
+        )
+    return content.encode("utf-8")
+
+
+def _recovery_identity_and_health(
+    manifest: dict[str, Any],
+    task: dict[str, Any],
+    child: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    required = (
+        "manifest.json",
+        "resolved_config.yaml",
+        "schedule_manifest.json",
+        "experiment_result.json",
+        "protocol_audit.json",
+        "events.jsonl",
+        "hand_summaries.jsonl",
+        "metrics.json",
+    )
+    for name in required:
+        path = child / name
+        if not path.is_file() or path.is_symlink():
+            raise ConfigError(f"paired recovery 必需工件缺失：{name}")
+    if _read_json(child / "experiment_result.json").get("status") != "complete":
+        raise ConfigError("paired recovery experiment_result 非 complete")
+    config = _read_yaml_object(child / "resolved_config.yaml")
+    metadata = dict(_read_json(child / "manifest.json").get("metadata", {}))
+    schedule = _read_json(child / "schedule_manifest.json")
+    corrected_config = _canonicalize_preserving_mapping_keys(config)
+    legacy_config = _canonicalize_legacy_json_roundtrip(config)
+    key_level_diff = _mapping_key_diff(corrected_config, legacy_config)
+    common_identity = manifest.get("common_identity")
+    if not isinstance(common_identity, dict):
+        raise ConfigError("paired recovery common_identity 缺失")
+    actual = {
+        "code_sha": dict(metadata.get("code", {})).get("commit"),
+        "code_dirty": dict(metadata.get("code", {})).get("dirty"),
+        "resolved_config_sha256": sha256_json(corrected_config),
+        "prompt_sha256": sha256_json(metadata.get("prompts", {})),
+        "model_fingerprint": sha256_json(metadata.get("model", {})),
+        "embedding_fingerprint": task8b_embedding_fingerprint(
+            metadata.get("embedding", {})
+        ),
+        "schedule_sha256": schedule.get("schedule_sha256"),
+    }
+    expected = task.get("expected_identity")
+    if not isinstance(expected, dict):
+        raise ConfigError("paired recovery expected_identity 缺失")
+    expected_fields = set(formal_runner.REQUIRED_IDENTITY_FIELDS)
+    if set(expected) != expected_fields:
+        raise ConfigError("paired recovery expected_identity 字段集合非法")
+    if set(common_identity) != set(formal_runner.TASK8B_FLEET_LOCK_FIELDS):
+        raise ConfigError("paired recovery common_identity 字段集合非法")
+    for field in formal_runner.FLEET_COMMON_IDENTITY_FIELDS:
+        if expected.get(field) != common_identity.get(field):
+            raise ConfigError(
+                f"paired recovery task/common identity mismatch：{field}"
+            )
+    for field in expected_fields:
+        if actual.get(field) != expected.get(field):
+            raise ConfigError(f"paired recovery identity mismatch：{field}")
+    if actual["code_dirty"] is not False:
+        raise ConfigError("paired recovery code_dirty 必须为 false")
+    legacy_hash = sha256_json(legacy_config)
+    corrected_hash = actual["resolved_config_sha256"]
+    if (
+        legacy_hash == corrected_hash
+        or corrected_hash != expected["resolved_config_sha256"]
+        or not key_level_diff
+    ):
+        raise ConfigError("paired recovery 非唯一 mapping-key canonicalization 差异")
+    audit = _read_json(child / "protocol_audit.json")
+    validity = audit.get("run_validity")
+    health = audit.get("execution_health")
+    validity_fields = {"execution_valid", "behavior_valid"}
+    if not isinstance(validity, dict) or set(validity) != validity_fields:
+        raise ConfigError("paired recovery run_validity exact-key gate failed")
+    if (
+        validity["execution_valid"] is not True
+        or validity["behavior_valid"] is not True
+    ):
+        raise ConfigError("paired recovery run_validity gate failed")
+    health_fields = {"valid", *HEALTH_ZERO_FIELDS}
+    if not isinstance(health, dict) or set(health) != health_fields:
+        raise ConfigError("paired recovery execution_health exact-key gate failed")
+    if health["valid"] is not True:
+        raise ConfigError("paired recovery execution_health.valid gate failed")
+    for field in HEALTH_ZERO_FIELDS:
+        value = health[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value != 0:
+            raise ConfigError(f"paired recovery health counter 非零：{field}")
+    correction = {
+        "reason": COMPLETED_RECOVERY_REASON,
+        "legacy_json_roundtrip_actual_sha256": legacy_hash,
+        "original_expected_sha256": expected["resolved_config_sha256"],
+        "corrected_actual_sha256": corrected_hash,
+        "semantic_equivalence_after_stringifying_mapping_keys": True,
+        "only_authorized_difference": "integer-versus-string mapping keys",
+        "key_level_diff": key_level_diff,
+    }
+    health_summary = {
+        "execution_valid": True,
+        "behavior_valid": True,
+        "execution_health_valid": True,
+        **{field: 0 for field in HEALTH_ZERO_FIELDS},
+    }
+    return actual, health_summary, correction
+
+
+def _resume_recovered_execution(
+    manifest_path: Path,
+    *,
+    scientific_checkout: Path,
+    receipt_root: Path,
+) -> dict[str, Any]:
+    """Resume with the frozen runner after publishing the recovered task receipt."""
+
+    _verify_scientific_checkout(scientific_checkout)
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                _FROZEN_RECOVERY_RESUME_BOOTSTRAP,
+                str(scientific_checkout),
+                str(manifest_path),
+                str(receipt_root),
+            ],
+            cwd=str(scientific_checkout),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        result = json.loads(completed.stdout)
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ConfigError("paired recovery frozen resume failed") from exc
+    if not isinstance(result, dict):
+        raise ConfigError("paired recovery frozen resume result 非对象")
+    return result
+
+
+def recover_completed_execution(
+    derived_manifest_path: str | Path,
+    run_dir: str | Path,
+    baseline_path: str | Path,
+    archive_path: str | Path,
+    certificate_path: str | Path,
+    ledger_entry_path: str | Path,
+) -> dict[str, Any]:
+    """Recover one scientifically complete task after verifier-only failure."""
+
+    manifest_path = Path(os.path.abspath(derived_manifest_path))
+    root = Path(os.path.abspath(run_dir))
+    baseline_file = Path(os.path.abspath(baseline_path))
+    archive = Path(os.path.abspath(archive_path))
+    manifest = _read_json(manifest_path)
+    worker_id, seed, role = _worker_seed_role(manifest)
+    shard = manifest.get("paired_shard")
+    if not isinstance(shard, dict) or shard.get("seal_mode") != "execution":
+        raise ConfigError("paired recovery 仅允许 execution derived manifest")
+    source_controller_sha256 = str(
+        shard.get("engineering_controller_sha256", "")
+    )
+    current_controller_sha256 = _sha256(Path(__file__).resolve())
+    if source_controller_sha256 == RECOVERY_SOURCE_CONTROLLER_SHA256:
+        rebuilt = derive_authorized_manifest(
+            str(shard.get("canonical_manifest_path", "")),
+            str(shard.get("authorization_path", "")),
+            _recovery_source_controller_sha256=(
+                RECOVERY_SOURCE_CONTROLLER_SHA256
+            ),
+        )
+    elif source_controller_sha256 == current_controller_sha256:
+        rebuilt = derive_authorized_manifest(
+            str(shard.get("canonical_manifest_path", "")),
+            str(shard.get("authorization_path", "")),
+        )
+    else:
+        raise ConfigError("paired recovery source controller SHA 未获授权")
+    if _json_bytes(rebuilt) != _json_bytes(manifest):
+        raise ConfigError("paired recovery derived manifest 不匹配 authorization")
+    staging_root = _approved_root(
+        str(shard["approved_staging_root"]),
+        label="approved_staging_root",
+    )
+    approved_receipts = _approved_root(
+        str(shard["approved_receipt_root"]),
+        label="approved_receipt_root",
+    )
+    _inside_approved(staging_root, root, label="paired recovery attempt_root")
+    _inside_approved(
+        approved_receipts,
+        baseline_file,
+        label="paired recovery baseline",
+    )
+    certificate = _inside_approved(
+        approved_receipts,
+        Path(certificate_path),
+        label="paired recovery certificate",
+    )
+    ledger = _inside_approved(
+        approved_receipts,
+        Path(ledger_entry_path),
+        label="paired recovery ledger entry",
+    )
+    if _paths_overlap(certificate, root) or _paths_overlap(ledger, root):
+        raise ConfigError("paired recovery audit outputs 不得写入 attempt_root")
+    baseline = _read_json(baseline_file)
+    baseline_fields = {
+        "schema_version",
+        "status",
+        "recovery_id",
+        "reason",
+        "created_at_utc",
+        "worker_id",
+        "seed",
+        "task_id",
+        "attempt_root",
+        "derived_manifest_sha256",
+        "authorization_sha256",
+        "recovery_tool_sha256",
+        "pre_recovery_files",
+        "pre_recovery_archive_path",
+        "pre_recovery_archive_sha256",
+        "failed_state_row_sha256",
+        "effect_fields_read",
+    }
+    if set(baseline) != baseline_fields:
+        raise ConfigError("paired recovery baseline 字段集合非法")
+    task_id = str(baseline.get("task_id", ""))
+    tasks = {
+        str(task["task_id"]): task
+        for task in manifest.get("task_configs", [])
+        if isinstance(task, dict)
+    }
+    authorization_path = Path(str(shard["authorization_path"]))
+    if (
+        baseline.get("schema_version") != COMPLETED_RECOVERY_BASELINE_SCHEMA
+        or baseline.get("status") != "activated"
+        or baseline.get("reason") != COMPLETED_RECOVERY_REASON
+        or baseline.get("worker_id") != worker_id
+        or int(baseline.get("seed", -1)) != seed
+        or task_id not in tasks
+        or task_id not in shard.get("selected_task_ids", [])
+        or baseline.get("attempt_root") != str(root)
+        or baseline.get("derived_manifest_sha256") != _sha256(manifest_path)
+        or baseline.get("authorization_sha256") != _sha256(authorization_path)
+        or baseline.get("recovery_tool_sha256")
+        != _sha256(Path(__file__).resolve())
+        or baseline.get("pre_recovery_archive_path") != str(archive)
+        or not archive.is_file()
+        or archive.is_symlink()
+        or baseline.get("pre_recovery_archive_sha256") != _sha256(archive)
+        or baseline.get("effect_fields_read") is not False
+        or not isinstance(baseline.get("recovery_id"), str)
+        or not baseline["recovery_id"]
+        or not isinstance(baseline.get("created_at_utc"), str)
+        or not baseline["created_at_utc"]
+    ):
+        raise ConfigError("paired recovery baseline authorization binding failed")
+    pre_files = baseline.get("pre_recovery_files")
+    if not isinstance(pre_files, list) or not all(
+        isinstance(row, dict)
+        and set(row) == {"relative_path", "size", "sha256"}
+        for row in pre_files
+    ):
+        raise ConfigError("paired recovery pre-recovery file manifest 非法")
+    _verify_recovery_archive(archive, pre_files)
+    if not certificate.exists() and _directory_manifest(root) != pre_files:
+        raise ConfigError("paired recovery pre-recovery file manifest 不闭合")
+    for row in pre_files:
+        if row["relative_path"] == "state.tsv":
+            continue
+        target = _strict_relative_target(
+            root,
+            str(row["relative_path"]),
+            label="paired recovery baseline file",
+            must_exist=True,
+        )
+        if (
+            target.stat().st_size != int(row["size"])
+            or _sha256(target) != row["sha256"]
+        ):
+            raise ConfigError("paired recovery baseline scientific file 已变化")
+    observed_state = _state_rows(root / "state.tsv")
+    recovery_id = str(baseline["recovery_id"])
+    failed_indices = [
+        index
+        for index, row in enumerate(observed_state)
+        if row["row_sha256"] == baseline.get("failed_state_row_sha256")
+    ]
+    if len(failed_indices) != 1:
+        raise ConfigError("paired recovery failed state row 不唯一")
+    original_state = observed_state[: failed_indices[0] + 1]
+    if (
+        not original_state
+        or original_state[-1]["status"] != "failed"
+        or original_state[-1]["row_sha256"]
+        != baseline.get("failed_state_row_sha256")
+    ):
+        raise ConfigError("paired recovery failed state binding failed")
+    child = _strict_relative_target(
+        root,
+        f"runs/{task_id}",
+        label="paired recovery child run",
+        must_exist=True,
+    )
+    if not child.is_dir() or child.is_symlink():
+        raise ConfigError("paired recovery child run 非法")
+    task = tasks[task_id]
+    if (
+        int(task.get("planned_hands", -1)) != EXPECTED_TASKS[role][task_id]
+        or _structural_hand_count(child) != int(task["planned_hands"])
+    ):
+        raise ConfigError("paired recovery planned/actual hands 不闭合")
+    actual, health, correction = _recovery_identity_and_health(
+        manifest,
+        task,
+        child,
+    )
+    audit = {
+        "schema_version": "task8-task-identity-audit-v1",
+        "task_id": task_id,
+        "protocol_status": manifest["protocol_status"],
+        "actual": actual,
+        "expected": task["expected_identity"],
+        "identity_correction": correction,
+        "health": health,
+        "status": "verified-recovered",
+        "effect_fields_read": False,
+    }
+    audit_path = child / "task_identity_audit.json"
+    _same_or_new_json(audit_path, audit)
+    task_row = {
+        "task_id": task_id,
+        "memory_mode": task.get("memory_mode"),
+        "run_dir": f"runs/{task_id}",
+        "cache_namespace": (
+            f"{manifest['instance_identity']['cache_namespace']}/"
+            f"{task_id}/{str(task.get('memory_mode') or role).lower()}"
+        ),
+        "identity_audit": actual,
+        "status": "complete",
+        "recovery_id": recovery_id,
+    }
+    marker = {
+        "schema_version": "task8-worker-task-receipt-v1",
+        "task_id": task_id,
+        "config_sha256": task["config_sha256"],
+        "run_dir": task_row["run_dir"],
+        "task_row": task_row,
+        "files": _directory_manifest(child),
+    }
+    marker_path = root / "task_receipts" / f"{task_id}.json"
+    _same_or_new_json(marker_path, marker)
+    selected = list(shard["selected_task_ids"])
+    pre_recovery_relative_paths = {
+        str(row["relative_path"]) for row in pre_files
+    }
+    standard_resume_task_ids = [
+        selected_id
+        for selected_id in selected
+        if selected_id != task_id
+        and f"task_receipts/{selected_id}.json"
+        not in pre_recovery_relative_paths
+    ]
+    _resume_recovered_execution(
+        manifest_path,
+        scientific_checkout=Path(str(shard["scientific_checkout"])),
+        receipt_root=approved_receipts,
+    )
+    completion_path = root / "completion_receipt.json"
+    files_path = root / "files.tsv"
+    close_execution = (
+        all(
+            (root / "task_receipts" / f"{selected_id}.json").is_file()
+            for selected_id in selected
+        )
+        and completion_path.is_file()
+        and files_path.is_file()
+    )
+    if not close_execution:
+        raise ConfigError("paired recovery frozen resume 未闭合 selected tasks")
+    _verified_task_rows(manifest, root)
+    _verify_files_tsv(root)
+    completion = _read_json(completion_path)
+    if (
+        completion.get("schema_version") != "task8-worker-completion-v1"
+        or completion.get("status") != "complete"
+        or completion.get("worker_id") != worker_id
+        or completion.get("files_tsv_sha256") != _sha256(files_path)
+    ):
+        raise ConfigError("paired recovery standard completion receipt gate failed")
+    final_state = _state_rows(root / "state.tsv")
+    if (
+        final_state[: len(original_state)] != original_state
+        or final_state[-1]["status"] != "complete"
+    ):
+        raise ConfigError("paired recovery standard state continuation gate failed")
+    appended_state = final_state[len(original_state) :]
+    if not appended_state:
+        raise ConfigError("paired recovery standard state 未 append")
+    if close_execution:
+        _verify_files_tsv(root)
+    certificate_body = {
+        "schema_version": COMPLETED_RECOVERY_CERTIFICATE_SCHEMA,
+        "status": (
+            "execution_complete_recovered"
+        ),
+        "recovery_id": recovery_id,
+        "reason": COMPLETED_RECOVERY_REASON,
+        "worker_id": worker_id,
+        "seed": seed,
+        "role": role,
+        "task_id": task_id,
+        "planned_hands": int(task["planned_hands"]),
+        "actual_hands": _structural_hand_count(child),
+        "attempt_root": str(root),
+        "failed_state_preserved": True,
+        "failed_state_row_sha256": baseline["failed_state_row_sha256"],
+        "appended_state_row_sha256": [
+            row["row_sha256"] for row in appended_state
+        ],
+        "derived_manifest_sha256": _sha256(manifest_path),
+        "authorization_sha256": _sha256(authorization_path),
+        "recovery_tool_sha256": _sha256(Path(__file__).resolve()),
+        "baseline_sha256": _sha256(baseline_file),
+        "pre_recovery_archive_sha256": _sha256(archive),
+        "task_identity_audit_sha256": _sha256(audit_path),
+        "task_receipt_sha256": _sha256(marker_path),
+        "identity_correction": correction,
+        "health": health,
+        "recovered_task_scientific_files_modified": False,
+        "standard_resume_task_ids": standard_resume_task_ids,
+        "standard_resume_used_frozen_runner": True,
+        "shard_closed": close_execution,
+        "unrecovered_selected_task_ids": [
+            selected_id
+            for selected_id in selected
+            if not (root / "task_receipts" / f"{selected_id}.json").is_file()
+        ],
+        "effect_fields_read": False,
+    }
+    ledger_body = {
+        "schema_version": COMPLETED_RECOVERY_LEDGER_SCHEMA,
+        "status": "append-only",
+        "recovery_id": recovery_id,
+        "worker_id": worker_id,
+        "seed": seed,
+        "task_id": task_id,
+        "attempt_root": str(root),
+        "certificate_path": str(certificate),
+        "certificate_sha256_pending_at_publication": True,
+        "shard_closed": close_execution,
+        "effect_fields_read": False,
+    }
+    _same_or_new_json(certificate, certificate_body)
+    _same_or_new_json(ledger, ledger_body)
+    return {
+        "status": certificate_body["status"],
+        "worker_id": worker_id,
+        "seed": seed,
+        "task_id": task_id,
+        "shard_closed": close_execution,
+        "certificate_path": str(certificate),
+        "certificate_sha256": _sha256(certificate),
+        "ledger_entry_path": str(ledger),
+        "ledger_entry_sha256": _sha256(ledger),
         "effect_fields_read": False,
     }
 
@@ -1846,6 +2698,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     seal_parser.add_argument("--run-dir", type=Path, required=True)
     seal_parser.add_argument("--output", type=Path, required=True)
 
+    recovery_parser = subparsers.add_parser("recover-completed-execution")
+    recovery_parser.add_argument(
+        "--derived-manifest", type=Path, required=True
+    )
+    recovery_parser.add_argument("--run-dir", type=Path, required=True)
+    recovery_parser.add_argument("--baseline", type=Path, required=True)
+    recovery_parser.add_argument(
+        "--pre-recovery-archive", type=Path, required=True
+    )
+    recovery_parser.add_argument(
+        "--recovery-certificate", type=Path, required=True
+    )
+    recovery_parser.add_argument(
+        "--recovery-ledger-entry", type=Path, required=True
+    )
+
     adopt_parser = subparsers.add_parser("adopt-historical")
     adopt_parser.add_argument("--canonical-manifest", type=Path, required=True)
     adopt_parser.add_argument("--authorization", type=Path, required=True)
@@ -1902,6 +2770,15 @@ def main(argv: list[str] | None = None) -> int:
             args.derived_manifest,
             args.run_dir,
             args.output,
+        )
+    elif args.command == "recover-completed-execution":
+        result = recover_completed_execution(
+            args.derived_manifest,
+            args.run_dir,
+            args.baseline,
+            args.pre_recovery_archive,
+            args.recovery_certificate,
+            args.recovery_ledger_entry,
         )
     elif args.command == "adopt-historical":
         result = build_historical_adoption_receipt(

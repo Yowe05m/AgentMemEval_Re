@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import sys
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from agentmemeval.config.loader import ConfigError
 from agentmemeval.experiments import formal_runner
@@ -36,6 +39,24 @@ def _write_json(path: Path, value: object) -> None:
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _failed_state(path: Path) -> str:
+    body = {
+        "schema_version": "task8-worker-state-v1",
+        "created_at_utc": "2026-07-24T00:00:00Z",
+        "status": "failed",
+        "detail": "ConfigError: resolved config identity mismatch",
+        "previous_sha256": "GENESIS",
+    }
+    row = {**body, "row_sha256": formal_runner.sha256_json(body)}
+    path.write_text(
+        "\t".join(row) + "\n"
+        + "\t".join(str(row[field]) for field in row)
+        + "\n",
+        encoding="utf-8",
+    )
+    return str(row["row_sha256"])
 
 
 def _identity(suffix: str) -> dict[str, str]:
@@ -222,7 +243,7 @@ def _authorization(
     value = {
         "schema_version": shards.AUTHORIZATION_SCHEMA,
         "active": True,
-        "authorization_id": f"auth-{worker}-{shard_id}",
+        "authorization_id": "",
         "amendment_id": shards.AMENDMENT_ID,
         "amendment_path": str(amendment),
         "amendment_sha256": shards.EXPECTED_AMENDMENT_SHA256,
@@ -265,6 +286,7 @@ def _authorization(
         "effect_fields_read": False,
         "scientific_protocol_changed": False,
     }
+    value["authorization_id"] = shards._authorization_id(value, role=role)
     path = tmp_path / "authorizations" / f"{worker}-{shard_id}.json"
     _write_json(path, value)
     return path
@@ -933,7 +955,7 @@ def test_reservation_rechecks_authorization_bytes(
         return result
 
     monkeypatch.setattr(shards, "_reserve_execution", reserve_then_mutate)
-    with pytest.raises(ConfigError, match="changed after reservation"):
+    with pytest.raises(ConfigError, match="authorization_id identity binding"):
         shards.run_authorized_shard(
             canonical,
             authorization,
@@ -1155,3 +1177,555 @@ def test_render_authorization_rejects_wrong_physical_mapping(
             shard_id="wrong-slot",
             output_path=tmp_path / "auth.json",
         )
+
+
+def _completed_recovery_fixture(
+    tmp_path: Path,
+    *,
+    seed: int = 2026090107,
+    selected: list[str] | None = None,
+    recovered_task_id: str = "isolation_async",
+    hands: int = 1350,
+    fallback_count: int = 0,
+    include_integer_key: bool = True,
+    mapping_keys: dict[object, int] | None = None,
+    extra_health_field: bool = False,
+    extra_validity_field: bool = False,
+    extra_expected_field: bool = False,
+    legacy_controller: bool = False,
+) -> dict[str, Path]:
+    selected = selected or [recovered_task_id]
+    canonical = _canonical_manifest(tmp_path, role="primary", seed=seed)
+    manifest = json.loads(canonical.read_text(encoding="utf-8"))
+    prompts = {"system": "frozen"}
+    model = {"model": "Qwen-frozen"}
+    embedding = {"model": "BGE-frozen"}
+    schedule_sha = hashlib.sha256(recovered_task_id.encode()).hexdigest()
+    config: dict[str, object] = {
+        "experiment": {"seed": seed},
+        "agent": {},
+    }
+    if include_integer_key:
+        config["experiment"]["checkpoint_test_hands_by_checkpoint"] = {  # type: ignore[index]
+            30: 1,
+            75: 1,
+            150: 1,
+            300: 1,
+        }
+    if mapping_keys is not None:
+        config["experiment"]["checkpoint_test_hands_by_checkpoint"] = mapping_keys  # type: ignore[index]
+    try:
+        resolved_config_sha256 = formal_runner.sha256_json(
+            shards._canonicalize_preserving_mapping_keys(config)
+        )
+    except TypeError:
+        resolved_config_sha256 = "0" * 64
+    expected = {
+        "code_sha": shards.FROZEN_CODE_SHA,
+        "prompt_sha256": formal_runner.sha256_json(prompts),
+        "model_fingerprint": formal_runner.sha256_json(model),
+        "embedding_fingerprint": formal_runner.task8b_embedding_fingerprint(
+            embedding
+        ),
+        "resolved_config_sha256": resolved_config_sha256,
+        "schedule_sha256": schedule_sha,
+    }
+    for field in formal_runner.FLEET_COMMON_IDENTITY_FIELDS:
+        manifest["common_identity"][field] = expected[field]
+    if extra_expected_field:
+        expected["unexpected_identity_field"] = "forbidden"
+    for task in manifest["task_configs"]:
+        if task["task_id"] == recovered_task_id:
+            task["expected_identity"] = expected
+    _write_json(canonical, manifest)
+    authorization = _authorization(
+        tmp_path,
+        canonical,
+        selected=selected,
+        shard_id=f"recover-{recovered_task_id}",
+    )
+    if legacy_controller:
+        auth_value = json.loads(authorization.read_text(encoding="utf-8"))
+        auth_value["engineering_controller_sha256"] = (
+            shards.RECOVERY_SOURCE_CONTROLLER_SHA256
+        )
+        auth_value["authorization_id"] = shards._authorization_id(
+            auth_value,
+            role=manifest["role"],
+        )
+        _write_json(authorization, auth_value)
+        derived = shards.derive_authorized_manifest(
+            canonical,
+            authorization,
+            _recovery_source_controller_sha256=(
+                shards.RECOVERY_SOURCE_CONTROLLER_SHA256
+            ),
+        )
+    else:
+        derived = shards.derive_authorized_manifest(canonical, authorization)
+    derived_path = tmp_path / "derived" / "worker.json"
+    _write_json(derived_path, derived)
+    root = Path(derived["instance_identity"]["output_path"])
+    child = root / "runs" / recovered_task_id
+    child.mkdir(parents=True)
+    _write_json(
+        root / "worker_manifest.json",
+        derived,
+    )
+    failed_hash = _failed_state(root / "state.tsv")
+    _write_json(
+        child / "manifest.json",
+        {
+            "metadata": {
+                "code": {"commit": shards.FROZEN_CODE_SHA, "dirty": False},
+                "prompts": prompts,
+                "model": model,
+                "embedding": embedding,
+            }
+        },
+    )
+    (child / "resolved_config.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=True),
+        encoding="utf-8",
+    )
+    _write_json(
+        child / "schedule_manifest.json",
+        {"schedule_sha256": schedule_sha},
+    )
+    _write_json(child / "experiment_result.json", {"status": "complete"})
+    execution_health = {
+        "valid": True,
+        **{
+            field: (
+                fallback_count if field == "fallback_count" else 0
+            )
+            for field in shards.HEALTH_ZERO_FIELDS
+        },
+    }
+    if extra_health_field:
+        execution_health["unexpected_counter"] = 0
+    _write_json(
+        child / "protocol_audit.json",
+        {
+            "run_validity": {
+                "execution_valid": True,
+                "behavior_valid": True,
+                **({"effect_like_extra": 1} if extra_validity_field else {}),
+            },
+            "execution_health": execution_health,
+            "forbidden_effect_value": 999,
+        },
+    )
+    (child / "events.jsonl").write_bytes(b"{}\n")
+    (child / "hand_summaries.jsonl").write_bytes(b"{}\n" * hands)
+    _write_json(child / "metrics.json", {"effect_direction": "must-not-read"})
+    archive = tmp_path / "pre-recovery.tar.gz"
+    with tarfile.open(archive, mode="w:gz") as handle:
+        for row in shards._directory_manifest(root):
+            handle.add(
+                root / row["relative_path"],
+                arcname=row["relative_path"],
+                recursive=False,
+            )
+    auth = json.loads(authorization.read_text(encoding="utf-8"))
+    receipt_root = Path(auth["approved_receipt_root"])
+    baseline = receipt_root / "recovery" / "baseline.json"
+    baseline_body = {
+        "schema_version": shards.COMPLETED_RECOVERY_BASELINE_SCHEMA,
+        "status": "activated",
+        "recovery_id": f"recovery-{seed}-{recovered_task_id}",
+        "reason": shards.COMPLETED_RECOVERY_REASON,
+        "created_at_utc": "2026-07-24T00:01:00Z",
+        "worker_id": manifest["worker_id"],
+        "seed": seed,
+        "task_id": recovered_task_id,
+        "attempt_root": str(root),
+        "derived_manifest_sha256": _sha(derived_path),
+        "authorization_sha256": _sha(authorization),
+        "recovery_tool_sha256": _sha(Path(shards.__file__).resolve()),
+        "pre_recovery_files": shards._directory_manifest(root),
+        "pre_recovery_archive_path": str(archive.resolve()),
+        "pre_recovery_archive_sha256": _sha(archive),
+        "failed_state_row_sha256": failed_hash,
+        "effect_fields_read": False,
+    }
+    _write_json(baseline, baseline_body)
+    return {
+        "canonical": canonical,
+        "authorization": authorization,
+        "derived": derived_path,
+        "root": root,
+        "archive": archive,
+        "baseline": baseline,
+        "certificate": receipt_root / "recovery" / "certificate.json",
+        "ledger": receipt_root / "recovery" / "ledger-entry.json",
+        "shard_receipt": receipt_root / "recovery" / "shard.json",
+    }
+
+
+def _run_completed_recovery(paths: dict[str, Path]) -> dict[str, object]:
+    return shards.recover_completed_execution(
+        paths["derived"],
+        paths["root"],
+        paths["baseline"],
+        paths["archive"],
+        paths["certificate"],
+        paths["ledger"],
+    )
+
+
+def _mock_frozen_standard_resume(monkeypatch: pytest.MonkeyPatch) -> None:
+    def resume(
+        manifest_path: Path,
+        *,
+        scientific_checkout: Path,
+        receipt_root: Path,
+    ) -> dict[str, object]:
+        del scientific_checkout, receipt_root
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        root = Path(manifest["instance_identity"]["output_path"])
+        if (root / "completion_receipt.json").exists():
+            return {"status": "complete", "resumed": True}
+        for task in manifest["task_configs"]:
+            task_id = task["task_id"]
+            marker_path = root / "task_receipts" / f"{task_id}.json"
+            if marker_path.exists():
+                continue
+            child = root / "runs" / task_id
+            child.mkdir(parents=True)
+            _write_json(child / "experiment_result.json", {"status": "complete"})
+            (child / "hand_summaries.jsonl").write_bytes(
+                b"{}\n" * int(task["planned_hands"])
+            )
+            _write_json(
+                child / "execution_provenance.json",
+                {"executed_by": "frozen-runner-resume", "task_id": task_id},
+            )
+            identity = {**task["expected_identity"], "code_dirty": False}
+            row = {
+                "task_id": task_id,
+                "memory_mode": task.get("memory_mode"),
+                "run_dir": f"runs/{task_id}",
+                "cache_namespace": "frozen-resume",
+                "identity_audit": identity,
+                "status": "complete",
+            }
+            _write_json(
+                marker_path,
+                {
+                    "schema_version": "task8-worker-task-receipt-v1",
+                    "task_id": task_id,
+                    "config_sha256": task["config_sha256"],
+                    "run_dir": row["run_dir"],
+                    "task_row": row,
+                    "files": shards._directory_manifest(child),
+                },
+            )
+        states = shards._state_rows(root / "state.tsv")
+        previous = states[-1]["row_sha256"]
+        with (root / "state.tsv").open("ab") as handle:
+            for status in ("validating", "running", "finalizing", "complete"):
+                body = {
+                    "schema_version": states[-1]["schema_version"],
+                    "created_at_utc": "2026-07-24T00:02:00Z",
+                    "status": status,
+                    "detail": "frozen runner resume",
+                    "previous_sha256": previous,
+                }
+                row = {**body, "row_sha256": formal_runner.sha256_json(body)}
+                handle.write(
+                    (
+                        "\t".join(str(row[field]) for field in row) + "\n"
+                    ).encode("utf-8")
+                )
+                previous = row["row_sha256"]
+        (root / "files.tsv").write_bytes(shards._files_tsv_bytes(root))
+        _write_json(
+            root / "completion_receipt.json",
+            {
+                "schema_version": "task8-worker-completion-v1",
+                "worker_id": manifest["worker_id"],
+                "status": "complete",
+                "files_tsv_sha256": _sha(root / "files.tsv"),
+            },
+        )
+        return {"status": "complete", "resumed": True}
+
+    monkeypatch.setattr(shards, "_resume_recovered_execution", resume)
+
+
+@pytest.mark.parametrize(
+    ("seed", "task_id"),
+    [
+        (2026090107, "isolation_async"),
+        (2026090107, "isolation_sync"),
+    ],
+)
+def test_recover_completed_execution_is_idempotent_and_sealable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed: int,
+    task_id: str,
+) -> None:
+    _mock_frozen_standard_resume(monkeypatch)
+    paths = _completed_recovery_fixture(
+        tmp_path,
+        seed=seed,
+        recovered_task_id=task_id,
+    )
+    first = _run_completed_recovery(paths)
+    frozen = {
+        path: path.read_bytes()
+        for path in (
+            paths["certificate"],
+            paths["ledger"],
+            paths["root"] / "state.tsv",
+            paths["root"] / "files.tsv",
+            paths["root"] / "completion_receipt.json",
+        )
+    }
+    second = _run_completed_recovery(paths)
+    assert first == second
+    assert all(path.read_bytes() == content for path, content in frozen.items())
+    assert first["shard_closed"] is True
+    state = (paths["root"] / "state.tsv").read_text(encoding="utf-8")
+    assert "\tfailed\t" in state
+    assert "\tvalidating\t" in state
+    assert "\tcomplete\t" in state
+    receipt = shards.build_shard_receipt(
+        paths["derived"],
+        paths["root"],
+        paths["shard_receipt"],
+    )
+    assert receipt["selected_task_ids"] == [task_id]
+    assert receipt["effect_fields_read"] is False
+
+
+def test_recover_completed_execution_rejects_incomplete_or_unhealthy_data(
+    tmp_path: Path,
+) -> None:
+    short = _completed_recovery_fixture(tmp_path / "short", hands=1349)
+    with pytest.raises(ConfigError, match="hands"):
+        _run_completed_recovery(short)
+    unhealthy = _completed_recovery_fixture(
+        tmp_path / "unhealthy",
+        fallback_count=1,
+    )
+    with pytest.raises(ConfigError, match="health counter"):
+        _run_completed_recovery(unhealthy)
+    no_key_difference = _completed_recovery_fixture(
+        tmp_path / "no-key-difference",
+        include_integer_key=False,
+    )
+    with pytest.raises(ConfigError, match="canonicalization"):
+        _run_completed_recovery(no_key_difference)
+
+
+def test_recover_completed_execution_rejects_baseline_or_scientific_tamper(
+    tmp_path: Path,
+) -> None:
+    paths = _completed_recovery_fixture(tmp_path)
+    baseline = json.loads(paths["baseline"].read_text(encoding="utf-8"))
+    baseline["authorization_sha256"] = "0" * 64
+    _write_json(paths["baseline"], baseline)
+    with pytest.raises(ConfigError, match="authorization binding"):
+        _run_completed_recovery(paths)
+
+    paths = _completed_recovery_fixture(tmp_path / "scientific")
+    with (paths["root"] / "runs" / "isolation_async" / "events.jsonl").open(
+        "ab"
+    ) as handle:
+        handle.write(b"{}\n")
+    with pytest.raises(ConfigError, match="file manifest"):
+        _run_completed_recovery(paths)
+
+
+def test_h12_expr_recovery_does_not_forge_sync_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _completed_recovery_fixture(
+        tmp_path,
+        seed=2026090112,
+        selected=["isolation_expr", "isolation_sync"],
+        recovered_task_id="isolation_expr",
+    )
+    def interrupted_resume(
+        manifest_path: Path,
+        *,
+        scientific_checkout: Path,
+        receipt_root: Path,
+    ) -> dict[str, object]:
+        del manifest_path, scientific_checkout, receipt_root
+        raise ConfigError("simulated interruption before frozen Sync execution")
+
+    monkeypatch.setattr(
+        shards,
+        "_resume_recovered_execution",
+        interrupted_resume,
+    )
+    with pytest.raises(ConfigError, match="before frozen Sync"):
+        _run_completed_recovery(paths)
+    assert (
+        paths["root"] / "task_receipts" / "isolation_expr.json"
+    ).is_file()
+    assert not (
+        paths["root"] / "task_receipts" / "isolation_sync.json"
+    ).exists()
+    assert not (paths["root"] / "completion_receipt.json").exists()
+    assert "resume_existing=True" in shards._FROZEN_RECOVERY_RESUME_BOOTSTRAP
+
+
+@pytest.mark.parametrize(
+    "mapping_keys",
+    [
+        {True: 1},
+        {1.5: 1},
+        {1: 1, "1": 2},
+    ],
+)
+def test_recovery_rejects_non_integer_or_colliding_mapping_keys(
+    tmp_path: Path,
+    mapping_keys: dict[object, int],
+) -> None:
+    paths = _completed_recovery_fixture(
+        tmp_path,
+        mapping_keys=mapping_keys,
+    )
+    with pytest.raises(ConfigError, match="mapping key|collision"):
+        _run_completed_recovery(paths)
+
+
+def test_recovery_requires_exact_identity_and_health_field_sets(
+    tmp_path: Path,
+) -> None:
+    identity = _completed_recovery_fixture(
+        tmp_path / "identity",
+        extra_expected_field=True,
+    )
+    with pytest.raises(ConfigError, match="expected_identity 字段集合"):
+        _run_completed_recovery(identity)
+    health = _completed_recovery_fixture(
+        tmp_path / "health",
+        extra_health_field=True,
+    )
+    with pytest.raises(ConfigError, match="execution_health exact-key"):
+        _run_completed_recovery(health)
+    validity = _completed_recovery_fixture(
+        tmp_path / "validity",
+        extra_validity_field=True,
+    )
+    with pytest.raises(ConfigError, match="run_validity exact-key"):
+        _run_completed_recovery(validity)
+
+
+@pytest.mark.parametrize("mode", ["missing", "wrong"])
+def test_recovery_baseline_requires_current_recovery_tool_sha(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    paths = _completed_recovery_fixture(tmp_path)
+    baseline = json.loads(paths["baseline"].read_text(encoding="utf-8"))
+    if mode == "missing":
+        baseline.pop("recovery_tool_sha256")
+    else:
+        baseline["recovery_tool_sha256"] = "0" * 64
+    _write_json(paths["baseline"], baseline)
+    with pytest.raises(ConfigError, match="字段集合|authorization binding"):
+        _run_completed_recovery(paths)
+
+
+def test_recovery_archive_rejects_path_escape_and_symlink(
+    tmp_path: Path,
+) -> None:
+    for kind in ("escape", "symlink"):
+        paths = _completed_recovery_fixture(tmp_path / kind)
+        with tarfile.open(paths["archive"], mode="w:gz") as handle:
+            info = tarfile.TarInfo(
+                "../escape" if kind == "escape" else "state.tsv"
+            )
+            if kind == "symlink":
+                info.type = tarfile.SYMTYPE
+                info.linkname = "../outside"
+                handle.addfile(info)
+            else:
+                payload = b"x"
+                info.size = len(payload)
+                handle.addfile(info, io.BytesIO(payload))
+        baseline = json.loads(paths["baseline"].read_text(encoding="utf-8"))
+        baseline["pre_recovery_archive_sha256"] = _sha(paths["archive"])
+        _write_json(paths["baseline"], baseline)
+        with pytest.raises(ConfigError, match="archive member"):
+            _run_completed_recovery(paths)
+
+
+def test_recovery_accepts_only_fixed_legacy_controller_compatibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_frozen_standard_resume(monkeypatch)
+    paths = _completed_recovery_fixture(
+        tmp_path,
+        legacy_controller=True,
+    )
+    result = _run_completed_recovery(paths)
+    assert result["shard_closed"] is True
+    with pytest.raises(ConfigError, match="identity/active"):
+        shards.derive_authorized_manifest(
+            paths["canonical"],
+            paths["authorization"],
+        )
+    with pytest.raises(ConfigError, match="source controller"):
+        shards.derive_authorized_manifest(
+            paths["canonical"],
+            paths["authorization"],
+            _recovery_source_controller_sha256="0" * 64,
+        )
+
+
+def test_frozen_recovery_resume_runs_in_isolated_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout = tmp_path / "frozen"
+    package = checkout / "src" / "agentmemeval" / "experiments"
+    package.mkdir(parents=True)
+    (checkout / "src" / "agentmemeval" / "__init__.py").write_text(
+        "",
+        encoding="utf-8",
+    )
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    trace = tmp_path / "resume-trace.json"
+    (package / "formal_runner.py").write_text(
+        "import json\n"
+        "from pathlib import Path\n"
+        "_semantic_config = None\n"
+        "def run_worker_manifest(path, *, receipt_root, resume_existing):\n"
+        f"    Path({str(trace)!r}).write_text("
+        "json.dumps({'manifest': str(path), "
+        "'receipt_root': str(receipt_root), "
+        "'resume_existing': resume_existing, "
+        "'canonicalizer_patched': callable(_semantic_config)}), "
+        "encoding='utf-8')\n"
+        "    return {'status': 'subprocess-pass'}\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "derived.json"
+    receipt_root = tmp_path / "receipts"
+    receipt_root.mkdir()
+    _write_json(manifest, {"worker_id": "P12"})
+    monkeypatch.setattr(
+        shards,
+        "_verify_scientific_checkout",
+        lambda _path: package / "formal_runner.py",
+    )
+    result = shards._resume_recovered_execution(
+        manifest,
+        scientific_checkout=checkout.resolve(),
+        receipt_root=receipt_root.resolve(),
+    )
+    observed = json.loads(trace.read_text(encoding="utf-8"))
+    assert result == {"status": "subprocess-pass"}
+    assert observed["resume_existing"] is True
+    assert observed["canonicalizer_patched"] is True
+    assert Path(observed["manifest"]) == manifest
