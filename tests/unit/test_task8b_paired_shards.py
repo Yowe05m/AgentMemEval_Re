@@ -1293,7 +1293,17 @@ def _completed_recovery_fixture(
         child / "schedule_manifest.json",
         {"schedule_sha256": schedule_sha},
     )
-    _write_json(child / "experiment_result.json", {"status": "complete"})
+    _write_json(
+        child / "experiment_result.json",
+        {
+            "run_id": f"fixture-{recovered_task_id}",
+            "scenario": "checkpoint_generalization",
+            "metrics": {"effect_direction": "must-not-read"},
+            "aggregate_metrics": {},
+            "artifacts": {},
+            "notes": [],
+        },
+    )
     execution_health = {
         "valid": True,
         **{

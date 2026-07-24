@@ -1518,8 +1518,6 @@ def _recovery_identity_and_health(
         path = child / name
         if not path.is_file() or path.is_symlink():
             raise ConfigError(f"paired recovery 必需工件缺失：{name}")
-    if _read_json(child / "experiment_result.json").get("status") != "complete":
-        raise ConfigError("paired recovery experiment_result 非 complete")
     config = _read_yaml_object(child / "resolved_config.yaml")
     metadata = dict(_read_json(child / "manifest.json").get("metadata", {}))
     schedule = _read_json(child / "schedule_manifest.json")
