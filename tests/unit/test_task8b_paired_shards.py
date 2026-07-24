@@ -934,6 +934,59 @@ def test_pair12_h12_history_h06_async_composes_primary_bridge_and_binds_s(
     assert derived["paired_shard"]["physical_slot"] == "H06"
 
 
+def test_primary_bridge_accepts_imported_cross_host_approved_roots(
+    tmp_path: Path,
+) -> None:
+    primary = _canonical_manifest(tmp_path, role="primary", seed=2026090107)
+    high_root = tmp_path / "imported_high_host"
+    history, _authorization_path = _historical_adoption(
+        high_root,
+        primary,
+        selected=[
+            "isolation_no_memory",
+            "isolation_fact",
+            "isolation_expr",
+        ],
+        shard_id="h07-history",
+    )
+    high_sync = _completed_shard(
+        high_root,
+        primary,
+        selected=["isolation_sync"],
+        shard_id="h07-sync",
+    )
+    low_async = _completed_shard(
+        tmp_path,
+        primary,
+        selected=["isolation_async"],
+        shard_id="h01-async",
+    )
+    for path, partition_id in (
+        (history, "pair_07-primary-high-historical"),
+        (high_sync, "pair_07-primary-high"),
+        (low_async, "pair_07-primary-low"),
+    ):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["partition_id"] = partition_id
+        _write_json(path, value)
+    bridge_root = tmp_path / "approved_staging" / "bridges" / "pair07"
+    bridge_receipt = (
+        tmp_path / "approved_receipts" / "receipts" / "P07.json"
+    )
+
+    result = shards.compose_primary_checkpoint(
+        primary,
+        [history, high_sync, low_async],
+        bridge_root,
+        bridge_receipt,
+    )
+
+    assert result["checkpoint_receipt"]["producer_worker_id"] == "P07"
+    assert len(result["bridge_manifest"]["source_receipts"]) == 3
+    assert bridge_root.is_dir()
+    assert bridge_receipt.is_file()
+
+
 def test_reservation_rechecks_authorization_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

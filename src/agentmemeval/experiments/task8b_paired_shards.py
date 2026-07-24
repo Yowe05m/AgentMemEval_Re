@@ -2518,6 +2518,7 @@ def compose_primary_checkpoint(
     source_receipts: list[dict[str, Any]] = []
     staging_roots: set[Path] = set()
     receipt_roots: set[Path] = set()
+    approved_root_pairs: set[tuple[Path, Path]] = set()
     observed_sides: set[str] = set()
     partition_ids: set[str] = set()
     seen_shards: set[str] = set()
@@ -2558,6 +2559,7 @@ def compose_primary_checkpoint(
         _inside_approved(approved_receipts, path, label="primary shard receipt")
         staging_roots.add(staging)
         receipt_roots.add(approved_receipts)
+        approved_root_pairs.add((staging, approved_receipts))
         observed_sides.add(shard_role)
         partition_id = str(receipt.get("partition_id", ""))
         shard_id = str(receipt.get("shard_id", ""))
@@ -2642,21 +2644,32 @@ def compose_primary_checkpoint(
     if (
         set(task_rows) != set(EXPECTED_TASKS["primary"])
         or observed_sides != {"high", "low"}
-        or len(partition_ids) != 1
-        or len(staging_roots) != 1
-        or len(receipt_roots) != 1
+        or len(partition_ids) not in {1, len(source_receipts)}
+        or not staging_roots
+        or not receipt_roots
     ):
         raise ConfigError("primary bridge P task union/high-low 未闭合")
-    staging_root = next(iter(staging_roots))
-    approved_receipts = next(iter(receipt_roots))
+    target_root = Path(os.path.abspath(bridge_root))
+    target_receipt = Path(os.path.abspath(receipt_path))
+    target_pairs = []
+    for staging_root, approved_receipts in approved_root_pairs:
+        try:
+            target_root.relative_to(staging_root)
+            target_receipt.relative_to(approved_receipts)
+        except ValueError:
+            continue
+        target_pairs.append((staging_root, approved_receipts))
+    if len(target_pairs) != 1:
+        raise ConfigError("primary bridge target 未唯一绑定 source approved root pair")
+    staging_root, approved_receipts = target_pairs[0]
     target_root = _inside_approved(
         staging_root,
-        Path(bridge_root),
+        target_root,
         label="primary bridge root",
     )
     target_receipt = _inside_approved(
         approved_receipts,
-        Path(receipt_path),
+        target_receipt,
         label="primary bridge receipt",
     )
     expected_receipt = _strict_relative_target(
@@ -2981,7 +2994,8 @@ def compose_seed_pair(
         if (
             not role_shards
             or {str(row["shard_role"]) for row in role_shards} != {"high", "low"}
-            or len({str(row["partition_id"]) for row in role_shards}) != 1
+            or len({str(row["partition_id"]) for row in role_shards})
+            not in {1, len(role_shards)}
         ):
             raise ConfigError(f"paired-shard {role} high/low execution 不闭合")
     if side_slots["high"] & side_slots["low"]:
