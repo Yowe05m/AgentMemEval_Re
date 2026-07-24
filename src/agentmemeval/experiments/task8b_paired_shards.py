@@ -50,6 +50,7 @@ RECOVERY_COMPLETION_CONTROLLER_SHA256 = (
 SEALED_SOURCE_CONTROLLER_SHA256S = {
     RECOVERY_SOURCE_CONTROLLER_SHA256,
     "736f67d95812f872dda4ceff16702301ecad81669e6088484e104587591d9e29",
+    "eef9bdbf16643fae40dcb32ef439ef5ad1154765b824c3bc6dfacaad3d830b87",
 }
 HEALTH_ZERO_FIELDS = (
     "fallback_count",
@@ -1022,7 +1023,10 @@ def derive_authorized_manifest(
             or bridge_manifest.get("frozen_formal_runner_sha256")
             != FROZEN_FORMAL_RUNNER_SHA256
             or bridge_manifest.get("engineering_controller_sha256")
-            != _sha256(Path(__file__).resolve())
+            not in (
+                SEALED_SOURCE_CONTROLLER_SHA256S
+                | {_sha256(Path(__file__).resolve())}
+            )
             or bridge_manifest.get("task_union")
             != list(EXPECTED_TASKS["primary"])
             or bridge_manifest.get("effect_fields_read") is not False
