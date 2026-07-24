@@ -518,6 +518,53 @@ def write_json_with_legacy_recovery_audit_bridge(path, value):
     original_write_json_same_or_new(path, value)
 
 formal_runner._write_json_same_or_new = write_json_with_legacy_recovery_audit_bridge
+original_read_json_object = formal_runner._read_json_object
+original_verify_completed_task_identity = (
+    formal_runner._verify_completed_task_identity
+)
+
+def recovered_identity(identity):
+    if legacy_receipt_config_sha256 is None:
+        return identity
+    observed = identity.get("resolved_config_sha256")
+    if observed == corrected_receipt_config_sha256:
+        return identity
+    if observed != legacy_receipt_config_sha256:
+        return identity
+    return {
+        **identity,
+        "resolved_config_sha256": corrected_receipt_config_sha256,
+    }
+
+def read_json_with_recovered_task_receipt_bridge(path):
+    value = original_read_json_object(path)
+    if (
+        legacy_receipt_config_sha256 is None
+        or path.parent.name != "task_receipts"
+        or value.get("schema_version") != "task8-worker-task-receipt-v1"
+    ):
+        return value
+    task_row = value.get("task_row")
+    if not isinstance(task_row, dict):
+        return value
+    identity_audit = task_row.get("identity_audit")
+    if not isinstance(identity_audit, dict):
+        return value
+    bridged = recovered_identity(identity_audit)
+    if bridged is identity_audit:
+        return value
+    result = copy.deepcopy(value)
+    result["task_row"]["identity_audit"] = bridged
+    return result
+
+def verify_completed_task_identity_with_recovered_config(**kwargs):
+    identity = original_verify_completed_task_identity(**kwargs)
+    return recovered_identity(identity)
+
+formal_runner._read_json_object = read_json_with_recovered_task_receipt_bridge
+formal_runner._verify_completed_task_identity = (
+    verify_completed_task_identity_with_recovered_config
+)
 original_receipt_identity = formal_runner._receipt_identity
 
 def receipt_identity_with_recovered_config(manifest, *, consumer=False):

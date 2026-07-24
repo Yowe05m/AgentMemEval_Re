@@ -2143,16 +2143,26 @@ def test_frozen_recovery_resume_runs_in_isolated_subprocess(
         "_semantic_config = None\n"
         "def _write_json_same_or_new(path, value):\n"
         "    del path, value\n"
+        "def _read_json_object(path):\n"
+        "    return json.loads(path.read_text(encoding='utf-8'))\n"
+        "def _verify_completed_task_identity(**kwargs):\n"
+        "    return dict(kwargs['identity'])\n"
         "def _receipt_identity(manifest, *, consumer=False):\n"
         "    del consumer\n"
         "    return dict(manifest.get('receipt_identity', {}))\n"
         "def run_worker_manifest(path, *, receipt_root, resume_existing):\n"
         "    manifest = json.loads(path.read_text(encoding='utf-8'))\n"
+        "    marker = _read_json_object(Path(manifest['marker_path']))\n"
         f"    Path({str(trace)!r}).write_text("
         "json.dumps({'manifest': str(path), "
         "'receipt_root': str(receipt_root), "
         "'resume_existing': resume_existing, "
         "'receipt_config': _receipt_identity(manifest)"
+        ".get('resolved_config_sha256'), "
+        "'completed_config': _verify_completed_task_identity("
+        "identity={'resolved_config_sha256': '6' * 64})"
+        ".get('resolved_config_sha256'), "
+        "'marker_config': marker['task_row']['identity_audit']"
         ".get('resolved_config_sha256'), "
         "'canonicalizer_patched': callable(_semantic_config)}), "
         "encoding='utf-8')\n"
@@ -2162,10 +2172,24 @@ def test_frozen_recovery_resume_runs_in_isolated_subprocess(
     manifest = tmp_path / "derived.json"
     receipt_root = tmp_path / "receipts"
     receipt_root.mkdir()
+    marker = tmp_path / "run" / "task_receipts" / "isolation_sync.json"
+    marker.parent.mkdir(parents=True)
+    _write_json(
+        marker,
+        {
+            "schema_version": "task8-worker-task-receipt-v1",
+            "task_row": {
+                "identity_audit": {
+                    "resolved_config_sha256": "6" * 64,
+                },
+            },
+        },
+    )
     _write_json(
         manifest,
         {
             "worker_id": "P12",
+            "marker_path": str(marker),
             "receipt_identity": {"resolved_config_sha256": "6" * 64},
         },
     )
@@ -2187,6 +2211,8 @@ def test_frozen_recovery_resume_runs_in_isolated_subprocess(
     assert observed["resume_existing"] is True
     assert observed["canonicalizer_patched"] is True
     assert observed["receipt_config"] == "7" * 64
+    assert observed["completed_config"] == "7" * 64
+    assert observed["marker_config"] == "7" * 64
     assert Path(observed["manifest"]) == manifest
     assert manifest.read_bytes() == manifest_before
 
@@ -2204,6 +2230,7 @@ def test_frozen_recovery_resume_runs_in_isolated_subprocess(
     observed = json.loads(trace.read_text(encoding="utf-8"))
     assert result == {"status": "subprocess-pass"}
     assert observed["receipt_config"] == "7" * 64
+    assert observed["completed_config"] == "7" * 64
     assert manifest.read_bytes() == already_new_bytes
 
     third = json.loads(manifest.read_text(encoding="utf-8"))
@@ -2246,6 +2273,10 @@ def test_frozen_resume_bridge_preserves_exact_legacy_recovery_audit(
         "def _receipt_identity(manifest, *, consumer=False):\n"
         "    del consumer\n"
         "    return dict(manifest.get('receipt_identity', {}))\n"
+        "def _read_json_object(path):\n"
+        "    return json.loads(path.read_text(encoding='utf-8'))\n"
+        "def _verify_completed_task_identity(**kwargs):\n"
+        "    return dict(kwargs['identity'])\n"
         "def _write_json_same_or_new(path, value):\n"
         "    content = json.dumps(value, ensure_ascii=False, "
         "sort_keys=True, separators=(',', ':')).encode('utf-8') + b'\\n'\n"
