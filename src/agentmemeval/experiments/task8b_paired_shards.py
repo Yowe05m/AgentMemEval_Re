@@ -1567,19 +1567,40 @@ def _recovery_identity_and_health(
     audit = _read_json(child / "protocol_audit.json")
     validity = audit.get("run_validity")
     health = audit.get("execution_health")
-    validity_fields = {"execution_valid", "behavior_valid"}
+    validity_fields = {
+        "execution_valid",
+        "behavior_valid",
+        "paper_eligible",
+        "run_mode",
+        "status",
+    }
     if not isinstance(validity, dict) or set(validity) != validity_fields:
         raise ConfigError("paired recovery run_validity exact-key gate failed")
     if (
         validity["execution_valid"] is not True
         or validity["behavior_valid"] is not True
+        or validity["paper_eligible"] is not True
+        or validity["run_mode"] != "formal"
+        or validity["status"] != "valid_for_main_table"
     ):
         raise ConfigError("paired recovery run_validity gate failed")
-    health_fields = {"valid", *HEALTH_ZERO_FIELDS}
+    health_fields = {
+        "valid",
+        *HEALTH_ZERO_FIELDS,
+        "reward_conservation_violation_hand_ids",
+        "stack_conservation_violation_hand_ids",
+        "status",
+    }
     if not isinstance(health, dict) or set(health) != health_fields:
         raise ConfigError("paired recovery execution_health exact-key gate failed")
     if health["valid"] is not True:
         raise ConfigError("paired recovery execution_health.valid gate failed")
+    if (
+        health["status"] != "passed"
+        or health["reward_conservation_violation_hand_ids"] != []
+        or health["stack_conservation_violation_hand_ids"] != []
+    ):
+        raise ConfigError("paired recovery execution_health detail gate failed")
     for field in HEALTH_ZERO_FIELDS:
         value = health[field]
         if isinstance(value, bool) or not isinstance(value, int) or value != 0:

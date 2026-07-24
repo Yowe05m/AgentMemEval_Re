@@ -1191,6 +1191,8 @@ def _completed_recovery_fixture(
     mapping_keys: dict[object, int] | None = None,
     extra_health_field: bool = False,
     extra_validity_field: bool = False,
+    invalid_health_detail: bool = False,
+    invalid_validity_detail: bool = False,
     extra_expected_field: bool = False,
     legacy_controller: bool = False,
     archive_prefix: str | None = None,
@@ -1312,6 +1314,11 @@ def _completed_recovery_fixture(
             )
             for field in shards.HEALTH_ZERO_FIELDS
         },
+        "reward_conservation_violation_hand_ids": (
+            ["fixture-violation"] if invalid_health_detail else []
+        ),
+        "stack_conservation_violation_hand_ids": [],
+        "status": "passed",
     }
     if extra_health_field:
         execution_health["unexpected_counter"] = 0
@@ -1321,6 +1328,13 @@ def _completed_recovery_fixture(
             "run_validity": {
                 "execution_valid": True,
                 "behavior_valid": True,
+                "paper_eligible": True,
+                "run_mode": "formal",
+                "status": (
+                    "not_for_main_table"
+                    if invalid_validity_detail
+                    else "valid_for_main_table"
+                ),
                 **({"effect_like_extra": 1} if extra_validity_field else {}),
             },
             "execution_health": execution_health,
@@ -1633,6 +1647,18 @@ def test_recovery_requires_exact_identity_and_health_field_sets(
     )
     with pytest.raises(ConfigError, match="run_validity exact-key"):
         _run_completed_recovery(validity)
+    invalid_validity = _completed_recovery_fixture(
+        tmp_path / "invalid-validity",
+        invalid_validity_detail=True,
+    )
+    with pytest.raises(ConfigError, match="run_validity gate"):
+        _run_completed_recovery(invalid_validity)
+    invalid_health = _completed_recovery_fixture(
+        tmp_path / "invalid-health",
+        invalid_health_detail=True,
+    )
+    with pytest.raises(ConfigError, match="execution_health detail"):
+        _run_completed_recovery(invalid_health)
 
 
 @pytest.mark.parametrize("mode", ["missing", "wrong"])
