@@ -2173,6 +2173,29 @@ def recover_completed_execution(
     if manifest["role"] == "primary":
         if not isinstance(receipt_identity, dict):
             raise ConfigError("paired recovery primary receipt_identity 缺失")
+        checkpoint_publishers = [
+            candidate
+            for candidate in manifest["task_configs"]
+            if bool(candidate.get("publish_checkpoint_after", False))
+        ]
+        if len(checkpoint_publishers) != 1:
+            raise ConfigError(
+                "paired recovery primary checkpoint publisher 数量非法"
+            )
+        checkpoint_producer_identity = checkpoint_publishers[0].get(
+            "expected_identity"
+        )
+        if not isinstance(checkpoint_producer_identity, dict):
+            raise ConfigError(
+                "paired recovery primary checkpoint producer identity 缺失"
+            )
+        if not all(
+            field in checkpoint_producer_identity
+            for field in formal_runner.REQUIRED_IDENTITY_FIELDS
+        ):
+            raise ConfigError(
+                "paired recovery checkpoint producer identity 字段集合非法"
+            )
         if set(receipt_identity) != set(
             formal_runner.REQUIRED_IDENTITY_FIELDS
         ):
@@ -2182,24 +2205,28 @@ def recover_completed_execution(
         for field in formal_runner.REQUIRED_IDENTITY_FIELDS:
             if field == "resolved_config_sha256":
                 continue
-            if receipt_identity.get(field) != actual[field]:
+            if (
+                receipt_identity.get(field)
+                != checkpoint_producer_identity[field]
+            ):
                 raise ConfigError(
                     f"paired recovery receipt identity mismatch：{field}"
                 )
         observed_receipt_config = receipt_identity.get(
             "resolved_config_sha256"
         )
-        if observed_receipt_config != actual["resolved_config_sha256"]:
+        checkpoint_producer_config = checkpoint_producer_identity[
+            "resolved_config_sha256"
+        ]
+        if observed_receipt_config != checkpoint_producer_config:
             if not _is_sha256(observed_receipt_config) or not _is_sha256(
-                actual["resolved_config_sha256"]
+                checkpoint_producer_config
             ):
                 raise ConfigError(
                     "paired recovery legacy receipt config identity 非法"
                 )
             legacy_receipt_config_sha256 = observed_receipt_config
-            corrected_receipt_config_sha256 = actual[
-                "resolved_config_sha256"
-            ]
+            corrected_receipt_config_sha256 = checkpoint_producer_config
             checkpoint_receipt_identity_correction = {
                 "applied": True,
                 "old_resolved_config_sha256": (

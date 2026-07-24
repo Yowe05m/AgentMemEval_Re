@@ -1344,8 +1344,25 @@ def _completed_recovery_fixture(
     }
     for field in formal_runner.FLEET_COMMON_IDENTITY_FIELDS:
         manifest["common_identity"][field] = expected[field]
+    if extra_expected_field:
+        expected["unexpected_identity_field"] = "forbidden"
+    for task in manifest["task_configs"]:
+        if task["task_id"] == recovered_task_id:
+            task["expected_identity"] = expected
+        elif task["task_id"] in selected:
+            task["expected_identity"].update(
+                {
+                    field: expected[field]
+                    for field in formal_runner.FLEET_COMMON_IDENTITY_FIELDS
+                }
+            )
+    checkpoint_producer = next(
+        task
+        for task in manifest["task_configs"]
+        if task["task_id"] == selected[-1]
+    )
     manifest["receipt_identity"] = {
-        field: expected[field]
+        field: checkpoint_producer["expected_identity"][field]
         for field in formal_runner.REQUIRED_IDENTITY_FIELDS
     }
     manifest["receipt_identity"]["resolved_config_sha256"] = (
@@ -1353,11 +1370,6 @@ def _completed_recovery_fixture(
     )
     if extra_receipt_identity_field:
         manifest["receipt_identity"]["unexpected"] = "forbidden"
-    if extra_expected_field:
-        expected["unexpected_identity_field"] = "forbidden"
-    for task in manifest["task_configs"]:
-        if task["task_id"] == recovered_task_id:
-            task["expected_identity"] = expected
     _write_json(canonical, manifest)
     authorization = _authorization(
         tmp_path,
@@ -1716,6 +1728,50 @@ def test_recover_completed_execution_is_idempotent_and_sealable(
     )
     assert receipt["selected_task_ids"] == [task_id]
     assert receipt["effect_fields_read"] is False
+
+
+def test_recovery_corrects_receipt_to_checkpoint_publisher_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_frozen_standard_resume(monkeypatch)
+    paths = _completed_recovery_fixture(
+        tmp_path,
+        selected=["isolation_expr", "isolation_sync"],
+        recovered_task_id="isolation_expr",
+        receipt_config_override="9" * 64,
+    )
+    result = _run_completed_recovery(paths)
+    manifest = json.loads(paths["derived"].read_text(encoding="utf-8"))
+    publisher = next(
+        task
+        for task in manifest["task_configs"]
+        if task["publish_checkpoint_after"]
+    )
+    recovered_marker = json.loads(
+        (
+            paths["root"]
+            / "task_receipts"
+            / "isolation_expr.json"
+        ).read_text(encoding="utf-8")
+    )
+    recovery_audit = json.loads(
+        paths["certificate"]
+        .with_name(
+            f"{paths['certificate'].stem}.identity_correction_audit.json"
+        )
+        .read_text(encoding="utf-8")
+    )
+    correction = recovery_audit[
+        "checkpoint_receipt_identity_correction"
+    ]
+    assert result["shard_closed"] is True
+    assert correction["new_resolved_config_sha256"] == publisher[
+        "expected_identity"
+    ]["resolved_config_sha256"]
+    assert correction["new_resolved_config_sha256"] != recovered_marker[
+        "task_row"
+    ]["identity_audit"]["resolved_config_sha256"]
 
 
 def test_legacy_recovered_execution_seal_requires_bound_certificate(
