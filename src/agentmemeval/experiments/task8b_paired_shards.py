@@ -47,6 +47,9 @@ RECOVERY_SOURCE_CONTROLLER_SHA256 = (
 RECOVERY_COMPLETION_CONTROLLER_SHA256 = (
     "224cfc525abb97760f53d9694173b63cbe94e1151ad47c411162da6f4535d751"
 )
+SEALED_SOURCE_CONTROLLER_SHA256S = {
+    "736f67d95812f872dda4ceff16702301ecad81669e6088484e104587591d9e29",
+}
 HEALTH_ZERO_FIELDS = (
     "fallback_count",
     "memory_revision_fallback_count",
@@ -2540,7 +2543,10 @@ def compose_primary_checkpoint(
             or receipt.get("frozen_formal_runner_sha256")
             != FROZEN_FORMAL_RUNNER_SHA256
             or receipt.get("engineering_controller_sha256")
-            != _sha256(Path(__file__).resolve())
+            not in (
+                SEALED_SOURCE_CONTROLLER_SHA256S
+                | {_sha256(Path(__file__).resolve())}
+            )
             or receipt.get("pair_id") != PAIR_IDS[seed]
             or shard_role not in {"high", "low"}
             or receipt.get("physical_slot") != PHYSICAL_MAPPING[seed][shard_role]
@@ -2855,7 +2861,10 @@ def compose_seed_pair(
             or receipt.get("frozen_formal_runner_sha256")
             != FROZEN_FORMAL_RUNNER_SHA256
             or receipt.get("engineering_controller_sha256")
-            != _sha256(Path(__file__).resolve())
+            not in (
+                SEALED_SOURCE_CONTROLLER_SHA256S
+                | {_sha256(Path(__file__).resolve())}
+            )
             or receipt.get("pair_id") != PAIR_IDS[seed]
             or receipt.get("shard_role") not in {"high", "low"}
             or receipt.get("physical_slot")

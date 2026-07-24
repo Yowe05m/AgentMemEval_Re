@@ -968,6 +968,9 @@ def test_primary_bridge_accepts_imported_cross_host_approved_roots(
     ):
         value = json.loads(path.read_text(encoding="utf-8"))
         value["partition_id"] = partition_id
+        value["engineering_controller_sha256"] = next(
+            iter(shards.SEALED_SOURCE_CONTROLLER_SHA256S)
+        )
         _write_json(path, value)
     bridge_root = tmp_path / "approved_staging" / "bridges" / "pair07"
     bridge_receipt = (
