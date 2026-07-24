@@ -1410,8 +1410,15 @@ def _mock_frozen_standard_resume(monkeypatch: pytest.MonkeyPatch) -> None:
         *,
         scientific_checkout: Path,
         receipt_root: Path,
+        legacy_audit_path: Path | None = None,
+        legacy_audit_sha256: str | None = None,
     ) -> dict[str, object]:
-        del scientific_checkout, receipt_root
+        del (
+            scientific_checkout,
+            receipt_root,
+            legacy_audit_path,
+            legacy_audit_sha256,
+        )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         root = Path(manifest["instance_identity"]["output_path"])
         if (root / "completion_receipt.json").exists():
@@ -1504,11 +1511,53 @@ def test_recover_completed_execution_is_idempotent_and_sealable(
         recovered_task_id=task_id,
     )
     first = _run_completed_recovery(paths)
+    task_audit_path = (
+        paths["root"] / "runs" / task_id / "task_identity_audit.json"
+    )
+    task_audit = json.loads(task_audit_path.read_text(encoding="utf-8"))
+    marker = json.loads(
+        (
+            paths["root"] / "task_receipts" / f"{task_id}.json"
+        ).read_text(encoding="utf-8")
+    )
+    expected_standard_audit = {
+        "schema_version": "task8-task-identity-audit-v1",
+        "task_id": task_id,
+        "protocol_status": json.loads(
+            paths["derived"].read_text(encoding="utf-8")
+        )["protocol_status"],
+        "actual": marker["task_row"]["identity_audit"],
+        "status": "verified",
+    }
+    assert task_audit == expected_standard_audit
+    assert set(marker["task_row"]["identity_audit"]) == {
+        *formal_runner.REQUIRED_IDENTITY_FIELDS,
+        "code_dirty",
+    }
+    recovery_audit_path = paths["certificate"].with_name(
+        f"{paths['certificate'].stem}.identity_correction_audit.json"
+    )
+    recovery_audit = json.loads(
+        recovery_audit_path.read_text(encoding="utf-8")
+    )
+    certificate = json.loads(
+        paths["certificate"].read_text(encoding="utf-8")
+    )
+    assert recovery_audit["status"] == "verified-recovered"
+    assert recovery_audit["effect_fields_read"] is False
+    assert certificate["identity_correction_audit_path"] == str(
+        recovery_audit_path
+    )
+    assert certificate["identity_correction_audit_sha256"] == _sha(
+        recovery_audit_path
+    )
     frozen = {
         path: path.read_bytes()
         for path in (
             paths["certificate"],
             paths["ledger"],
+            recovery_audit_path,
+            task_audit_path,
             paths["root"] / "state.tsv",
             paths["root"] / "files.tsv",
             paths["root"] / "completion_receipt.json",
@@ -1529,6 +1578,68 @@ def test_recover_completed_execution_is_idempotent_and_sealable(
     )
     assert receipt["selected_task_ids"] == [task_id]
     assert receipt["effect_fields_read"] is False
+
+
+def test_recovery_preserves_exact_legacy_custom_identity_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_frozen_standard_resume(monkeypatch)
+    paths = _completed_recovery_fixture(tmp_path)
+    manifest = json.loads(paths["derived"].read_text(encoding="utf-8"))
+    task = next(
+        row
+        for row in manifest["task_configs"]
+        if row["task_id"] == "isolation_async"
+    )
+    child = paths["root"] / "runs" / "isolation_async"
+    actual, health, correction = shards._recovery_identity_and_health(
+        manifest,
+        task,
+        child,
+    )
+    legacy = {
+        "schema_version": "task8-task-identity-audit-v1",
+        "task_id": "isolation_async",
+        "protocol_status": manifest["protocol_status"],
+        "actual": actual,
+        "expected": task["expected_identity"],
+        "identity_correction": correction,
+        "health": health,
+        "status": "verified-recovered",
+        "effect_fields_read": False,
+    }
+    audit_path = child / "task_identity_audit.json"
+    _write_json(audit_path, legacy)
+    legacy_bytes = audit_path.read_bytes()
+    baseline = json.loads(paths["baseline"].read_text(encoding="utf-8"))
+    baseline["pre_recovery_files"] = shards._directory_manifest(paths["root"])
+    with tarfile.open(paths["archive"], mode="w:gz") as handle:
+        for row in baseline["pre_recovery_files"]:
+            relative = row["relative_path"]
+            handle.add(
+                paths["root"] / relative,
+                arcname=relative,
+                recursive=False,
+            )
+    baseline["pre_recovery_archive_sha256"] = _sha(paths["archive"])
+    _write_json(paths["baseline"], baseline)
+
+    result = _run_completed_recovery(paths)
+
+    assert result["shard_closed"] is True
+    assert audit_path.read_bytes() == legacy_bytes
+    marker = json.loads(
+        (
+            paths["root"]
+            / "task_receipts"
+            / "isolation_async.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert set(marker["task_row"]["identity_audit"]) == {
+        *formal_runner.REQUIRED_IDENTITY_FIELDS,
+        "code_dirty",
+    }
 
 
 def test_recover_completed_execution_rejects_incomplete_or_unhealthy_data(
@@ -1585,8 +1696,16 @@ def test_h12_expr_recovery_does_not_forge_sync_completion(
         *,
         scientific_checkout: Path,
         receipt_root: Path,
+        legacy_audit_path: Path | None = None,
+        legacy_audit_sha256: str | None = None,
     ) -> dict[str, object]:
-        del manifest_path, scientific_checkout, receipt_root
+        del (
+            manifest_path,
+            scientific_checkout,
+            receipt_root,
+            legacy_audit_path,
+            legacy_audit_sha256,
+        )
         raise ConfigError("simulated interruption before frozen Sync execution")
 
     monkeypatch.setattr(
@@ -1802,6 +1921,8 @@ def test_frozen_recovery_resume_runs_in_isolated_subprocess(
         "import json\n"
         "from pathlib import Path\n"
         "_semantic_config = None\n"
+        "def _write_json_same_or_new(path, value):\n"
+        "    del path, value\n"
         "def run_worker_manifest(path, *, receipt_root, resume_existing):\n"
         f"    Path({str(trace)!r}).write_text("
         "json.dumps({'manifest': str(path), "
@@ -1831,3 +1952,127 @@ def test_frozen_recovery_resume_runs_in_isolated_subprocess(
     assert observed["resume_existing"] is True
     assert observed["canonicalizer_patched"] is True
     assert Path(observed["manifest"]) == manifest
+
+
+def test_frozen_resume_bridge_preserves_exact_legacy_recovery_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout = tmp_path / "frozen"
+    package = checkout / "src" / "agentmemeval" / "experiments"
+    package.mkdir(parents=True)
+    (checkout / "src" / "agentmemeval" / "__init__.py").write_text(
+        "",
+        encoding="utf-8",
+    )
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "formal_runner.py").write_text(
+        "import json\n"
+        "_semantic_config = None\n"
+        "def _write_json_same_or_new(path, value):\n"
+        "    content = json.dumps(value, ensure_ascii=False, "
+        "sort_keys=True, separators=(',', ':')).encode('utf-8') + b'\\n'\n"
+        "    if path.exists() and path.read_bytes() != content:\n"
+        "        raise RuntimeError('resume refused evidence rewrite')\n"
+        "    if not path.exists():\n"
+        "        path.write_bytes(content)\n"
+        "def run_worker_manifest(path, *, receipt_root, resume_existing):\n"
+        "    del receipt_root\n"
+        "    payload = json.loads(path.read_text(encoding='utf-8'))\n"
+        "    from pathlib import Path\n"
+        "    audit_path = Path(payload['audit_path'])\n"
+        "    if payload.get('tamper_before_write'):\n"
+        "        audit_path.write_text("
+        "json.dumps({'tampered': True}), encoding='utf-8')\n"
+        "    _write_json_same_or_new("
+        "audit_path, payload['standard_audit'])\n"
+        "    return {'status': 'bridge-pass', "
+        "'resume_existing': resume_existing}\n",
+        encoding="utf-8",
+    )
+    actual = {
+        "code_sha": shards.FROZEN_CODE_SHA,
+        "code_dirty": False,
+        "resolved_config_sha256": "1" * 64,
+        "prompt_sha256": "2" * 64,
+        "model_fingerprint": "3" * 64,
+        "embedding_fingerprint": "4" * 64,
+        "schedule_sha256": "5" * 64,
+    }
+    standard = {
+        "schema_version": "task8-task-identity-audit-v1",
+        "task_id": "isolation_sync",
+        "protocol_status": "frozen/expedited-formal-candidate",
+        "actual": actual,
+        "status": "verified",
+    }
+    legacy = {
+        **standard,
+        "expected": {
+            field: actual[field]
+            for field in formal_runner.REQUIRED_IDENTITY_FIELDS
+        },
+        "identity_correction": {"only": "mapping-keys"},
+        "health": {"execution_valid": True},
+        "status": "verified-recovered",
+        "effect_fields_read": False,
+    }
+    audit_path = tmp_path / "task_identity_audit.json"
+    _write_json(audit_path, legacy)
+    legacy_bytes = audit_path.read_bytes()
+    manifest = tmp_path / "derived.json"
+    _write_json(
+        manifest,
+        {"audit_path": str(audit_path), "standard_audit": standard},
+    )
+    receipt_root = tmp_path / "receipts"
+    receipt_root.mkdir()
+    monkeypatch.setattr(
+        shards,
+        "_verify_scientific_checkout",
+        lambda _path: package / "formal_runner.py",
+    )
+
+    result = shards._resume_recovered_execution(
+        manifest,
+        scientific_checkout=checkout.resolve(),
+        receipt_root=receipt_root.resolve(),
+        legacy_audit_path=audit_path.resolve(),
+        legacy_audit_sha256=_sha(audit_path),
+    )
+
+    assert result == {"status": "bridge-pass", "resume_existing": True}
+    assert audit_path.read_bytes() == legacy_bytes
+
+    _write_json(
+        manifest,
+        {
+            "audit_path": str(audit_path),
+            "standard_audit": standard,
+            "tamper_before_write": True,
+        },
+    )
+    with pytest.raises(ConfigError, match="frozen resume failed"):
+        shards._resume_recovered_execution(
+            manifest,
+            scientific_checkout=checkout.resolve(),
+            receipt_root=receipt_root.resolve(),
+            legacy_audit_path=audit_path.resolve(),
+            legacy_audit_sha256=_sha(audit_path),
+        )
+
+    _write_json(audit_path, legacy)
+    other_audit = tmp_path / "other_task_identity_audit.json"
+    _write_json(other_audit, legacy)
+    _write_json(
+        manifest,
+        {"audit_path": str(other_audit), "standard_audit": standard},
+    )
+    with pytest.raises(ConfigError, match="frozen resume failed"):
+        shards._resume_recovered_execution(
+            manifest,
+            scientific_checkout=checkout.resolve(),
+            receipt_root=receipt_root.resolve(),
+            legacy_audit_path=audit_path.resolve(),
+            legacy_audit_sha256=_sha(audit_path),
+        )

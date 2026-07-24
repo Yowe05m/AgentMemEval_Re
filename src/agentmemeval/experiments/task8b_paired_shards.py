@@ -411,6 +411,7 @@ print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 _FROZEN_RECOVERY_RESUME_BOOTSTRAP = """\
 import copy
+import hashlib
 import json
 import pathlib
 import sys
@@ -437,6 +438,68 @@ def preserving_mapping_keys(config):
     return value
 
 formal_runner._semantic_config = preserving_mapping_keys
+original_write_json_same_or_new = formal_runner._write_json_same_or_new
+legacy_audit_raw_path = pathlib.Path(sys.argv[4]) if sys.argv[4] else None
+legacy_audit_sha256 = sys.argv[5] or None
+
+def has_symlink_component(path):
+    return any(candidate.is_symlink() for candidate in (path, *path.parents))
+
+if legacy_audit_raw_path is not None:
+    if (
+        not legacy_audit_raw_path.is_file()
+        or has_symlink_component(legacy_audit_raw_path)
+    ):
+        raise RuntimeError("authorized legacy recovery audit path unsafe")
+    legacy_audit_path = legacy_audit_raw_path.resolve(strict=True)
+else:
+    legacy_audit_path = None
+
+def write_json_with_legacy_recovery_audit_bridge(path, value):
+    if has_symlink_component(path):
+        return original_write_json_same_or_new(path, value)
+    resolved = path.resolve(strict=True) if path.exists() else path.resolve()
+    if legacy_audit_path is not None and resolved == legacy_audit_path:
+        if (
+            legacy_audit_raw_path is None
+            or not legacy_audit_raw_path.is_file()
+            or has_symlink_component(legacy_audit_raw_path)
+            or legacy_audit_raw_path.resolve(strict=True) != legacy_audit_path
+            or not path.is_file()
+        ):
+            raise RuntimeError("authorized legacy recovery audit missing")
+        observed_sha256 = hashlib.sha256(
+            legacy_audit_raw_path.read_bytes()
+        ).hexdigest()
+        if observed_sha256 != legacy_audit_sha256:
+            raise RuntimeError("authorized legacy recovery audit SHA changed")
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        legacy_fields = {
+            "schema_version",
+            "task_id",
+            "protocol_status",
+            "actual",
+            "expected",
+            "identity_correction",
+            "health",
+            "status",
+            "effect_fields_read",
+        }
+        if set(existing) == legacy_fields:
+            if (
+                existing["schema_version"] != value.get("schema_version")
+                or existing["task_id"] != value.get("task_id")
+                or existing["protocol_status"] != value.get("protocol_status")
+                or existing["actual"] != value.get("actual")
+                or existing["status"] != "verified-recovered"
+                or existing["effect_fields_read"] is not False
+            ):
+                raise RuntimeError("legacy recovery audit bridge mismatch")
+            return
+        raise RuntimeError("authorized legacy recovery audit schema mismatch")
+    original_write_json_same_or_new(path, value)
+
+formal_runner._write_json_same_or_new = write_json_with_legacy_recovery_audit_bridge
 result = formal_runner.run_worker_manifest(
     pathlib.Path(sys.argv[2]),
     receipt_root=pathlib.Path(sys.argv[3]),
@@ -1628,10 +1691,19 @@ def _resume_recovered_execution(
     *,
     scientific_checkout: Path,
     receipt_root: Path,
+    legacy_audit_path: Path | None = None,
+    legacy_audit_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Resume with the frozen runner after publishing the recovered task receipt."""
 
     _verify_scientific_checkout(scientific_checkout)
+    if (legacy_audit_path is None) != (legacy_audit_sha256 is None):
+        raise ConfigError("paired recovery legacy audit bridge 参数不闭合")
+    if legacy_audit_path is not None:
+        if not legacy_audit_path.is_file() or legacy_audit_path.is_symlink():
+            raise ConfigError("paired recovery legacy audit bridge 路径非法")
+        if _sha256(legacy_audit_path) != legacy_audit_sha256:
+            raise ConfigError("paired recovery legacy audit bridge SHA 不匹配")
     try:
         completed = subprocess.run(
             [
@@ -1642,6 +1714,8 @@ def _resume_recovered_execution(
                 str(scientific_checkout),
                 str(manifest_path),
                 str(receipt_root),
+                str(legacy_audit_path) if legacy_audit_path is not None else "",
+                legacy_audit_sha256 or "",
             ],
             cwd=str(scientific_checkout),
             check=True,
@@ -1725,7 +1799,18 @@ def recover_completed_execution(
         Path(ledger_entry_path),
         label="paired recovery ledger entry",
     )
-    if _paths_overlap(certificate, root) or _paths_overlap(ledger, root):
+    recovery_audit = _inside_approved(
+        approved_receipts,
+        certificate.with_name(
+            f"{certificate.stem}.identity_correction_audit.json"
+        ),
+        label="paired recovery identity correction audit",
+    )
+    if (
+        _paths_overlap(certificate, root)
+        or _paths_overlap(ledger, root)
+        or _paths_overlap(recovery_audit, root)
+    ):
         raise ConfigError("paired recovery audit outputs 不得写入 attempt_root")
     baseline = _read_json(baseline_file)
     baseline_fields = {
@@ -1840,19 +1925,66 @@ def recover_completed_execution(
         task,
         child,
     )
-    audit = {
+    standard_audit = {
         "schema_version": "task8-task-identity-audit-v1",
         "task_id": task_id,
         "protocol_status": manifest["protocol_status"],
         "actual": actual,
+        "status": "verified",
+    }
+    recovery_audit_body = {
+        "schema_version": "task8b-paired-identity-correction-audit-v1",
+        "status": "verified-recovered",
+        "recovery_id": recovery_id,
+        "worker_id": worker_id,
+        "seed": seed,
+        "task_id": task_id,
+        "attempt_root": str(root),
+        "standard_task_identity_audit_path": str(
+            child / "task_identity_audit.json"
+        ),
+        "actual": actual,
         "expected": task["expected_identity"],
         "identity_correction": correction,
         "health": health,
-        "status": "verified-recovered",
         "effect_fields_read": False,
     }
     audit_path = child / "task_identity_audit.json"
-    _same_or_new_json(audit_path, audit)
+    legacy_audit_bridge = False
+    if audit_path.exists():
+        existing_audit = _read_json(audit_path)
+        legacy_fields = {
+            "schema_version",
+            "task_id",
+            "protocol_status",
+            "actual",
+            "expected",
+            "identity_correction",
+            "health",
+            "status",
+            "effect_fields_read",
+        }
+        if existing_audit != standard_audit and (
+            set(existing_audit) != legacy_fields
+            or existing_audit["schema_version"]
+            != standard_audit["schema_version"]
+            or existing_audit["task_id"] != task_id
+            or existing_audit["protocol_status"]
+            != manifest["protocol_status"]
+            or existing_audit["actual"] != actual
+            or existing_audit["expected"] != task["expected_identity"]
+            or existing_audit["identity_correction"] != correction
+            or existing_audit["health"] != health
+            or existing_audit["status"] != "verified-recovered"
+            or existing_audit["effect_fields_read"] is not False
+        ):
+            raise ConfigError(
+                "paired recovery existing task identity audit 非标准且非精确兼容"
+            )
+        legacy_audit_bridge = existing_audit != standard_audit
+    else:
+        _same_or_new_json(audit_path, standard_audit)
+    _same_or_new_json(recovery_audit, recovery_audit_body)
     task_row = {
         "task_id": task_id,
         "memory_mode": task.get("memory_mode"),
@@ -1890,6 +2022,10 @@ def recover_completed_execution(
         manifest_path,
         scientific_checkout=Path(str(shard["scientific_checkout"])),
         receipt_root=approved_receipts,
+        legacy_audit_path=(audit_path if legacy_audit_bridge else None),
+        legacy_audit_sha256=(
+            _sha256(audit_path) if legacy_audit_bridge else None
+        ),
     )
     completion_path = root / "completion_receipt.json"
     files_path = root / "files.tsv"
@@ -1949,6 +2085,8 @@ def recover_completed_execution(
         "baseline_sha256": _sha256(baseline_file),
         "pre_recovery_archive_sha256": _sha256(archive),
         "task_identity_audit_sha256": _sha256(audit_path),
+        "identity_correction_audit_path": str(recovery_audit),
+        "identity_correction_audit_sha256": _sha256(recovery_audit),
         "task_receipt_sha256": _sha256(marker_path),
         "identity_correction": correction,
         "health": health,
