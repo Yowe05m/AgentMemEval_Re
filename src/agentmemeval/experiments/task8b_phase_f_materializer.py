@@ -60,7 +60,7 @@ from agentmemeval.experiments.formal_runner import (
 SOURCE_MAP_SCHEMA = "task8b-six-seed-phase-f-source-map-v1"
 PROTOCOL_ID = "TASK8B-SIX-SEED-PAIR-SHARD-20260723"
 ANALYSIS_CONTRACT_ID = "task8b-phase-f-six-seed-v1"
-APPROVED_PREUNLOCK_SHA256 = "f790a18a5947bc4223eff6957942b354a0fa442436903cbe6573a0b31b93c4e0"
+APPROVED_PREUNLOCK_SHA256 = "2da0d149b30b815a747442ebc71661f17f75642aef39b57fd95aad7c2370f300"
 WORKER_MANIFEST_SCHEMA = "task8-worker-manifest-v1"
 TASK_RECEIPT_SCHEMA = "task8-worker-task-receipt-v1"
 TASK_RESULTS_SCHEMA = "task8-worker-task-results-v1"

@@ -263,7 +263,7 @@ def _make_source_map(tmp_path: Path) -> tuple[Path, dict[str, object]]:
             / "docs"
             / "task-records"
             / "TASK8B"
-            / "phase_f_pre_unlock_manifest_06395de_six_seed.json"
+            / "phase_f_pre_unlock_manifest_b382978_six_seed.json"
         ).read_bytes()
     )
     source_receipt = root / "source_receipt.json"
@@ -739,7 +739,7 @@ def _make_source_map(tmp_path: Path) -> tuple[Path, dict[str, object]]:
         "analysis": {
             "analysis_contract": _local_ref(contract, root),
             "pre_unlock_manifest": _local_ref(preunlock, root),
-            "unlocked_at_utc": "2026-07-25T12:00:00+00:00",
+            "unlocked_at_utc": "2026-07-25T15:00:00+00:00",
             "unlocked_by": "pytest-materializer",
         },
         "workers": workers,
