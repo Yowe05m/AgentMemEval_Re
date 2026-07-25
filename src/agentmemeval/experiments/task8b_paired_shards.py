@@ -604,6 +604,8 @@ def receipt_identity_with_recovered_config(manifest, *, consumer=False):
     if observed == corrected_receipt_config_sha256:
         return identity
     if observed != legacy_receipt_config_sha256:
+        if manifest.get("role") == "secondary":
+            return identity
         raise RuntimeError("legacy checkpoint receipt identity mismatch")
     return {
         **identity,

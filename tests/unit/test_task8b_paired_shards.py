@@ -2372,6 +2372,7 @@ def test_frozen_recovery_resume_runs_in_isolated_subprocess(
         manifest,
         {
             "worker_id": "P12",
+            "role": "primary",
             "marker_path": str(marker),
             "receipt_identity": {"resolved_config_sha256": "6" * 64},
         },
@@ -2416,7 +2417,26 @@ def test_frozen_recovery_resume_runs_in_isolated_subprocess(
     assert observed["completed_config"] == "7" * 64
     assert manifest.read_bytes() == already_new_bytes
 
+    secondary = json.loads(manifest.read_text(encoding="utf-8"))
+    secondary["role"] = "secondary"
+    secondary["receipt_identity"]["resolved_config_sha256"] = "8" * 64
+    _write_json(manifest, secondary)
+    secondary_bytes = manifest.read_bytes()
+    result = shards._resume_recovered_execution(
+        manifest,
+        scientific_checkout=checkout.resolve(),
+        receipt_root=receipt_root.resolve(),
+        legacy_receipt_config_sha256="6" * 64,
+        corrected_receipt_config_sha256="7" * 64,
+    )
+    observed = json.loads(trace.read_text(encoding="utf-8"))
+    assert result == {"status": "subprocess-pass"}
+    assert observed["receipt_config"] == "8" * 64
+    assert observed["completed_config"] == "7" * 64
+    assert manifest.read_bytes() == secondary_bytes
+
     third = json.loads(manifest.read_text(encoding="utf-8"))
+    third["role"] = "primary"
     third["receipt_identity"]["resolved_config_sha256"] = "8" * 64
     _write_json(manifest, third)
     with pytest.raises(ConfigError, match="frozen resume failed"):
