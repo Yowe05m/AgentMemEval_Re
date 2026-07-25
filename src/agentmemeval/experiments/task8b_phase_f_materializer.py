@@ -1515,12 +1515,21 @@ def _execute_copy_requests(
                     raise ConfigError(
                         f"archive {source_id} 含 symlink/hardlink/special member：{name}"
                     )
-                observed_regular.add(name)
                 manifest_entry = catalog.entries.get(name)
                 if manifest_entry is None:
-                    raise ConfigError(
-                        f"archive {source_id} regular member 未被 manifest 记录：{name}"
-                    )
+                    # Export tooling may append control-plane files (for
+                    # example, source_roots.tsv) after freezing the payload
+                    # manifest.  The outer archive SHA still binds those
+                    # bytes.  They are ineligible as materialization sources:
+                    # every requested member was already required to exist in
+                    # catalog.entries while parsing the source map.
+                    if name in requested:
+                        raise ConfigError(
+                            f"archive {source_id} requested regular member "
+                            f"未被 manifest 记录：{name}"
+                        )
+                    continue
+                observed_regular.add(name)
                 if member.size != manifest_entry.size:
                     raise ConfigError(f"archive {source_id} member size 非法：{name}")
                 request = requested.get(name)

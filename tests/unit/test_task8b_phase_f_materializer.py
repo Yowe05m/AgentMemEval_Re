@@ -1112,6 +1112,119 @@ def test_materializer_hashes_unselected_archive_members(tmp_path: Path) -> None:
     assert partial.is_dir()
 
 
+def test_materializer_ignores_unrequested_regular_export_control_member(
+    tmp_path: Path,
+) -> None:
+    source_map_path, source_map = _make_source_map(tmp_path)
+    root = source_map_path.parent
+    source_archive = root / "formal.tar.gz"
+    archive = root / "formal_with_unmanifested_control.tar.gz"
+    with (
+        tarfile.open(source_archive, mode="r:gz") as source,
+        tarfile.open(archive, mode="w:gz") as target,
+    ):
+        for member in source:
+            assert member.isreg()
+            extracted = source.extractfile(member)
+            assert extracted is not None
+            target.addfile(member, extracted)
+        payload = b"opaque export-control provenance\n"
+        info = tarfile.TarInfo("task8b_full_matrix_exports/H01/source_roots.tsv")
+        info.size = len(payload)
+        target.addfile(info, io.BytesIO(payload))
+    manifest = root / "formal_manifest.tsv"
+    _rebind_formal_archive(
+        source_map_path,
+        source_map,
+        archive_path=archive,
+        manifest_path=manifest,
+        manifest_format="sha256-size-path-tsv-v1",
+        has_header=True,
+        profile="recovery-support",
+    )
+    variant = root / "unmanifested_control_source_map.json"
+    _write_json(variant, source_map)
+    output = tmp_path / "unmanifested-control-canonical"
+
+    result = materialize_task8b_phase_f(variant, output)
+
+    assert result["status"] == "complete"
+    assert result["formal_effect_fields_read"] is False
+    assert not list(output.rglob("source_roots.tsv"))
+
+
+def test_materializer_still_requires_requested_member_in_manifest(
+    tmp_path: Path,
+) -> None:
+    source_map_path, source_map = _make_source_map(tmp_path)
+    root = source_map_path.parent
+    manifest = root / "formal_manifest.tsv"
+    requested_suffix = "payload/P07/task_receipts/isolation_no_memory.json"
+    rows = manifest.read_text(encoding="utf-8").splitlines()
+    manifest.write_text(
+        "\n".join(row for row in rows if not row.endswith(requested_suffix)) + "\n",
+        encoding="utf-8",
+        newline="",
+    )
+    _rebind_formal_archive(
+        source_map_path,
+        source_map,
+        archive_path=root / "formal.tar.gz",
+        manifest_path=manifest,
+        manifest_format="sha256-size-path-tsv-v1",
+        has_header=True,
+        profile="recovery-support",
+    )
+    variant = root / "requested_member_missing_manifest.json"
+    _write_json(variant, source_map)
+    output = tmp_path / "requested-member-missing-output"
+
+    with pytest.raises(ConfigError, match="archive manifest 不含 member"):
+        materialize_task8b_phase_f(variant, output)
+
+    assert not output.exists()
+
+
+def test_materializer_still_hashes_each_requested_member(tmp_path: Path) -> None:
+    source_map_path, source_map = _make_source_map(tmp_path)
+    root = source_map_path.parent
+    source_archive = root / "formal.tar.gz"
+    archive = root / "formal_with_tampered_requested_member.tar.gz"
+    target_member = "payload/P07/runs/isolation_no_memory/metrics.json"
+    with (
+        tarfile.open(source_archive, mode="r:gz") as source,
+        tarfile.open(archive, mode="w:gz") as target,
+    ):
+        for member in source:
+            assert member.isreg()
+            extracted = source.extractfile(member)
+            assert extracted is not None
+            payload = extracted.read()
+            if member.name == target_member:
+                payload = bytes([payload[0] ^ 1]) + payload[1:]
+            target.addfile(member, io.BytesIO(payload))
+    manifest = root / "formal_manifest.tsv"
+    _rebind_formal_archive(
+        source_map_path,
+        source_map,
+        archive_path=archive,
+        manifest_path=manifest,
+        manifest_format="sha256-size-path-tsv-v1",
+        has_header=True,
+        profile="recovery-support",
+    )
+    variant = root / "tampered_requested_member_source_map.json"
+    _write_json(variant, source_map)
+    output = tmp_path / "tampered-requested-member-output"
+    partial = tmp_path / f"tampered-requested-member-output.partial-{_sha256(variant)[:12]}"
+
+    with pytest.raises(ConfigError, match="stream size/SHA-256"):
+        materialize_task8b_phase_f(variant, output)
+
+    assert not output.exists()
+    assert partial.is_dir()
+
+
 def test_materializer_rejects_mixed_archive_seal_binding(tmp_path: Path) -> None:
     source_map_path, source_map = _make_source_map(tmp_path)
     seal = source_map_path.parent / "source_seal.json"
