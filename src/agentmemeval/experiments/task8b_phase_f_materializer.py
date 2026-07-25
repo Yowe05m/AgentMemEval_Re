@@ -38,8 +38,11 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -60,7 +63,20 @@ from agentmemeval.experiments.formal_runner import (
 SOURCE_MAP_SCHEMA = "task8b-six-seed-phase-f-source-map-v1"
 PROTOCOL_ID = "TASK8B-SIX-SEED-PAIR-SHARD-20260723"
 ANALYSIS_CONTRACT_ID = "task8b-phase-f-six-seed-v1"
+AUTHORITATIVE_REAL_MATERIALIZATION_ID = (
+    "task8b-six-seed-real-a-catalog-20260725-state-tail-p11-controller-v3"
+)
+AUTHORITATIVE_REAL_SOURCE_MAP_SHA256 = (
+    "14c50a5a3088aa22d293f43390911fc2dce169b8ef8cde954e1dad77d9984433"
+)
 APPROVED_PREUNLOCK_SHA256 = "2da0d149b30b815a747442ebc71661f17f75642aef39b57fd95aad7c2370f300"
+APPROVED_POST_UNBLIND_ANALYSIS_FREEZE_SHA256 = (
+    "ae9f554fbad03e125fa9ae3a76bccb3ebddebbc67eb5b10d96b4cac9dabd4792"
+)
+APPROVED_POST_UNBLIND_UNLOCKED_BY = (
+    "codex-task8b-phase-f-post-failed-partial-output-"
+    "secondary-async-label-supplement-v5"
+)
 WORKER_MANIFEST_SCHEMA = "task8-worker-manifest-v1"
 TASK_RECEIPT_SCHEMA = "task8-worker-task-receipt-v1"
 TASK_RESULTS_SCHEMA = "task8-worker-task-results-v1"
@@ -147,6 +163,20 @@ RECOVERY_ADOPTION_SCHEMA = "task8b-same-attempt-task-adoption-v1"
 RECOVERY_ATTESTATION_SCHEMA = "task8b-task1-adoption-attestation-v1"
 RECOVERY_CANONICAL_AUDIT_SCHEMA = "task8b-canonicalization-equivalence-audit-v1"
 FROZEN_SCIENTIFIC_CODE_SHA = "a1d1eb97efb41d52585057ab7c9594dcd19227ae"
+AUTHORITATIVE_RECOVERY_VERIFIER_CODE_SHA = (
+    "c00da5515af3d874b3499010a02addca2c75fbe4"
+)
+AUTHORITATIVE_RECOVERY_CONTROLLER_SHA256 = (
+    "71f7c7011c79447f32f7e36b5b0379329db67be762f0f140d1de9aae0d46f365"
+)
+AUTHORITATIVE_RECOVERY_FORMAL_RUNNER_SHA256 = (
+    "c4b601ff0de2c27a57ee246efcf91d21f502f27c652d20fd6fa7cfd925a17d5e"
+)
+AUTHORITATIVE_RECOVERY_VERIFIER_IDENTITY_SOURCE_SHA256 = (
+    "6cb3ae7783800debfc3dd50e98e0397a818dca2d71d933f50e6316cae95edeab"
+)
+RECOVERY_CODE_IDENTITY_EVIDENCE_STATUS = "SELF_ASSERTED_CONSISTENT_UNCLOSED"
+CANONICAL_PAPER_ELIGIBILITY = "PENDING_DECLARED_LIMITATION_REVIEW"
 RECOVERY_EVIDENCE_FIELDS = (
     "protocol_amendment_sha256",
     "verifier_code_sha",
@@ -172,8 +202,311 @@ RECOVERY_SUPPORT_TARGETS = {
     "pre_recovery_manifest": "pre_recovery_manifest.bin",
     "authorization": "authorization.bin",
 }
+PRE_MATERIALIZATION_REPORT_TARGET = PurePosixPath(
+    "provenance/pre_materialization/metadata_dry_run_report.json"
+)
+PRE_MATERIALIZATION_RECEIPT_TARGET = PurePosixPath(
+    "provenance/pre_materialization/pre_materialization_receipt.json"
+)
+CANONICAL_FILE_MANIFEST_TARGET = PurePosixPath(
+    "canonical_file_manifest.tsv"
+)
+CANONICAL_ROOT_SEAL_TARGET = PurePosixPath("canonical_root_seal.json")
+EXCLUSION_LEDGER_TARGET = PurePosixPath("exclusion_ledger.csv")
+EXCLUSION_LEDGER_BYTES = (
+    b"ledger_entry_id,recorded_at_utc,recorded_before_effect_unblind,seed,"
+    b"pod_id,worker_id,run_id,attempt,scope,reason_code,eligible_retry,"
+    b"evidence_relative_path,evidence_sha256,retry_attempt,"
+    b"authoritative_attempt,excluded_from_confirmatory,"
+    b"excluded_from_secondary,decision_rule_version,review_status,reviewer,"
+    b"reviewed_at_utc,notes\n"
+)
 RECOVERY_SOURCE_KEYS = tuple(RECOVERY_TARGETS) + tuple(RECOVERY_SUPPORT_TARGETS)
 RECOVERY_STATE_SEQUENCE = ("validating", "running", "finalizing", "complete")
+REAL_RECOVERY_EXISTING_SUFFIX = ("validating", "running")
+REAL_RECOVERY_APPEND_SUFFIX = ("finalizing", "complete")
+AUTHORITATIVE_REAL_SELECTIONS = {
+    ("P12", "isolation_sync"): {
+        "archive_id": "full_H12",
+        "source_prefix": (
+            "task8b_six_seed_pair_shard_20260723/staging/paired_shards/"
+            "P12/primary-high-expr-sync-rerun-v1/output/runs/"
+            "isolation_sync__attempt_02"
+        ),
+        "target_run_dir": "runs/isolation_sync__attempt_02",
+    },
+    ("P08", "isolation_async"): {
+        "archive_id": "full_H02",
+        "source_prefix": (
+            "task8b_six_seed_pair_shards/H02/paired_shards/P08/"
+            "p08_low_async_attempt03_20260723/output/runs/isolation_async"
+        ),
+        "target_run_dir": "runs/isolation_async",
+    },
+    ("P11", "isolation_async"): {
+        # The dry-run contract's legacy "H11 Async" gate denotes logical
+        # pair_11/P11.  Under the approved paired-shard complement, the sealed
+        # physical source for that logical task is full_H05.
+        "archive_id": "full_H05",
+        "source_prefix": (
+            "task8b_six_seed_paired_shards_20260723/paired_shards/P11/"
+            "pair_11-low-P11-isolation_async-attempt_02/output/runs/"
+            "isolation_async"
+        ),
+        "target_run_dir": "runs/isolation_async",
+    },
+    ("S07", "mixed_ecological"): {
+        "archive_id": "full_H01",
+        "source_prefix": (
+            "task8b_six_seed_paired_shards_20260723/paired_shards/S07/"
+            "pair_07-low-S07-mixed-e5b732a_mixed_fix_v7_compat/output/"
+            "runs/mixed_ecological"
+        ),
+        "target_run_dir": "runs/mixed_ecological",
+    },
+}
+AUTHORITATIVE_ACTIVE_PID_EVIDENCE = {
+    "P07": {
+        "archive_id": "recovery_H07",
+        "member": (
+            "task8b_same_attempt_recovery_v1/"
+            "H07_P07_c00da55_20260722T163826Z/"
+            "P07_active_pid_absence.json"
+        ),
+        "sha256": (
+            "cd06994330eb2de80cadcddb5804c37377e5bf56ff1f48fac43eb1d0e187d687"
+        ),
+        "profile": "host-worker-count-pidfile-v0",
+    },
+    "P08": {
+        "archive_id": "recovery_H08",
+        "member": (
+            "task8b_h08_legacy_composite_recovery_c00da55_v1/"
+            "P08/P08.active_pid_absence.json"
+        ),
+        "sha256": (
+            "41a39a33ef8087cef24580f80af82063b5490c7439a61ad249cbbc895ec35fee"
+        ),
+        "profile": "minimal-legacy-v0",
+    },
+    "P09": {
+        "archive_id": "recovery_H09",
+        "member": (
+            "task8b_h09_legacy_composite_recovery_c00da55_v1/"
+            "P09/active_pid_absence.json"
+        ),
+        "sha256": (
+            "8e6eb0f45d8d6fd3790594f2e18c13f9c11635c93938a4d18275cacedcb7b36f"
+        ),
+        "profile": "task8b-active-pid-absence-v1",
+    },
+    "P10": {
+        "archive_id": "recovery_H10",
+        "member": (
+            "task8b_same_attempt_recovery_v1/"
+            "H10_P10_c00da55_20260722T155856Z/"
+            "P10_active_pid_absence.json"
+        ),
+        "sha256": (
+            "9fc28d3a539787d0870e1d12117b108de8bfc76366b66f8451731556ffaf7564"
+        ),
+        "profile": "host-worker-count-pidfile-v0",
+    },
+    "P11": {
+        "archive_id": "recovery_H11",
+        "member": (
+            "task8b_bulk_recovery_c00da55_20260722T1700Z/"
+            "P11/P11_active_pid_absence.json"
+        ),
+        "sha256": (
+            "fc74787e1df259f006ba3313f4d8ef61e2da6b32dcdeb1d7eb955c5443d44c87"
+        ),
+        "profile": "host-worker-count-v0",
+    },
+}
+
+
+def _control_members(prefix: str, names: Sequence[str]) -> frozenset[str]:
+    return frozenset(f"{prefix}/{name}" for name in names)
+
+
+def _declared_limitations() -> list[dict[str, str]]:
+    return [
+        {
+            "code": "recovery_code_identity_independent_artifact_unavailable",
+            "scope": "P07-P11 recovery controller and verifier identity source",
+            "evidence_status": RECOVERY_CODE_IDENTITY_EVIDENCE_STATUS,
+            "impact": (
+                "canonical bytes remain SHA-closed; paper eligibility requires "
+                "explicit review of this declared provenance limitation"
+            ),
+        }
+    ]
+
+
+AUTHORITATIVE_UNMANIFESTED_REGULAR_MEMBERS = {
+    "full_H01": _control_members(
+        "task8b_full_matrix_exports/H01_P07_20260725T125212Z",
+        ("export_receipt.json", "server_manifest.tsv", "source_roots.tsv"),
+    ),
+    "full_H02": _control_members(
+        "task8b_full_matrix_exports/H02_P08_20260725T112530Z",
+        ("export_receipt.json", "server_manifest.tsv", "source_roots.tsv"),
+    ),
+    "full_H03": _control_members(
+        "task8b_full_matrix_exports/H03_P09_20260725T102833Z",
+        ("export_receipt.json", "server_manifest.tsv", "source_roots.tsv"),
+    ),
+    "full_H04": _control_members(
+        "task8b_full_matrix_exports/H04_P10_20260725T092121Z",
+        ("export_receipt.json", "server_manifest.tsv", "source_roots.tsv"),
+    ),
+    "full_H05": _control_members(
+        "task8b_full_matrix_exports/H05_P11_20260725T105846Z",
+        ("export_receipt.json", "server_manifest.tsv", "source_roots.tsv"),
+    ),
+    "full_H06": _control_members(
+        "task8b_full_matrix_exports/H06_P12_20260725T111208Z",
+        ("export_receipt.json", "server_manifest.tsv", "source_roots.tsv"),
+    ),
+    "full_H07": _control_members(
+        "task8b_full_matrix_exports/H07_P07_20260725T121033Z",
+        ("export_receipt.json", "server_manifest.tsv", "source_roots.tsv"),
+    ),
+    "full_H08": _control_members(
+        "task8b_full_matrix_exports/H08_P08_20260725T122036Z",
+        ("export_receipt.json", "server_manifest.tsv", "source_roots.tsv"),
+    ),
+    "full_H09": _control_members(
+        "task8b_full_matrix_exports/H09_P09_20260725T122743Z",
+        ("export_receipt.json", "server_manifest.tsv", "source_roots.tsv"),
+    ),
+    "full_H10": _control_members(
+        "task8b_full_matrix_exports/H10_P10_20260725T123406Z",
+        ("export_receipt.json", "server_manifest.tsv", "source_roots.tsv"),
+    ),
+    "full_H11": _control_members(
+        "task8b_full_matrix_exports/H11_P11_20260725T124022Z",
+        ("export_receipt.json", "server_manifest.tsv", "source_roots.tsv"),
+    ),
+    "full_H12": _control_members(
+        "task8b_full_matrix_exports/H12_P12_20260725T124717Z",
+        ("export_receipt.json", "server_manifest.tsv", "source_roots.tsv"),
+    ),
+    "recovery_H07": _control_members(
+        "task8b_recovery_support_exports/H07_P07_20260725T132215Z",
+        ("server_manifest.tsv", "export_receipt.json"),
+    ),
+    "recovery_H08": _control_members(
+        "task8b_recovery_support_exports/H08_P08_20260725T132431Z",
+        ("server_manifest.tsv", "export_receipt.json"),
+    ),
+    "recovery_H09": _control_members(
+        "task8b_recovery_support_exports/H09_P09_20260725T132648Z",
+        ("server_manifest.tsv", "export_receipt.json"),
+    ),
+    "recovery_H10": _control_members(
+        "task8b_recovery_support_exports/H10_P10_20260725T132901Z",
+        ("server_manifest.tsv", "export_receipt.json"),
+    ),
+    "recovery_H11": _control_members(
+        "task8b_recovery_support_exports/H11_P11_20260725T133429Z",
+        ("server_manifest.tsv", "export_receipt.json"),
+    ),
+}
+METADATA_DRY_RUN_GATE_NAMES = (
+    "archive_sha_manifest_receipt_seal_binding",
+    "worker_and_task_cardinality",
+    "unique_task_source_run_attempt_receipt",
+    "p12_sync_attempt_02",
+    "h02_async_attempt_03",
+    "h11_async_attempt_02",
+    "s07_mixed_v7_compat",
+    "selected_member_manifest_identity_closure",
+    "unselected_export_control_exclusion",
+    "archive_provenance_copy_plan",
+    "destination_collision",
+    "shard_completion_receipt_seal_manifest_cross_binding",
+    "recovery_state_sha_chain",
+    "recovery_authorization_certificate_failure_archive_binding",
+    "canonical_output_file_plan",
+    "disk_space",
+    "append_only_no_overwrite_no_splice",
+    "blind_effect_field_access",
+)
+METADATA_DRY_RUN_PLAN_BINDING_FIELDS = (
+    "expected_file_count",
+    "expected_bytes",
+    "safety_reserve_bytes",
+    "copied_target_count",
+    "copied_target_bytes",
+    "staged_metadata_file_count",
+    "staged_metadata_bytes",
+    "manifest_index_sha256",
+    "analysis_input_sha256",
+    "workers",
+    "recovery_closure",
+    "provenance_targets",
+    "file_plan",
+)
+METADATA_DRY_RUN_REPORT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "gaps",
+        "authoritative_real_profile",
+        "source_map_path",
+        "source_map_sha256",
+        "materialization_id",
+        "candidate_output_root",
+        "candidate_partial_root",
+        "analysis_contract_sha256",
+        "pre_unlock_manifest_sha256",
+        "archive_count",
+        "worker_count",
+        "task_count",
+        "pair_count",
+        "gates",
+        "archive_copy_plan",
+        "authoritative_selections",
+        "free_bytes",
+        "metadata_only",
+        "large_payload_files_written",
+        "large_payload_bytes_written",
+        "effect_fields_read",
+        "formal_effect_fields_read",
+        "limitations",
+        "paper_eligibility",
+        *METADATA_DRY_RUN_PLAN_BINDING_FIELDS,
+    }
+)
+RECOVERY_AUTHORIZATION_FIELDS = frozenset(
+    {
+        "active_pid_absence_evidence_sha256",
+        "active_process_absent_confirmed",
+        "attempt_root",
+        "authorization_id",
+        "authorized",
+        "baseline_manifest_sha256",
+        "controller_sha256",
+        "failed_state_row_sha256",
+        "formal_runner_sha256",
+        "frozen_code_sha",
+        "parent_preunlock_sha256",
+        "pre_recovery_archive_sha256",
+        "protocol_amendment_id",
+        "protocol_amendment_sha256",
+        "reason",
+        "same_attempt_recovery_authorized",
+        "schema_version",
+        "task1_adoption_only",
+        "task_id",
+        "verifier_code_sha",
+        "verifier_identity_source_sha256",
+        "worker_id",
+        "worker_manifest_sha256",
+    }
+)
 SECONDARY_NORMALIZATION_FILES = frozenset(
     {
         "certificate.identity_correction_audit.json",
@@ -291,12 +624,90 @@ class WorkerPlan:
     identity_refs: dict[str, list[ArtifactRef]]
 
 
+@dataclass
+class MaterializationPlan:
+    source_path: Path
+    source_ref: ArtifactRef
+    source_sha256: str
+    source_map: dict[str, Any]
+    archives: dict[str, ArchiveCatalog]
+    analysis: dict[str, Any]
+    contract_ref: ArtifactRef
+    preunlock_ref: ArtifactRef
+    workers: list[WorkerPlan]
+    destination: Path
+    partial: Path
+    requests: list[CopyRequest]
+    archive_copy_plan: list[dict[str, Any]]
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _materializer_git_identity() -> dict[str, Any]:
+    """Bind the running materializer to one pushed, tracked-clean commit."""
+
+    module_path = Path(__file__).absolute()
+    repo_root = module_path.parents[3]
+
+    def _git(*args: str) -> str:
+        completed = subprocess.run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={repo_root.as_posix()}",
+                "-C",
+                str(repo_root),
+                *args,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise ConfigError(
+                "materializer git identity 无法读取："
+                f"{str(completed.stderr).strip()}"
+            )
+        return completed.stdout
+
+    top_level = str(_git("rev-parse", "--show-toplevel")).strip()
+    head_sha = str(_git("rev-parse", "HEAD")).strip()
+    origin_main_sha = str(_git("rev-parse", "origin/main")).strip()
+    tracked_status = str(
+        _git("status", "--porcelain", "--untracked-files=no")
+    ).strip()
+    relative_module = module_path.relative_to(repo_root).as_posix()
+    head_blob_sha = str(_git("rev-parse", f"HEAD:{relative_module}")).strip()
+    working_blob_sha = str(
+        _git(
+            "hash-object",
+            f"--path={relative_module}",
+            relative_module,
+        )
+    ).strip()
+    if (
+        os.path.normcase(str(Path(top_level).absolute()))
+        != os.path.normcase(str(repo_root))
+        or SHA1_RE.fullmatch(head_sha) is None
+        or SHA1_RE.fullmatch(origin_main_sha) is None
+        or SHA1_RE.fullmatch(head_blob_sha) is None
+        or SHA1_RE.fullmatch(working_blob_sha) is None
+    ):
+        raise ConfigError("materializer git repository/commit identity 非法")
+    return {
+        "repo_root": str(repo_root),
+        "head_sha": head_sha,
+        "origin_main_sha": origin_main_sha,
+        "tracked_clean": tracked_status == "",
+        "head_blob_sha": head_blob_sha,
+        "working_blob_sha": working_blob_sha,
+    }
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -535,6 +946,49 @@ def _parse_manifest_json(payload: bytes, *, label: str) -> dict[str, ManifestEnt
         if member in entries:
             raise ConfigError(f"{label} files member 重复：{member}")
         entries[member] = ManifestEntry(member, size, sha256)
+    return entries
+
+
+def _parse_flexible_manifest_tsv(
+    payload: bytes,
+    *,
+    label: str,
+) -> dict[str, ManifestEntry]:
+    """Parse the two immutable recovery-manifest column layouts in the fleet."""
+
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{label} manifest 不是 UTF-8") from exc
+    reader = csv.DictReader(io.StringIO(text), delimiter="\t")
+    fields = [str(field or "").strip().lower() for field in (reader.fieldnames or [])]
+    if fields not in (
+        ["relative_path", "size", "sha256"],
+        ["sha256", "bytes", "relative_path"],
+        ["sha256", "size", "relative_path"],
+    ):
+        raise ConfigError(f"{label} manifest header 非法")
+    entries: dict[str, ManifestEntry] = {}
+    for index, row in enumerate(reader, start=2):
+        normalized = {str(key).strip().lower(): value for key, value in row.items()}
+        member = _safe_relative(
+            normalized.get("relative_path"),
+            label=f"{label} row {index}",
+        ).as_posix()
+        size_text = normalized.get("size", normalized.get("bytes"))
+        try:
+            size = int(str(size_text))
+        except ValueError as exc:
+            raise ConfigError(f"{label} row {index} size 非法") from exc
+        sha256 = _require_sha256(
+            normalized.get("sha256"),
+            label=f"{label} row {index}",
+        )
+        if size < 0 or member in entries:
+            raise ConfigError(f"{label} row {index} 重复或 size 非法")
+        entries[member] = ManifestEntry(member, size, sha256)
+    if not entries:
+        raise ConfigError(f"{label} manifest 没有文件")
     return entries
 
 
@@ -856,8 +1310,20 @@ def _parse_analysis(
         _read_ref_bytes(preunlock_ref, archives=archives, label="analysis.pre_unlock_manifest"),
         label="analysis.pre_unlock_manifest",
     )
-    if preunlock_ref.sha256 != APPROVED_PREUNLOCK_SHA256:
-        raise ConfigError("analysis pre-unlock manifest 非批准的 blind freeze")
+    unlocked_by = str(value["unlocked_by"]).strip()
+    if not unlocked_by:
+        raise ConfigError("analysis.unlocked_by 为空")
+    approved_freezes = {
+        APPROVED_PREUNLOCK_SHA256,
+        APPROVED_POST_UNBLIND_ANALYSIS_FREEZE_SHA256,
+    }
+    if preunlock_ref.sha256 not in approved_freezes:
+        raise ConfigError("analysis manifest 非批准的 frozen analyzer identity")
+    if (
+        preunlock_ref.sha256 == APPROVED_POST_UNBLIND_ANALYSIS_FREEZE_SHA256
+        and unlocked_by != APPROVED_POST_UNBLIND_UNLOCKED_BY
+    ):
+        raise ConfigError("post-unblind analysis supplement provenance 非法")
     schema = preunlock.get("schema_version")
     if schema == "task8b-phase-f-pre-unlock-v1":
         contract_id = preunlock.get("analysis_contract_id")
@@ -890,9 +1356,6 @@ def _parse_analysis(
     unlocked_at = _parse_utc_timestamp(value["unlocked_at_utc"], label="analysis.unlocked_at_utc")
     if unlocked_at < frozen_at:
         raise ConfigError("analysis unlocked_at_utc 早于 pre-unlock freeze")
-    unlocked_by = str(value["unlocked_by"]).strip()
-    if not unlocked_by:
-        raise ConfigError("analysis.unlocked_by 为空")
     return (
         {
             "analysis_code_sha": analysis_code_sha,
@@ -1441,6 +1904,120 @@ def _build_copy_requests(
     ]
 
 
+def _validate_archive_copy_plan(
+    *,
+    requests: Sequence[CopyRequest],
+    archives: Mapping[str, ArchiveCatalog],
+    authoritative_real_profile: bool,
+) -> list[dict[str, Any]]:
+    requested_by_archive: dict[str, set[str]] = defaultdict(set)
+    for request in requests:
+        ref = request.source
+        if ref.archive_id is not None:
+            assert ref.member is not None
+            requested_by_archive[ref.archive_id].add(ref.member)
+    results = []
+    for source_id, catalog in archives.items():
+        requested = requested_by_archive[source_id]
+        observed: set[str] = set()
+        observed_manifest: set[str] = set()
+        unmanifested_regular: list[str] = []
+        with tarfile.open(catalog.path, mode="r:*") as archive:
+            for member in archive:
+                raw_name = (
+                    member.name[:-1]
+                    if member.isdir() and member.name.endswith("/")
+                    else member.name
+                )
+                name = _safe_relative(
+                    raw_name,
+                    label=f"archive {source_id} tar member",
+                ).as_posix()
+                if name in observed:
+                    raise ConfigError(f"archive {source_id} tar member 重复：{name}")
+                observed.add(name)
+                if member.isdir():
+                    continue
+                if not member.isreg():
+                    raise ConfigError(
+                        f"archive {source_id} 含 symlink/hardlink/special member：{name}"
+                    )
+                manifest_entry = catalog.entries.get(name)
+                if manifest_entry is None:
+                    if name in requested:
+                        raise ConfigError(
+                            f"archive {source_id} requested regular member "
+                            f"未被 manifest 记录：{name}"
+                        )
+                    unmanifested_regular.append(name)
+                    continue
+                if member.size != manifest_entry.size:
+                    raise ConfigError(f"archive {source_id} member size 非法：{name}")
+                observed_manifest.add(name)
+        if observed_manifest != set(catalog.entries) or not requested.issubset(
+            observed_manifest
+        ):
+            missing = sorted(set(catalog.entries) - observed_manifest)
+            uncopied = sorted(requested - observed_manifest)
+            raise ConfigError(
+                f"archive {source_id} metadata exact closure 失败："
+                f"missing={missing[:3]} uncopied={uncopied[:3]}"
+            )
+        if authoritative_real_profile:
+            allowed_unmanifested = AUTHORITATIVE_UNMANIFESTED_REGULAR_MEMBERS.get(
+                source_id
+            )
+            if (
+                allowed_unmanifested is None
+                or set(unmanifested_regular) != allowed_unmanifested
+            ):
+                raise ConfigError(
+                    f"archive {source_id} authoritative export-control "
+                    "allowlist 不闭合"
+                )
+        receipt_payload = _read_ref_bytes(
+            catalog.receipt_ref,
+            archives=archives,
+            label=f"archive {source_id}.receipt preflight",
+        )
+        seal_payload = _read_ref_bytes(
+            catalog.seal_ref,
+            archives=archives,
+            label=f"archive {source_id}.seal preflight",
+        )
+        _validate_json_assertions(
+            receipt_payload,
+            catalog.receipt_ref,
+            label=f"archive {source_id}.receipt preflight",
+        )
+        _validate_json_assertions(
+            seal_payload,
+            catalog.seal_ref,
+            label=f"archive {source_id}.seal preflight",
+        )
+        _validate_archive_evidence_bindings(
+            catalog,
+            receipt_payload=receipt_payload,
+            seal_payload=seal_payload,
+        )
+        results.append(
+            {
+                "archive_id": source_id,
+                "manifest_member_count": len(catalog.entries),
+                "requested_member_count": len(requested),
+                "unmanifested_unrequested_regular_count": len(unmanifested_regular),
+                "unmanifested_unrequested_regular": sorted(unmanifested_regular),
+                "special_member_count": 0,
+                "archive_sha256": catalog.sha256,
+                "manifest_sha256": catalog.manifest_ref.sha256,
+                "receipt_sha256": catalog.receipt_ref.sha256,
+                "seal_sha256": catalog.seal_ref.sha256,
+                "archive_receipt_seal_binding_valid": True,
+            }
+        )
+    return results
+
+
 def _stream_to_targets(
     source: BinaryIO,
     *,
@@ -1613,8 +2190,72 @@ def _directory_manifest(root: Path) -> list[dict[str, Any]]:
             "size": path.stat().st_size,
             "sha256": _sha256_file(path),
         }
-        for path in sorted(item for item in root.rglob("*") if item.is_file())
+        for path in sorted(
+            (item for item in root.rglob("*") if item.is_file()),
+            key=lambda item: item.relative_to(root).as_posix(),
+        )
     ]
+
+
+def _planned_task_manifest(task: Mapping[str, Any]) -> list[dict[str, Any]]:
+    prefix = PurePosixPath(str(task["source_prefix"]))
+    rows = []
+    for entry in task["entries"]:
+        relative = PurePosixPath(entry.member).relative_to(prefix).as_posix()
+        rows.append(
+            {
+                "relative_path": relative,
+                "size": entry.size,
+                "sha256": entry.sha256,
+            }
+        )
+    return sorted(rows, key=lambda row: str(row["relative_path"]))
+
+
+def _validate_task_receipt_value(
+    worker: WorkerPlan,
+    *,
+    task_id: str,
+    receipt: Mapping[str, Any],
+    actual_files: Sequence[Mapping[str, Any]],
+    base_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    task = worker.task_rows[task_id]
+    configs = {
+        str(row["task_id"]): row
+        for row in base_manifest["task_configs"]
+        if isinstance(row, dict)
+    }
+    run_dir = str(task["target_run_dir"])
+    task_row = receipt.get("task_row")
+    config = configs[task_id]
+    expected_config_sha = config.get("config_sha256")
+    task_row_keys_valid = isinstance(task_row, dict) and set(task_row).issubset(TASK_ROW_FIELDS)
+    task_identity = task_row.get("identity_audit") if isinstance(task_row, dict) else None
+    task_identity_valid = task_identity is None or (
+        isinstance(task_identity, dict) and set(task_identity) == TASK_IDENTITY_FIELDS
+    )
+    if (
+        receipt.get("schema_version") != TASK_RECEIPT_SCHEMA
+        or not set(receipt).issubset(TASK_RECEIPT_FIELDS)
+        or receipt.get("task_id") != task_id
+        or SHA256_RE.fullmatch(str(expected_config_sha or "")) is None
+        or receipt.get("config_sha256") != expected_config_sha
+        or receipt.get("run_dir") != run_dir
+        or not isinstance(task_row, dict)
+        or not task_row_keys_valid
+        or not task_identity_valid
+        or task_row.get("task_id") != task_id
+        or task_row.get("run_dir") != run_dir
+        or task_row.get("status") != "complete"
+        or receipt.get("files") != list(actual_files)
+    ):
+        raise ConfigError(f"{worker.worker_id}/{task_id} task receipt 不闭合")
+    return {
+        "task_id": task_id,
+        "run_dir": run_dir,
+        "status": "complete",
+    }
 
 
 def _validate_task_receipts(worker: WorkerPlan, attempt: Path) -> list[dict[str, Any]]:
@@ -1624,9 +2265,6 @@ def _validate_task_receipts(worker: WorkerPlan, attempt: Path) -> list[dict[str,
         ).read_bytes(),
         label=f"{worker.worker_id} base manifest",
     )
-    configs = {
-        str(row["task_id"]): row for row in base_manifest["task_configs"] if isinstance(row, dict)
-    }
     results: list[dict[str, Any]] = []
     for task_id in worker.expected_tasks:
         task = worker.task_rows[task_id]
@@ -1636,42 +2274,19 @@ def _validate_task_receipts(worker: WorkerPlan, attempt: Path) -> list[dict[str,
         )
         run_dir = str(task["target_run_dir"])
         task_root = attempt.joinpath(*PurePosixPath(run_dir).parts)
-        task_row = receipt.get("task_row")
-        config = configs[task_id]
-        expected_config_sha = config.get("config_sha256")
-        task_row_keys_valid = isinstance(task_row, dict) and set(task_row).issubset(TASK_ROW_FIELDS)
-        task_identity = task_row.get("identity_audit") if isinstance(task_row, dict) else None
-        task_identity_valid = task_identity is None or (
-            isinstance(task_identity, dict) and set(task_identity) == TASK_IDENTITY_FIELDS
-        )
-        if (
-            receipt.get("schema_version") != TASK_RECEIPT_SCHEMA
-            or not set(receipt).issubset(TASK_RECEIPT_FIELDS)
-            or receipt.get("task_id") != task_id
-            or SHA256_RE.fullmatch(str(expected_config_sha or "")) is None
-            or receipt.get("config_sha256") != expected_config_sha
-            or receipt.get("run_dir") != run_dir
-            or not isinstance(task_row, dict)
-            or not task_row_keys_valid
-            or not task_identity_valid
-            or task_row.get("task_id") != task_id
-            or task_row.get("run_dir") != run_dir
-            or task_row.get("status") != "complete"
-            or receipt.get("files") != _directory_manifest(task_root)
-        ):
-            raise ConfigError(f"{worker.worker_id}/{task_id} task receipt 不闭合")
         results.append(
-            {
-                "task_id": task_id,
-                "run_dir": run_dir,
-                "status": "complete",
-            }
+            _validate_task_receipt_value(
+                worker,
+                task_id=task_id,
+                receipt=receipt,
+                actual_files=_directory_manifest(task_root),
+                base_manifest=base_manifest,
+            )
         )
     return results
 
 
-def _parse_state(path: Path, *, label: str) -> list[dict[str, str]]:
-    payload = path.read_bytes()
+def _parse_state_bytes(payload: bytes, *, label: str) -> list[dict[str, str]]:
     if not payload.endswith(b"\n"):
         raise ConfigError(f"{label} state prefix 必须以 LF 结束")
     try:
@@ -1718,6 +2333,10 @@ def _parse_state(path: Path, *, label: str) -> list[dict[str, str]]:
     return rows
 
 
+def _parse_state(path: Path, *, label: str) -> list[dict[str, str]]:
+    return _parse_state_bytes(path.read_bytes(), label=label)
+
+
 def _build_state_rows(
     prefix_rows: Sequence[dict[str, str]],
     append_rows: Sequence[dict[str, str]],
@@ -1751,6 +2370,28 @@ def _build_state_rows(
     return built
 
 
+def _validate_recovery_state_anchor(
+    source_state_rows: Sequence[dict[str, str]],
+    *,
+    original_terminal_state_sha256: str,
+    label: str,
+) -> int:
+    anchor_indices = [
+        index
+        for index, row in enumerate(source_state_rows)
+        if row["row_sha256"] == original_terminal_state_sha256
+    ]
+    if len(anchor_indices) != 1:
+        raise ConfigError(f"{label} original failed state anchor 不唯一或缺失")
+    anchor_index = anchor_indices[0]
+    if source_state_rows[anchor_index]["status"] != "failed":
+        raise ConfigError(f"{label} original terminal state anchor 非 failed")
+    recovery_suffix = tuple(row["status"] for row in source_state_rows[anchor_index + 1 :])
+    if recovery_suffix != RECOVERY_STATE_SEQUENCE[: len(recovery_suffix)]:
+        raise ConfigError(f"{label} recovery state suffix 非法")
+    return anchor_index
+
+
 def _state_row_bytes(rows: Iterable[dict[str, str]]) -> bytes:
     handle = io.StringIO(newline="")
     writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
@@ -1777,20 +2418,29 @@ def _append_bytes(path: Path, payload: bytes) -> None:
 
 def _validate_recovery(
     worker: WorkerPlan,
-    attempt: Path,
+    attempt: Path | None,
     *,
     source_state_rows: Sequence[dict[str, str]],
+    archives: Mapping[str, ArchiveCatalog] | None = None,
+    metadata_only: bool = False,
 ) -> None:
-    recovery_root = attempt / "recovery_adoptions"
-    observed = (
-        {
-            path.relative_to(attempt).as_posix()
-            for path in recovery_root.rglob("*")
-            if path.is_file()
-        }
-        if recovery_root.is_dir()
-        else set()
-    )
+    if metadata_only:
+        if archives is None or attempt is not None:
+            raise ConfigError(f"{worker.worker_id} metadata recovery 参数非法")
+        observed = set(RECOVERY_TARGETS.values()) if worker.recovery_refs else set()
+    else:
+        if attempt is None:
+            raise ConfigError(f"{worker.worker_id} recovery attempt 缺失")
+        recovery_root = attempt / "recovery_adoptions"
+        observed = (
+            {
+                path.relative_to(attempt).as_posix()
+                for path in recovery_root.rglob("*")
+                if path.is_file()
+            }
+            if recovery_root.is_dir()
+            else set()
+        )
     expected = set(RECOVERY_TARGETS.values()) if worker.recovery_refs else set()
     if observed != expected:
         raise ConfigError(f"{worker.worker_id} recovery artifact 集合不闭合")
@@ -1798,9 +2448,20 @@ def _validate_recovery(
         if worker.recovery_refs or observed:
             raise ConfigError(f"{worker.worker_id} secondary worker 不得含 recovery evidence")
         return
-    receipt_path = attempt / "task_receipts" / f"{RECOVERY_TASK_ID}.json"
+    if metadata_only:
+        assert archives is not None
+        receipt_payload = _read_ref_bytes(
+            worker.task_rows[RECOVERY_TASK_ID]["receipt_ref"],
+            archives=archives,
+            label=f"{worker.worker_id} recovery task receipt",
+        )
+    else:
+        assert attempt is not None
+        receipt_payload = (
+            attempt / "task_receipts" / f"{RECOVERY_TASK_ID}.json"
+        ).read_bytes()
     receipt = _read_json_bytes(
-        receipt_path.read_bytes(), label=f"{worker.worker_id} recovery task receipt"
+        receipt_payload, label=f"{worker.worker_id} recovery task receipt"
     )
     adoption = receipt.get("recovery_adoption")
     evidence = receipt.get("phase_f_evidence")
@@ -1819,35 +2480,61 @@ def _validate_recovery(
         pattern = SHA1_RE if field == "verifier_code_sha" else SHA256_RE
         if pattern.fullmatch(str(evidence.get(field, ""))) is None:
             raise ConfigError(f"{worker.worker_id} recovery evidence hash 非法：{field}")
-    base_manifest = _read_json_bytes(
-        (
-            attempt.parents[3] / "provenance" / "base_manifests" / f"{worker.worker_id}.json"
-        ).read_bytes(),
-        label=f"{worker.worker_id} recovery base manifest",
-    )
+    if metadata_only:
+        base_manifest = copy.deepcopy(worker.base_manifest)
+    else:
+        assert attempt is not None
+        base_manifest = _read_json_bytes(
+            (
+                attempt.parents[3]
+                / "provenance"
+                / "base_manifests"
+                / f"{worker.worker_id}.json"
+            ).read_bytes(),
+            label=f"{worker.worker_id} recovery base manifest",
+        )
     experiment_code_sha = str(base_manifest.get("common_identity", {}).get("code_sha", ""))
     if (
         experiment_code_sha != FROZEN_SCIENTIFIC_CODE_SHA
         or evidence["verifier_code_sha"] == experiment_code_sha
     ):
         raise ConfigError(f"{worker.worker_id} recovery scientific/verifier code SHA 非法")
-    canonical_path = attempt / RECOVERY_TARGETS["canonicalization_audit"]
-    attestation_path = attempt / RECOVERY_TARGETS["adoption_attestation"]
-    certificate_path = attempt / RECOVERY_TARGETS["certificate"]
+    if metadata_only:
+        assert archives is not None
+        recovery_payloads = {
+            key: _read_ref_bytes(
+                worker.recovery_refs[key],
+                archives=archives,
+                label=f"{worker.worker_id} recovery {key}",
+            )
+            for key in RECOVERY_TARGETS
+        }
+    else:
+        assert attempt is not None
+        recovery_payloads = {
+            key: (attempt / target).read_bytes()
+            for key, target in RECOVERY_TARGETS.items()
+        }
     if (
-        _sha256_file(canonical_path) != evidence["canonicalization_equivalence_audit_sha256"]
-        or _sha256_file(attestation_path) != evidence["task1_adoption_attestation_sha256"]
-        or _sha256_file(certificate_path) != evidence["recovery_certificate_sha256"]
+        hashlib.sha256(recovery_payloads["canonicalization_audit"]).hexdigest()
+        != evidence["canonicalization_equivalence_audit_sha256"]
+        or hashlib.sha256(recovery_payloads["adoption_attestation"]).hexdigest()
+        != evidence["task1_adoption_attestation_sha256"]
+        or hashlib.sha256(recovery_payloads["certificate"]).hexdigest()
+        != evidence["recovery_certificate_sha256"]
     ):
         raise ConfigError(f"{worker.worker_id} recovery files SHA 不匹配")
     canonical = _read_json_bytes(
-        canonical_path.read_bytes(), label=f"{worker.worker_id} canonicalization audit"
+        recovery_payloads["canonicalization_audit"],
+        label=f"{worker.worker_id} canonicalization audit",
     )
     attestation = _read_json_bytes(
-        attestation_path.read_bytes(), label=f"{worker.worker_id} adoption attestation"
+        recovery_payloads["adoption_attestation"],
+        label=f"{worker.worker_id} adoption attestation",
     )
     certificate = _read_json_bytes(
-        certificate_path.read_bytes(), label=f"{worker.worker_id} recovery certificate"
+        recovery_payloads["certificate"],
+        label=f"{worker.worker_id} recovery certificate",
     )
     phase_f_base = {
         field: evidence[field]
@@ -1898,17 +2585,23 @@ def _validate_recovery(
         or adoption.get("recovery_certificate_sha256") != evidence["recovery_certificate_sha256"]
     ):
         raise ConfigError(f"{worker.worker_id} recovery adoption receipt 非法")
-    support_root = attempt.parents[3] / "provenance" / "recovery" / worker.worker_id
-    support_paths = {
-        key: support_root / filename for key, filename in RECOVERY_SUPPORT_TARGETS.items()
-    }
+    if metadata_only:
+        support_hashes = {
+            key: worker.recovery_refs[key].sha256 for key in RECOVERY_SUPPORT_TARGETS
+        }
+    else:
+        assert attempt is not None
+        support_root = attempt.parents[3] / "provenance" / "recovery" / worker.worker_id
+        support_paths = {
+            key: support_root / filename for key, filename in RECOVERY_SUPPORT_TARGETS.items()
+        }
+        support_hashes = {key: _sha256_file(path) for key, path in support_paths.items()}
     if (
-        _sha256_file(support_paths["protocol_amendment"]) != evidence["protocol_amendment_sha256"]
-        or _sha256_file(support_paths["pre_recovery_archive"])
-        != evidence["pre_recovery_archive_sha256"]
-        or _sha256_file(support_paths["pre_recovery_manifest"])
+        support_hashes["protocol_amendment"] != evidence["protocol_amendment_sha256"]
+        or support_hashes["pre_recovery_archive"] != evidence["pre_recovery_archive_sha256"]
+        or support_hashes["pre_recovery_manifest"]
         != evidence["pre_recovery_file_manifest_sha256"]
-        or _sha256_file(support_paths["authorization"]) != adoption["authorization_sha256"]
+        or support_hashes["authorization"] != adoption["authorization_sha256"]
         or adoption["authorization_sha256"] != certificate.get("authorization_sha256")
     ):
         raise ConfigError(f"{worker.worker_id} recovery source evidence SHA 不闭合")
@@ -1933,19 +2626,11 @@ def _validate_recovery(
         != "integer-versus-string mapping keys"
     ):
         raise ConfigError(f"{worker.worker_id} recovery canonical identity 非法")
-    failed_anchor_indices = [
-        index
-        for index, row in enumerate(source_state_rows)
-        if row["status"] == "failed"
-        and row["row_sha256"] == evidence["original_terminal_state_sha256"]
-    ]
-    if len(failed_anchor_indices) != 1:
-        raise ConfigError(f"{worker.worker_id} original failed state anchor 不唯一或缺失")
-    recovery_suffix = tuple(
-        row["status"] for row in source_state_rows[failed_anchor_indices[0] + 1 :]
+    _validate_recovery_state_anchor(
+        source_state_rows,
+        original_terminal_state_sha256=str(evidence["original_terminal_state_sha256"]),
+        label=worker.worker_id,
     )
-    if recovery_suffix != RECOVERY_STATE_SEQUENCE[: len(recovery_suffix)]:
-        raise ConfigError(f"{worker.worker_id} recovery state suffix 非法")
 
 
 def _validate_shard_identity_receipts(
@@ -2143,10 +2828,15 @@ def _write_files_tsv(attempt: Path) -> None:
         if relative in FILES_TSV_EXCLUSIONS:
             continue
         rows.append((relative, path.stat().st_size, _sha256_file(path)))
+    _write_new(attempt / "files.tsv", _files_tsv_bytes(rows))
+
+
+def _files_tsv_bytes(rows: Sequence[tuple[str, int, str]]) -> bytes:
     text = "relative_path\tsize\tsha256\n" + "".join(
-        f"{relative}\t{size}\t{sha256}\n" for relative, size, sha256 in rows
+        f"{relative}\t{size}\t{sha256}\n"
+        for relative, size, sha256 in sorted(rows, key=lambda row: row[0])
     )
-    _write_new(attempt / "files.tsv", text.encode("utf-8"))
+    return text.encode("utf-8")
 
 
 def _validate_files_tsv(attempt: Path) -> None:
@@ -2169,28 +2859,12 @@ def _validate_files_tsv(attempt: Path) -> None:
         raise ConfigError(f"{attempt} files.tsv exact closure 失败")
 
 
-def _materialize_worker(
+def _build_worker_composition_values(
     worker: WorkerPlan,
     *,
     root: Path,
-    archives: Mapping[str, ArchiveCatalog],
-) -> tuple[dict[str, Any], dict[str, Any], str]:
-    attempt = root / "snapshots" / worker.worker_id / str(worker.seed) / "attempt_01"
-    state_path = attempt / "state.tsv"
-    prefix_rows = _parse_state(state_path, label=f"{worker.worker_id} state prefix")
-    appended = _build_state_rows(prefix_rows, worker.state_append, label=worker.worker_id)
-    pre_completion_rows = appended[:-1] if appended else []
-    final_rows = appended[-1:] if appended else []
-    _append_bytes(state_path, _state_row_bytes(pre_completion_rows))
-    task_results = _validate_task_receipts(worker, attempt)
-    _validate_recovery(worker, attempt, source_state_rows=prefix_rows)
-    source_identities = _validate_shard_identity_receipts(
-        worker,
-        root=root,
-        attempt=attempt,
-        archives=archives,
-    )
-    _validate_secondary_normalization_evidence(worker, root=root)
+    source_identities: Mapping[str, list[dict[str, str]]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     side_specs = _expected_sides(worker.role, worker.slots)
     composition_sides = []
     lineage_shards = []
@@ -2244,16 +2918,45 @@ def _materialize_worker(
         "task_union": [task_id for side in composition_sides for task_id in side["task_ids"]],
         "actual_hands": sum(side["actual_hands"] for side in composition_sides),
     }
-    composition_path = root / "manifests" / "composition" / f"{worker.worker_id}.json"
-    _write_json_new(composition_path, composition)
-    composition_sha = _sha256_file(composition_path)
     lineage = {
         "pair_id": worker.pair_id,
         "paired_physical_slots": list(worker.slots),
         "composition_receipt_path": f"composition/{worker.worker_id}.json",
-        "composition_receipt_sha256": composition_sha,
+        "composition_receipt_sha256": hashlib.sha256(_json_bytes(composition)).hexdigest(),
         "shards": lineage_shards,
     }
+    return composition, lineage
+
+
+def _materialize_worker(
+    worker: WorkerPlan,
+    *,
+    root: Path,
+    archives: Mapping[str, ArchiveCatalog],
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    attempt = root / "snapshots" / worker.worker_id / str(worker.seed) / "attempt_01"
+    state_path = attempt / "state.tsv"
+    prefix_rows = _parse_state(state_path, label=f"{worker.worker_id} state prefix")
+    appended = _build_state_rows(prefix_rows, worker.state_append, label=worker.worker_id)
+    pre_completion_rows = appended[:-1] if appended else []
+    final_rows = appended[-1:] if appended else []
+    _append_bytes(state_path, _state_row_bytes(pre_completion_rows))
+    task_results = _validate_task_receipts(worker, attempt)
+    _validate_recovery(worker, attempt, source_state_rows=prefix_rows)
+    source_identities = _validate_shard_identity_receipts(
+        worker,
+        root=root,
+        attempt=attempt,
+        archives=archives,
+    )
+    _validate_secondary_normalization_evidence(worker, root=root)
+    composition, lineage = _build_worker_composition_values(
+        worker,
+        root=root,
+        source_identities=source_identities,
+    )
+    composition_path = root / "manifests" / "composition" / f"{worker.worker_id}.json"
+    _write_json_new(composition_path, composition)
     base_manifest = _read_json_bytes(
         _read_ref_bytes(
             worker.base_manifest_ref,
@@ -2335,11 +3038,11 @@ def _build_manifest_index(
 
 def _build_analysis_input(
     *,
-    root: Path,
     workers: Sequence[WorkerPlan],
     manifests: Mapping[str, dict[str, Any]],
     manifest_shas: Mapping[str, str],
     analysis: Mapping[str, Any],
+    manifest_index_sha256: str,
 ) -> dict[str, Any]:
     code_shas = {
         str(manifests[worker.worker_id]["common_identity"]["code_sha"]) for worker in workers
@@ -2380,11 +3083,1450 @@ def _build_analysis_input(
         "analysis_frozen_at_utc": analysis["analysis_frozen_at_utc"],
         "dependency_lock_sha256": analysis["dependency_lock_sha256"],
         "experiment_code_sha": experiment_code_sha,
-        "input_snapshot_id": _sha256_file(root / "manifests" / "manifest_index.json"),
+        "input_snapshot_id": _require_sha256(
+            manifest_index_sha256,
+            label="manifest_index_sha256",
+        ),
         "unlocked_at_utc": analysis["unlocked_at_utc"],
         "unlocked_by": analysis["unlocked_by"],
         "pre_unlock_manifest_sha256": analysis["pre_unlock_manifest_sha256"],
         "workers": rows,
+    }
+
+
+def _validate_task_source_uniqueness(workers: Sequence[WorkerPlan]) -> None:
+    sources: list[tuple[str, str]] = []
+    receipts: list[tuple[str, ...]] = []
+    for worker in workers:
+        for task in worker.task_rows.values():
+            sources.append(
+                (
+                    str(task["source_archive_id"]),
+                    str(task["source_prefix"]),
+                )
+            )
+            receipts.append(task["receipt_ref"].key)
+    if len(sources) != 60 or len(set(sources)) != 60:
+        raise ConfigError("six-seed task source 必须精确为 60 个全局唯一选择")
+    if len(receipts) != 60 or len(set(receipts)) != 60:
+        raise ConfigError("six-seed task receipt 必须精确为 60 个全局唯一来源")
+
+
+def _validate_authoritative_real_selections(
+    *,
+    archives: Mapping[str, ArchiveCatalog],
+    workers: Sequence[WorkerPlan],
+) -> list[dict[str, str]]:
+    if len(archives) != 17:
+        raise ConfigError("authoritative real source map 必须精确绑定 17 个 archive")
+    by_worker = {worker.worker_id: worker for worker in workers}
+    results: list[dict[str, str]] = []
+    for (worker_id, task_id), expected in AUTHORITATIVE_REAL_SELECTIONS.items():
+        task = by_worker[worker_id].task_rows[task_id]
+        source_archive_id = str(task["source_archive_id"])
+        source_prefix = str(task["source_prefix"])
+        target_run_dir = str(task["target_run_dir"])
+        if (
+            source_archive_id != expected["archive_id"]
+            or source_prefix != expected["source_prefix"]
+            or target_run_dir != expected["target_run_dir"]
+        ):
+            raise ConfigError(f"{worker_id}/{task_id} authoritative source selection 非法")
+        results.append(
+            {
+                "worker_id": worker_id,
+                "task_id": task_id,
+                "source_archive_id": source_archive_id,
+                "source_prefix": source_prefix,
+                "target_run_dir": target_run_dir,
+            }
+        )
+    for worker in workers:
+        for shard, expected_side in zip(
+            worker.raw["shards"],
+            _expected_sides(worker.role, worker.slots),
+            strict=True,
+        ):
+            side = expected_side[0]
+            source_ids = list(shard["source_archive_ids"])
+            if len(source_ids) != 1:
+                raise ConfigError(
+                    f"{worker.worker_id}/{side} authoritative shard 必须唯一绑定一个 archive"
+                )
+            source_id = str(source_ids[0])
+            shard_manifest_sha = str(shard["shard_manifest"]["sha256"])
+            if shard_manifest_sha != archives[source_id].manifest_ref.sha256:
+                raise ConfigError(
+                    f"{worker.worker_id}/{side} shard manifest 与 archive manifest 不一致"
+                )
+    return results
+
+
+def _inventory_add(
+    inventory: dict[PurePosixPath, tuple[int, str]],
+    path: PurePosixPath,
+    payload_or_identity: bytes | tuple[int, str],
+) -> None:
+    _safe_relative(path.as_posix(), label="planned canonical path")
+    if isinstance(payload_or_identity, bytes):
+        identity = (
+            len(payload_or_identity),
+            hashlib.sha256(payload_or_identity).hexdigest(),
+        )
+    else:
+        identity = payload_or_identity
+    existing = inventory.get(path)
+    if existing is not None and existing != identity:
+        raise ConfigError(f"planned canonical target collision：{path}")
+    inventory[path] = identity
+
+
+def _copy_target_inventory(
+    requests: Sequence[CopyRequest],
+) -> dict[PurePosixPath, tuple[int, str]]:
+    inventory: dict[PurePosixPath, tuple[int, str]] = {}
+    for request in requests:
+        for target in request.targets:
+            _inventory_add(
+                inventory,
+                target,
+                (request.source.size, request.source.sha256),
+            )
+    return inventory
+
+
+def _stage_ref(
+    ref: ArtifactRef,
+    *,
+    archives: Mapping[str, ArchiveCatalog],
+    root: Path,
+    target: PurePosixPath,
+    label: str,
+) -> int:
+    payload = _read_ref_bytes(ref, archives=archives, label=label)
+    _validate_json_assertions(payload, ref, label=label)
+    destination = root.joinpath(*target.parts)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _write_new(destination, payload)
+    return len(payload)
+
+
+def _validate_authoritative_recovery_suffix(
+    source_state_rows: Sequence[dict[str, str]],
+    *,
+    original_terminal_state_sha256: str,
+    state_append: Sequence[Mapping[str, str]],
+    label: str,
+) -> None:
+    anchor_index = _validate_recovery_state_anchor(
+        source_state_rows,
+        original_terminal_state_sha256=original_terminal_state_sha256,
+        label=label,
+    )
+    existing_suffix = tuple(
+        str(row["status"]) for row in source_state_rows[anchor_index + 1 :]
+    )
+    append_suffix = tuple(str(row["status"]) for row in state_append)
+    if existing_suffix != REAL_RECOVERY_EXISTING_SUFFIX:
+        raise ConfigError(
+            f"{label} authoritative recovery existing suffix "
+            "必须为 validating->running"
+        )
+    if append_suffix != REAL_RECOVERY_APPEND_SUFFIX:
+        raise ConfigError(
+            f"{label} authoritative recovery append "
+            "必须为 finalizing->complete"
+        )
+
+
+def _validate_authoritative_recovery_state(
+    worker: WorkerPlan,
+    *,
+    archives: Mapping[str, ArchiveCatalog],
+    source_state_rows: Sequence[dict[str, str]],
+) -> None:
+    receipt = _read_json_bytes(
+        _read_ref_bytes(
+            worker.task_rows[RECOVERY_TASK_ID]["receipt_ref"],
+            archives=archives,
+            label=f"{worker.worker_id} authoritative recovery receipt",
+        ),
+        label=f"{worker.worker_id} authoritative recovery receipt",
+    )
+    evidence = receipt.get("phase_f_evidence")
+    if not isinstance(evidence, dict):
+        raise ConfigError(f"{worker.worker_id} authoritative recovery evidence 缺失")
+    _validate_authoritative_recovery_suffix(
+        source_state_rows,
+        original_terminal_state_sha256=str(
+            evidence.get("original_terminal_state_sha256", "")
+        ),
+        state_append=worker.state_append,
+        label=worker.worker_id,
+    )
+
+
+def _validate_pre_recovery_archive_closure(
+    worker: WorkerPlan,
+    *,
+    archives: Mapping[str, ArchiveCatalog],
+    expected_failed_anchor_sha256: str,
+) -> dict[str, Any]:
+    archive_ref = worker.recovery_refs["pre_recovery_archive"]
+    manifest_ref = worker.recovery_refs["pre_recovery_manifest"]
+    if archive_ref.path is None:
+        raise ConfigError(f"{worker.worker_id} pre-recovery archive 必须为本地不可变文件")
+    manifest = _parse_flexible_manifest_tsv(
+        _read_ref_bytes(
+            manifest_ref,
+            archives=archives,
+            label=f"{worker.worker_id} pre-recovery manifest",
+        ),
+        label=f"{worker.worker_id} pre-recovery",
+    )
+    regular_members: dict[str, tarfile.TarInfo] = {}
+    with tarfile.open(archive_ref.path, mode="r:*") as archive:
+        for member in archive:
+            raw_name = (
+                member.name[:-1]
+                if member.isdir() and member.name.endswith("/")
+                else member.name
+            )
+            name = _safe_relative(
+                raw_name,
+                label=f"{worker.worker_id} pre-recovery tar member",
+            ).as_posix()
+            if member.isdir():
+                continue
+            if not member.isreg() or name in regular_members:
+                raise ConfigError(
+                    f"{worker.worker_id} pre-recovery archive 含特殊或重复 member"
+                )
+            regular_members[name] = member
+        candidates: list[str] = []
+        manifest_names = set(manifest)
+        for prefix in {
+            tar_name[: -len(manifest_name)]
+            for tar_name in regular_members
+            for manifest_name in manifest_names
+            if tar_name.endswith(manifest_name)
+            and (
+                len(tar_name) == len(manifest_name)
+                or tar_name[-len(manifest_name) - 1] == "/"
+            )
+        }:
+            if {f"{prefix}{name}" for name in manifest_names} == set(regular_members):
+                candidates.append(prefix)
+        if len(candidates) != 1:
+            raise ConfigError(
+                f"{worker.worker_id} pre-recovery archive/manifest exact closure 失败"
+            )
+        prefix = candidates[0]
+        state_payloads: list[bytes] = []
+        for relative, entry in manifest.items():
+            member = regular_members[f"{prefix}{relative}"]
+            if member.size != entry.size:
+                raise ConfigError(
+                    f"{worker.worker_id} pre-recovery member size 不匹配：{relative}"
+                )
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                raise ConfigError(
+                    f"{worker.worker_id} pre-recovery member 无法读取：{relative}"
+                )
+            digest = hashlib.sha256()
+            size = 0
+            state_chunks: list[bytes] | None = (
+                [] if PurePosixPath(relative).name == "state.tsv" else None
+            )
+            with extracted:
+                while True:
+                    chunk = extracted.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    size += len(chunk)
+                    if state_chunks is not None:
+                        state_chunks.append(chunk)
+            if size != entry.size or digest.hexdigest() != entry.sha256:
+                raise ConfigError(
+                    f"{worker.worker_id} pre-recovery member SHA 不匹配：{relative}"
+                )
+            if state_chunks is not None:
+                state_payloads.append(b"".join(state_chunks))
+    if len(state_payloads) != 1:
+        raise ConfigError(f"{worker.worker_id} pre-recovery state.tsv 不唯一")
+    failed_rows = _parse_state_bytes(
+        state_payloads[0],
+        label=f"{worker.worker_id} pre-recovery state",
+    )
+    if (
+        failed_rows[-1]["status"] != "failed"
+        or failed_rows[-1]["row_sha256"] != expected_failed_anchor_sha256
+    ):
+        raise ConfigError(
+            f"{worker.worker_id} pre-recovery failed state anchor 未闭合"
+        )
+    return {
+        "worker_id": worker.worker_id,
+        "file_count": len(manifest),
+        "byte_count": sum(entry.size for entry in manifest.values()),
+        "archive_sha256": archive_ref.sha256,
+        "manifest_sha256": manifest_ref.sha256,
+        "failed_state_sha256": expected_failed_anchor_sha256,
+    }
+
+
+def _positive_pid(value: Any, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ConfigError(f"{label} observed_pid 非正整数")
+    return value
+
+
+def _validate_active_pid_absence_payload(
+    worker: WorkerPlan,
+    *,
+    payload: bytes,
+    profile: str,
+) -> None:
+    value = _read_json_bytes(
+        payload,
+        label=f"{worker.worker_id} active PID absence evidence",
+    )
+    common_valid = (
+        value.get("active_process_absent") is True
+        and _positive_pid(
+            value.get("observed_pid"),
+            label=f"{worker.worker_id} active PID absence evidence",
+        )
+        > 0
+    )
+    _parse_utc_timestamp(
+        value.get("probe_utc"),
+        label=f"{worker.worker_id} active PID absence evidence.probe_utc",
+    )
+    expected_host = f"H{int(worker.worker_id[1:]):02d}"
+    normalized_pidfile = str(
+        value.get("pidfile", value.get("pid_file", ""))
+    ).replace("\\", "/")
+    expected_pidfile_suffix = (
+        f"/runtime_control/{expected_host}/{worker.worker_id}/attempt01/"
+        f"{worker.worker_id}_attempt01.pid"
+    )
+    pidfile_valid = normalized_pidfile.endswith(expected_pidfile_suffix)
+    if profile == "host-worker-count-pidfile-v0":
+        valid = (
+            set(value)
+            == {
+                "active_process_absent",
+                "formal_worker_count",
+                "host",
+                "observed_pid",
+                "pidfile",
+                "probe_utc",
+                "worker_id",
+            }
+            and value.get("formal_worker_count") == 0
+            and value.get("host") == expected_host
+            and value.get("worker_id") == worker.worker_id
+            and pidfile_valid
+        )
+    elif profile == "minimal-legacy-v0":
+        valid = set(value) == {
+            "active_process_absent",
+            "observed_pid",
+            "probe_utc",
+        }
+    elif profile == "task8b-active-pid-absence-v1":
+        valid = (
+            set(value)
+            == {
+                "active_process_absent",
+                "host_id",
+                "observed_pid",
+                "pid_file",
+                "probe",
+                "probe_utc",
+                "schema_version",
+                "worker_id",
+            }
+            and value.get("schema_version") == "task8b-active-pid-absence-v1"
+            and value.get("host_id") == expected_host
+            and value.get("worker_id") == worker.worker_id
+            and bool(str(value.get("probe", "")).strip())
+            and pidfile_valid
+        )
+    elif profile == "host-worker-count-v0":
+        valid = (
+            set(value)
+            == {
+                "active_process_absent",
+                "formal_worker_count",
+                "host",
+                "observed_pid",
+                "probe_utc",
+                "worker_id",
+            }
+            and value.get("formal_worker_count") == 0
+            and value.get("host") == expected_host
+            and value.get("worker_id") == worker.worker_id
+        )
+    else:
+        raise ConfigError(f"{worker.worker_id} active PID absence profile 未批准")
+    if not common_valid or not valid:
+        raise ConfigError(
+            f"{worker.worker_id} active PID absence evidence identity 非法"
+        )
+
+
+def _bind_authoritative_active_pid_evidence(
+    worker: WorkerPlan,
+    *,
+    archives: Mapping[str, ArchiveCatalog],
+) -> ArtifactRef:
+    expected = AUTHORITATIVE_ACTIVE_PID_EVIDENCE[worker.worker_id]
+    authorization = _read_json_bytes(
+        _read_ref_bytes(
+            worker.recovery_refs["authorization"],
+            archives=archives,
+            label=f"{worker.worker_id} recovery authorization PID binding",
+        ),
+        label=f"{worker.worker_id} recovery authorization PID binding",
+    )
+    archive_id = str(expected["archive_id"])
+    member = str(expected["member"])
+    sha256 = str(expected["sha256"])
+    catalog = archives.get(archive_id)
+    entry = catalog.entries.get(member) if catalog is not None else None
+    if (
+        authorization.get("active_pid_absence_evidence_sha256") != sha256
+        or worker.recovery_refs["authorization"].archive_id != archive_id
+        or entry is None
+        or entry.sha256 != sha256
+    ):
+        raise ConfigError(
+            f"{worker.worker_id} active PID absence manifest binding 非法"
+        )
+    ref = ArtifactRef(
+        archive_id=archive_id,
+        member=member,
+        size=entry.size,
+        sha256=entry.sha256,
+    )
+    payload = _read_ref_bytes(
+        ref,
+        archives=archives,
+        label=f"{worker.worker_id} active PID absence evidence",
+    )
+    _validate_active_pid_absence_payload(
+        worker,
+        payload=payload,
+        profile=str(expected["profile"]),
+    )
+    worker.evidence_targets["recovery_active_pid"] = [
+        (
+            "active_pid_absence",
+            ref,
+            PurePosixPath(
+                f"provenance/recovery/{worker.worker_id}/"
+                "active_pid_absence.json"
+            ),
+        )
+    ]
+    return ref
+
+
+def _validate_authoritative_recovery_support(
+    worker: WorkerPlan,
+    *,
+    archives: Mapping[str, ArchiveCatalog],
+) -> dict[str, Any]:
+    receipt = _read_json_bytes(
+        _read_ref_bytes(
+            worker.task_rows[RECOVERY_TASK_ID]["receipt_ref"],
+            archives=archives,
+            label=f"{worker.worker_id} authoritative recovery receipt",
+        ),
+        label=f"{worker.worker_id} authoritative recovery receipt",
+    )
+    evidence = receipt.get("phase_f_evidence")
+    adoption = receipt.get("recovery_adoption")
+    if not isinstance(evidence, dict) or not isinstance(adoption, dict):
+        raise ConfigError(f"{worker.worker_id} authoritative recovery receipt 非法")
+    amendment = _read_json_bytes(
+        _read_ref_bytes(
+            worker.recovery_refs["protocol_amendment"],
+            archives=archives,
+            label=f"{worker.worker_id} protocol amendment",
+        ),
+        label=f"{worker.worker_id} protocol amendment",
+    )
+    attempt_policy = amendment.get("attempt_policy")
+    state_policy = amendment.get("state_policy")
+    if (
+        amendment.get("schema_version")
+        != "task8b-pre-unblind-verifier-recovery-amendment-v1"
+        or amendment.get("amendment_id") != RECOVERY_PROTOCOL_AMENDMENT_ID
+        or amendment.get("approved_before_effect_unblind") is not True
+        or amendment.get("formal_effects_read") is not False
+        or amendment.get("scientific_outcome_fields_accessed") is not False
+        or amendment.get("activation_fail_closed") is not True
+        or not isinstance(attempt_policy, dict)
+        or attempt_policy.get("outer_attempt") != "attempt_01"
+        or attempt_policy.get("cross_attempt_splicing_allowed") is not False
+        or attempt_policy.get("new_outer_attempt_allowed") is not False
+        or not isinstance(state_policy, dict)
+        or state_policy.get("preserve_original_failed_rows") is not True
+        or state_policy.get("rewrite_state_history_allowed") is not False
+        or state_policy.get("allowed_append_transition")
+        != ["failed", "validating", "running", "finalizing", "complete"]
+    ):
+        raise ConfigError(f"{worker.worker_id} protocol amendment identity/policy 非法")
+    authorization = _read_json_bytes(
+        _read_ref_bytes(
+            worker.recovery_refs["authorization"],
+            archives=archives,
+            label=f"{worker.worker_id} recovery authorization",
+        ),
+        label=f"{worker.worker_id} recovery authorization",
+    )
+    authorization_ref = worker.recovery_refs["authorization"]
+    if authorization_ref.archive_id is None:
+        raise ConfigError(
+            f"{worker.worker_id} recovery authorization 必须来自 SHA-bound support archive"
+        )
+    support_catalog = archives[authorization_ref.archive_id]
+    active_pid_sha = str(authorization.get("active_pid_absence_evidence_sha256", ""))
+    verifier_sha = str(authorization.get("verifier_code_sha", ""))
+    expected_attempt_suffix = f"/{worker.worker_id}/{worker.seed}"
+    if (
+        set(authorization) != RECOVERY_AUTHORIZATION_FIELDS
+        or authorization.get("schema_version")
+        != "task8b-same-attempt-recovery-authorization-v1"
+        or authorization.get("authorization_id") != adoption.get("authorization_id")
+        or authorization.get("worker_id") != worker.worker_id
+        or authorization.get("task_id") != RECOVERY_TASK_ID
+        or authorization.get("reason") != RECOVERY_REASON
+        or authorization.get("authorized") is not True
+        or authorization.get("same_attempt_recovery_authorized") is not True
+        or authorization.get("task1_adoption_only") is not True
+        or authorization.get("active_process_absent_confirmed") is not True
+        or not str(authorization.get("attempt_root", "")).replace("\\", "/").endswith(
+            expected_attempt_suffix
+        )
+        or authorization.get("frozen_code_sha") != FROZEN_SCIENTIFIC_CODE_SHA
+        or authorization.get("worker_manifest_sha256")
+        != worker.base_manifest_ref.sha256
+        or authorization.get("baseline_manifest_sha256")
+        != worker.recovery_refs["pre_recovery_manifest"].sha256
+        or authorization.get("pre_recovery_archive_sha256")
+        != worker.recovery_refs["pre_recovery_archive"].sha256
+        or authorization.get("failed_state_row_sha256")
+        != evidence["original_terminal_state_sha256"]
+        or authorization.get("protocol_amendment_id")
+        != RECOVERY_PROTOCOL_AMENDMENT_ID
+        or authorization.get("protocol_amendment_sha256")
+        != worker.recovery_refs["protocol_amendment"].sha256
+        or authorization.get("parent_preunlock_sha256")
+        != amendment.get("parent_pre_unlock_manifest_sha256")
+        or verifier_sha != AUTHORITATIVE_RECOVERY_VERIFIER_CODE_SHA
+        or verifier_sha != evidence["verifier_code_sha"]
+        or authorization.get("verifier_identity_source_sha256")
+        != AUTHORITATIVE_RECOVERY_VERIFIER_IDENTITY_SOURCE_SHA256
+        or authorization.get("controller_sha256")
+        != AUTHORITATIVE_RECOVERY_CONTROLLER_SHA256
+        or authorization.get("formal_runner_sha256")
+        != AUTHORITATIVE_RECOVERY_FORMAL_RUNNER_SHA256
+        or SHA256_RE.fullmatch(active_pid_sha) is None
+        or sum(
+            entry.sha256 == active_pid_sha for entry in support_catalog.entries.values()
+        )
+        != 1
+        or sum(
+            entry.sha256 == worker.recovery_refs["protocol_amendment"].sha256
+            for entry in support_catalog.entries.values()
+        )
+        != 1
+    ):
+        raise ConfigError(f"{worker.worker_id} recovery authorization identity 非法")
+    closure = _validate_pre_recovery_archive_closure(
+        worker,
+        archives=archives,
+        expected_failed_anchor_sha256=str(evidence["original_terminal_state_sha256"]),
+    )
+    return {
+        **closure,
+        "protocol_amendment_sha256": worker.recovery_refs[
+            "protocol_amendment"
+        ].sha256,
+        "authorization_sha256": worker.recovery_refs["authorization"].sha256,
+        "active_pid_absence_evidence_sha256": active_pid_sha,
+        "recovery_code_identity_evidence_status": (
+            RECOVERY_CODE_IDENTITY_EVIDENCE_STATUS
+        ),
+        "effect_fields_read": False,
+    }
+
+
+def _prepare_materialization(
+    source_map_path: str | Path,
+    output_root: str | Path,
+    *,
+    authoritative_real_profile: bool,
+) -> MaterializationPlan:
+    source_path = Path(source_map_path).absolute()
+    if source_path.is_symlink() or not source_path.is_file():
+        raise ConfigError("source map 缺失或为 symlink")
+    source_bytes = source_path.read_bytes()
+    source_sha = hashlib.sha256(source_bytes).hexdigest()
+    source_ref = ArtifactRef(
+        path=source_path,
+        size=len(source_bytes),
+        sha256=source_sha,
+    )
+    source_map = _read_json_bytes(source_bytes, label="source map")
+    _require_exact_keys(
+        source_map,
+        {
+            "schema_version",
+            "materialization_id",
+            "protocol_id",
+            "archives",
+            "analysis",
+            "workers",
+        },
+        label="source map",
+    )
+    if (
+        source_map.get("schema_version") != SOURCE_MAP_SCHEMA
+        or source_map.get("protocol_id") != PROTOCOL_ID
+    ):
+        raise ConfigError("source map schema/protocol 不匹配")
+    materialization_id = _safe_identifier(
+        source_map["materialization_id"],
+        label="materialization_id",
+    )
+    authoritative_identity = (
+        materialization_id == AUTHORITATIVE_REAL_MATERIALIZATION_ID
+        and source_sha == AUTHORITATIVE_REAL_SOURCE_MAP_SHA256
+    )
+    if authoritative_real_profile and not authoritative_identity:
+        raise ConfigError(
+            "authoritative real profile 必须绑定批准的 v8 ID/SHA identity"
+        )
+    if (
+        materialization_id == AUTHORITATIVE_REAL_MATERIALIZATION_ID
+        and source_sha != AUTHORITATIVE_REAL_SOURCE_MAP_SHA256
+    ):
+        raise ConfigError("authoritative real source map SHA 非批准的 v8 identity")
+    if authoritative_identity and not authoritative_real_profile:
+        raise ConfigError(
+            "authoritative real source map 禁止 generic materialization；"
+            "必须显式启用 authoritative real profile"
+        )
+    base = source_path.parent
+    archives = _load_archives(source_map["archives"], base=base)
+    analysis, contract_ref, preunlock_ref = _parse_analysis(
+        source_map["analysis"],
+        base=base,
+        archives=archives,
+    )
+    workers = _parse_workers(source_map["workers"], base=base, archives=archives)
+    _validate_task_source_uniqueness(workers)
+    if authoritative_real_profile:
+        _validate_authoritative_real_selections(archives=archives, workers=workers)
+        for worker in workers:
+            if worker.worker_id in RECOVERED_WORKERS:
+                _bind_authoritative_active_pid_evidence(
+                    worker,
+                    archives=archives,
+                )
+    destination = Path(output_root).absolute()
+    partial = destination.parent / f"{destination.name}.partial-{source_sha[:12]}"
+    if destination.exists() or destination.is_symlink() or partial.exists() or partial.is_symlink():
+        raise FileExistsError(
+            f"canonical destination/partial 已存在，拒绝覆盖：{destination} / {partial}"
+        )
+    if not destination.parent.is_dir():
+        raise ConfigError(f"canonical destination parent 不存在：{destination.parent}")
+    requests = _build_copy_requests(
+        source_map_ref=source_ref,
+        contract_ref=contract_ref,
+        preunlock_ref=preunlock_ref,
+        archives=archives,
+        workers=workers,
+    )
+    archive_copy_plan = _validate_archive_copy_plan(
+        requests=requests,
+        archives=archives,
+        authoritative_real_profile=authoritative_real_profile,
+    )
+    return MaterializationPlan(
+        source_path=source_path,
+        source_ref=source_ref,
+        source_sha256=source_sha,
+        source_map=source_map,
+        archives=archives,
+        analysis=analysis,
+        contract_ref=contract_ref,
+        preunlock_ref=preunlock_ref,
+        workers=workers,
+        destination=destination,
+        partial=partial,
+        requests=requests,
+        archive_copy_plan=archive_copy_plan,
+    )
+
+
+def _build_metadata_plan(
+    plan: MaterializationPlan,
+    *,
+    authoritative_real_profile: bool,
+) -> dict[str, Any]:
+    inventory = _copy_target_inventory(plan.requests)
+    _inventory_add(
+        inventory,
+        EXCLUSION_LEDGER_TARGET,
+        EXCLUSION_LEDGER_BYTES,
+    )
+    manifests: list[dict[str, Any]] = []
+    manifest_by_worker: dict[str, dict[str, Any]] = {}
+    manifest_shas: dict[str, str] = {}
+    worker_reports: list[dict[str, Any]] = []
+    recovery_reports: list[dict[str, Any]] = []
+    staged_bytes = 0
+    staged_files = 0
+    with tempfile.TemporaryDirectory(
+        prefix=".task8b-metadata-dry-run-",
+        dir=plan.destination.parent,
+    ) as temporary:
+        staging = Path(temporary)
+        for worker in plan.workers:
+            attempt_relative = PurePosixPath(
+                f"snapshots/{worker.worker_id}/{worker.seed}/attempt_01"
+            )
+            attempt = staging.joinpath(*attempt_relative.parts)
+            task_results: list[dict[str, Any]] = []
+            for task_id in worker.expected_tasks:
+                task = worker.task_rows[task_id]
+                receipt_ref = task["receipt_ref"]
+                receipt_payload = _read_ref_bytes(
+                    receipt_ref,
+                    archives=plan.archives,
+                    label=f"{worker.worker_id}/{task_id} metadata task receipt",
+                )
+                receipt = _read_json_bytes(
+                    receipt_payload,
+                    label=f"{worker.worker_id}/{task_id} metadata task receipt",
+                )
+                task_results.append(
+                    _validate_task_receipt_value(
+                        worker,
+                        task_id=task_id,
+                        receipt=receipt,
+                        actual_files=_planned_task_manifest(task),
+                        base_manifest=worker.base_manifest,
+                    )
+                )
+                receipt_target = (
+                    attempt_relative / "task_receipts" / f"{task_id}.json"
+                )
+                staged_bytes += _stage_ref(
+                    receipt_ref,
+                    archives=plan.archives,
+                    root=staging,
+                    target=receipt_target,
+                    label=f"{worker.worker_id}/{task_id} staged task receipt",
+                )
+                staged_files += 1
+            for evidence in worker.evidence_targets.values():
+                for kind, ref, target in evidence:
+                    staged_bytes += _stage_ref(
+                        ref,
+                        archives=plan.archives,
+                        root=staging,
+                        target=target,
+                        label=f"{worker.worker_id} staged {kind}",
+                    )
+                    staged_files += 1
+            state_payload = _read_ref_bytes(
+                worker.state_ref,
+                archives=plan.archives,
+                label=f"{worker.worker_id} metadata state prefix",
+            )
+            prefix_rows = _parse_state_bytes(
+                state_payload,
+                label=f"{worker.worker_id} metadata state prefix",
+            )
+            appended_rows = _build_state_rows(
+                prefix_rows,
+                worker.state_append,
+                label=worker.worker_id,
+            )
+            _validate_recovery(
+                worker,
+                None,
+                source_state_rows=prefix_rows,
+                archives=plan.archives,
+                metadata_only=True,
+            )
+            if authoritative_real_profile and worker.worker_id in RECOVERED_WORKERS:
+                _validate_authoritative_recovery_state(
+                    worker,
+                    archives=plan.archives,
+                    source_state_rows=prefix_rows,
+                )
+                recovery_reports.append(
+                    _validate_authoritative_recovery_support(
+                        worker,
+                        archives=plan.archives,
+                    )
+                )
+            source_identities = _validate_shard_identity_receipts(
+                worker,
+                root=staging,
+                attempt=attempt,
+                archives=plan.archives,
+            )
+            _validate_secondary_normalization_evidence(worker, root=staging)
+            composition, lineage = _build_worker_composition_values(
+                worker,
+                root=staging,
+                source_identities=source_identities,
+            )
+            composition_bytes = _json_bytes(composition)
+            _inventory_add(
+                inventory,
+                PurePosixPath(f"manifests/composition/{worker.worker_id}.json"),
+                composition_bytes,
+            )
+            augmented = {
+                **copy.deepcopy(worker.base_manifest),
+                "phase_f_shard_lineage": lineage,
+            }
+            manifest_bytes = _json_bytes(augmented)
+            manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+            _inventory_add(
+                inventory,
+                PurePosixPath(f"manifests/{worker.worker_id}.json"),
+                manifest_bytes,
+            )
+            _inventory_add(
+                inventory,
+                attempt_relative / "worker_manifest.json",
+                manifest_bytes,
+            )
+            task_results_bytes = _json_bytes(
+                {
+                    "schema_version": TASK_RESULTS_SCHEMA,
+                    "worker_id": worker.worker_id,
+                    "tasks": task_results,
+                }
+            )
+            _inventory_add(
+                inventory,
+                attempt_relative / "task_results.json",
+                task_results_bytes,
+            )
+            final_state_bytes = state_payload + _state_row_bytes(appended_rows)
+            inventory[attempt_relative / "state.tsv"] = (
+                len(final_state_bytes),
+                hashlib.sha256(final_state_bytes).hexdigest(),
+            )
+            attempt_rows: list[tuple[str, int, str]] = []
+            for path, (size, sha256) in inventory.items():
+                try:
+                    relative = path.relative_to(attempt_relative)
+                except ValueError:
+                    continue
+                if relative.as_posix() in FILES_TSV_EXCLUSIONS:
+                    continue
+                attempt_rows.append((relative.as_posix(), size, sha256))
+            files_tsv_bytes = _files_tsv_bytes(attempt_rows)
+            _inventory_add(
+                inventory,
+                attempt_relative / "files.tsv",
+                files_tsv_bytes,
+            )
+            completion_bytes = _json_bytes(
+                {
+                    "schema_version": COMPLETION_SCHEMA,
+                    "worker_id": worker.worker_id,
+                    "status": "complete",
+                    "not_for_paper": False,
+                    "files_tsv_sha256": hashlib.sha256(files_tsv_bytes).hexdigest(),
+                }
+            )
+            _inventory_add(
+                inventory,
+                attempt_relative / "completion_receipt.json",
+                completion_bytes,
+            )
+            manifests.append(augmented)
+            manifest_by_worker[worker.worker_id] = augmented
+            manifest_shas[worker.worker_id] = manifest_sha
+            worker_reports.append(
+                {
+                    "worker_id": worker.worker_id,
+                    "role": worker.role,
+                    "seed": worker.seed,
+                    "pair_id": worker.pair_id,
+                    "task_count": len(worker.expected_tasks),
+                    "actual_hands": sum(
+                        PLANNED_HANDS[task_id] for task_id in worker.expected_tasks
+                    ),
+                    "final_state": "complete",
+                    "manifest_sha256": manifest_sha,
+                    "composition_receipt_sha256": hashlib.sha256(
+                        composition_bytes
+                    ).hexdigest(),
+                }
+            )
+        try:
+            validate_worker_manifest_set(
+                [copy.deepcopy(manifest) for manifest in manifests],
+                expected_seed_count=6,
+            )
+        except ConfigError as exc:
+            raise ConfigError(f"metadata six-seed manifest set 非法：{exc}") from exc
+        index = _build_manifest_index(
+            manifests,
+            manifest_shas,
+            contract_sha256=str(plan.analysis["analysis_contract_sha256"]),
+        )
+        index_bytes = _json_bytes(index)
+        index_sha = hashlib.sha256(index_bytes).hexdigest()
+        _inventory_add(
+            inventory,
+            PurePosixPath("manifests/manifest_index.json"),
+            index_bytes,
+        )
+        analysis_input = _build_analysis_input(
+            workers=plan.workers,
+            manifests=manifest_by_worker,
+            manifest_shas=manifest_shas,
+            analysis=plan.analysis,
+            manifest_index_sha256=index_sha,
+        )
+        analysis_input_bytes = _json_bytes(analysis_input)
+        _inventory_add(
+            inventory,
+            PurePosixPath("analysis_input.json"),
+            analysis_input_bytes,
+        )
+    expected_bytes = sum(size for size, _sha256 in inventory.values())
+    expected_file_count = len(inventory)
+    if _sha256_file(plan.source_path) != plan.source_sha256:
+        raise ConfigError("source map 在 metadata preflight 期间发生变化")
+    for source_id, catalog in plan.archives.items():
+        _validate_file_identity(
+            catalog.path,
+            size=catalog.size,
+            sha256=catalog.sha256,
+            label=f"archive {source_id} post-metadata-preflight",
+        )
+    validated_local_refs: set[tuple[str, ...]] = set()
+    for request in plan.requests:
+        ref = request.source
+        if ref.path is None or ref.key in validated_local_refs:
+            continue
+        _validate_file_identity(
+            ref.path,
+            size=ref.size,
+            sha256=ref.sha256,
+            label=f"local source post-metadata-preflight {ref.path}",
+        )
+        validated_local_refs.add(ref.key)
+    if (
+        plan.destination.exists()
+        or plan.destination.is_symlink()
+        or plan.partial.exists()
+        or plan.partial.is_symlink()
+    ):
+        raise FileExistsError(
+            "canonical destination/partial 在 metadata preflight 期间出现，拒绝继续"
+        )
+    free_bytes = shutil.disk_usage(plan.destination.parent).free
+    safety_reserve = max(2 * 1024**3, expected_bytes // 20)
+    if free_bytes < expected_bytes + safety_reserve:
+        raise ConfigError(
+            "canonical destination volume 空间不足："
+            f"free={free_bytes} expected={expected_bytes} reserve={safety_reserve}"
+        )
+    provenance_targets = [
+        target.as_posix()
+        for request in plan.requests
+        for target in request.targets
+        if target.parts[:2]
+        in {
+            ("provenance", "archive_manifests"),
+            ("provenance", "archive_receipts"),
+            ("provenance", "archive_seals"),
+        }
+    ]
+    if len(provenance_targets) != len(plan.archives) * 3:
+        raise ConfigError("archive manifest/receipt/seal provenance plan 不闭合")
+    return {
+        "expected_file_count": expected_file_count,
+        "expected_bytes": expected_bytes,
+        "free_bytes": free_bytes,
+        "safety_reserve_bytes": safety_reserve,
+        "copied_target_count": sum(len(request.targets) for request in plan.requests),
+        "copied_target_bytes": sum(
+            request.source.size * len(request.targets) for request in plan.requests
+        ),
+        "staged_metadata_file_count": staged_files,
+        "staged_metadata_bytes": staged_bytes,
+        "manifest_index_sha256": index_sha,
+        "analysis_input_sha256": hashlib.sha256(analysis_input_bytes).hexdigest(),
+        "workers": worker_reports,
+        "recovery_closure": recovery_reports,
+        "provenance_targets": sorted(provenance_targets),
+        "file_plan": [
+            {
+                "relative_path": path.as_posix(),
+                "size": size,
+                "sha256": sha256,
+            }
+            for path, (size, sha256) in sorted(
+                inventory.items(),
+                key=lambda item: item[0].as_posix(),
+            )
+        ],
+    }
+
+
+def metadata_only_dry_run_task8b_phase_f(
+    source_map_path: str | Path,
+    output_root: str | Path,
+    report_path: str | Path,
+    *,
+    authoritative_real_profile: bool = False,
+) -> dict[str, Any]:
+    """Validate the exact production plan without copying formal task payloads."""
+
+    report = Path(report_path).absolute()
+    if report.exists() or report.is_symlink():
+        raise FileExistsError(f"dry-run report 已存在，拒绝覆盖：{report}")
+    if not report.parent.is_dir():
+        raise ConfigError(f"dry-run report parent 不存在：{report.parent}")
+    plan = _prepare_materialization(
+        source_map_path,
+        output_root,
+        authoritative_real_profile=authoritative_real_profile,
+    )
+    metadata = _build_metadata_plan(
+        plan,
+        authoritative_real_profile=authoritative_real_profile,
+    )
+    selection_rows = (
+        _validate_authoritative_real_selections(
+            archives=plan.archives,
+            workers=plan.workers,
+        )
+        if authoritative_real_profile
+        else []
+    )
+    value = {
+        "schema_version": "task8b-phase-f-metadata-dry-run-v1",
+        "status": "pass",
+        "gaps": [],
+        "authoritative_real_profile": authoritative_real_profile,
+        "source_map_path": str(plan.source_path),
+        "source_map_sha256": plan.source_sha256,
+        "materialization_id": plan.source_map["materialization_id"],
+        "candidate_output_root": str(plan.destination),
+        "candidate_partial_root": str(plan.partial),
+        "analysis_contract_sha256": plan.analysis["analysis_contract_sha256"],
+        "pre_unlock_manifest_sha256": plan.analysis["pre_unlock_manifest_sha256"],
+        "archive_count": len(plan.archives),
+        "worker_count": len(plan.workers),
+        "task_count": sum(len(worker.expected_tasks) for worker in plan.workers),
+        "pair_count": len({worker.pair_id for worker in plan.workers}),
+        "gates": [
+            {"gate": name, "status": "pass"} for name in METADATA_DRY_RUN_GATE_NAMES
+        ],
+        "archive_copy_plan": plan.archive_copy_plan,
+        "authoritative_selections": selection_rows,
+        **metadata,
+        "metadata_only": True,
+        "large_payload_files_written": 0,
+        "large_payload_bytes_written": 0,
+        "effect_fields_read": False,
+        "formal_effect_fields_read": False,
+        "limitations": _declared_limitations(),
+        "paper_eligibility": CANONICAL_PAPER_ELIGIBILITY,
+    }
+    _write_json_new(report, value)
+    return {
+        "status": "pass",
+        "report_path": str(report),
+        "report_sha256": _sha256_file(report),
+        "source_map_sha256": plan.source_sha256,
+        "worker_count": len(plan.workers),
+        "task_count": 60,
+        "expected_file_count": metadata["expected_file_count"],
+        "expected_bytes": metadata["expected_bytes"],
+        "effect_fields_read": False,
+        "formal_effect_fields_read": False,
+        "paper_eligibility": CANONICAL_PAPER_ELIGIBILITY,
+    }
+
+
+def create_pre_materialization_receipt(
+    source_map_path: str | Path,
+    output_root: str | Path,
+    dry_run_report_path: str | Path,
+    receipt_output_path: str | Path,
+) -> dict[str, Any]:
+    """Create one append-only authorization receipt from a passed dry-run."""
+
+    source_path = Path(source_map_path).absolute()
+    report_path = Path(dry_run_report_path).absolute()
+    receipt_path = Path(receipt_output_path).absolute()
+    destination = Path(output_root).absolute()
+    if (
+        source_path.is_symlink()
+        or not source_path.is_file()
+        or report_path.is_symlink()
+        or not report_path.is_file()
+    ):
+        raise ConfigError("pre-materialization source map/report 缺失或为 symlink")
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise FileExistsError(
+            f"pre-materialization receipt 已存在，拒绝覆盖：{receipt_path}"
+        )
+    if not receipt_path.parent.is_dir():
+        raise ConfigError(
+            f"pre-materialization receipt parent 不存在：{receipt_path.parent}"
+        )
+    source_sha = _sha256_file(source_path)
+    report_sha = _sha256_file(report_path)
+    report = _read_json_bytes(
+        report_path.read_bytes(),
+        label="metadata dry-run report for receipt",
+    )
+    expected_gates = [
+        {"gate": name, "status": "pass"}
+        for name in METADATA_DRY_RUN_GATE_NAMES
+    ]
+    if (
+        set(report) != METADATA_DRY_RUN_REPORT_FIELDS
+        or report.get("schema_version")
+        != "task8b-phase-f-metadata-dry-run-v1"
+        or report.get("status") != "pass"
+        or report.get("gaps") != []
+        or report.get("authoritative_real_profile") is not True
+        or report.get("source_map_path") != str(source_path)
+        or report.get("source_map_sha256") != source_sha
+        or source_sha != AUTHORITATIVE_REAL_SOURCE_MAP_SHA256
+        or report.get("materialization_id")
+        != AUTHORITATIVE_REAL_MATERIALIZATION_ID
+        or report.get("candidate_output_root") != str(destination)
+        or report.get("worker_count") != 12
+        or report.get("task_count") != 60
+        or report.get("pair_count") != 6
+        or report.get("gates") != expected_gates
+        or report.get("metadata_only") is not True
+        or report.get("large_payload_files_written") != 0
+        or report.get("large_payload_bytes_written") != 0
+        or report.get("effect_fields_read") is not False
+        or report.get("formal_effect_fields_read") is not False
+        or report.get("limitations") != _declared_limitations()
+        or report.get("paper_eligibility") != CANONICAL_PAPER_ELIGIBILITY
+        or isinstance(report.get("expected_file_count"), bool)
+        or not isinstance(report.get("expected_file_count"), int)
+        or isinstance(report.get("expected_bytes"), bool)
+        or not isinstance(report.get("expected_bytes"), int)
+    ):
+        raise ConfigError("metadata dry-run report 不满足 receipt 生成门禁")
+    git_identity = _materializer_git_identity()
+    if (
+        git_identity["origin_main_sha"] != git_identity["head_sha"]
+        or git_identity["tracked_clean"] is not True
+        or git_identity["working_blob_sha"] != git_identity["head_blob_sha"]
+    ):
+        raise ConfigError("materializer 必须 pushed、tracked-clean 且 blob 闭合")
+    receipt = {
+        "schema_version": "task8b-phase-f-pre-materialization-receipt-v1",
+        "status": "approved",
+        "materializer_code_sha": git_identity["head_sha"],
+        "materializer_file_sha256": _sha256_file(Path(__file__).absolute()),
+        "source_map_sha256": source_sha,
+        "analysis_contract_sha256": report["analysis_contract_sha256"],
+        "pre_unlock_manifest_sha256": report[
+            "pre_unlock_manifest_sha256"
+        ],
+        "worker_count": 12,
+        "task_count": 60,
+        "expected_file_count": report["expected_file_count"],
+        "expected_bytes": report["expected_bytes"],
+        "dry_run_report_path": str(report_path),
+        "dry_run_report_sha256": report_sha,
+        "authoritative_real_profile": True,
+        "effect_fields_read": False,
+        "formal_effect_fields_read": False,
+        "recovery_code_identity_evidence_status": (
+            RECOVERY_CODE_IDENTITY_EVIDENCE_STATUS
+        ),
+        "paper_eligibility": CANONICAL_PAPER_ELIGIBILITY,
+    }
+    _write_json_new(receipt_path, receipt)
+    return {
+        "status": "approved",
+        "receipt_path": str(receipt_path),
+        "receipt_sha256": _sha256_file(receipt_path),
+        "materializer_code_sha": git_identity["head_sha"],
+        "source_map_sha256": source_sha,
+        "effect_fields_read": False,
+        "formal_effect_fields_read": False,
+        "paper_eligibility": CANONICAL_PAPER_ELIGIBILITY,
+    }
+
+
+def _validate_pre_materialization_receipt(
+    receipt_path: str | Path,
+    *,
+    plan: MaterializationPlan,
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    path = Path(receipt_path).absolute()
+    if path.is_symlink() or not path.is_file():
+        raise ConfigError("pre-materialization receipt 缺失或为 symlink")
+    receipt = _read_json_bytes(path.read_bytes(), label="pre-materialization receipt")
+    expected_keys = {
+        "schema_version",
+        "status",
+        "materializer_code_sha",
+        "materializer_file_sha256",
+        "source_map_sha256",
+        "analysis_contract_sha256",
+        "pre_unlock_manifest_sha256",
+        "worker_count",
+        "task_count",
+        "expected_file_count",
+        "expected_bytes",
+        "dry_run_report_path",
+        "dry_run_report_sha256",
+        "authoritative_real_profile",
+        "effect_fields_read",
+        "formal_effect_fields_read",
+        "recovery_code_identity_evidence_status",
+        "paper_eligibility",
+    }
+    if set(receipt) != expected_keys:
+        raise ConfigError("pre-materialization receipt keys 非法")
+    report_path = Path(str(receipt["dry_run_report_path"])).absolute()
+    if report_path.is_symlink() or not report_path.is_file():
+        raise ConfigError("pre-materialization dry-run report 缺失或为 symlink")
+    report_sha = _sha256_file(report_path)
+    report = _read_json_bytes(report_path.read_bytes(), label="metadata dry-run report")
+    materializer_file_sha = _sha256_file(Path(__file__).absolute())
+    git_identity = _materializer_git_identity()
+    expected_gates = [
+        {"gate": name, "status": "pass"} for name in METADATA_DRY_RUN_GATE_NAMES
+    ]
+    expected_report_bindings = {
+        "source_map_path": str(plan.source_path),
+        "source_map_sha256": plan.source_sha256,
+        "materialization_id": plan.source_map["materialization_id"],
+        "candidate_output_root": str(plan.destination),
+        "candidate_partial_root": str(plan.partial),
+        "analysis_contract_sha256": plan.analysis["analysis_contract_sha256"],
+        "pre_unlock_manifest_sha256": plan.analysis["pre_unlock_manifest_sha256"],
+        "archive_count": len(plan.archives),
+        "worker_count": len(plan.workers),
+        "task_count": sum(len(worker.expected_tasks) for worker in plan.workers),
+        "pair_count": len({worker.pair_id for worker in plan.workers}),
+        "archive_copy_plan": plan.archive_copy_plan,
+        "authoritative_selections": _validate_authoritative_real_selections(
+            archives=plan.archives,
+            workers=plan.workers,
+        ),
+        **{
+            key: metadata[key]
+            for key in METADATA_DRY_RUN_PLAN_BINDING_FIELDS
+        },
+    }
+    report_free_bytes = report.get("free_bytes")
+    report_reserve_bytes = report.get("safety_reserve_bytes")
+    if (
+        receipt.get("schema_version")
+        != "task8b-phase-f-pre-materialization-receipt-v1"
+        or receipt.get("status") != "approved"
+        or receipt.get("materializer_code_sha") != git_identity["head_sha"]
+        or git_identity["origin_main_sha"] != git_identity["head_sha"]
+        or git_identity["tracked_clean"] is not True
+        or git_identity["working_blob_sha"] != git_identity["head_blob_sha"]
+        or receipt.get("materializer_file_sha256") != materializer_file_sha
+        or receipt.get("source_map_sha256") != plan.source_sha256
+        or receipt.get("analysis_contract_sha256")
+        != plan.analysis["analysis_contract_sha256"]
+        or receipt.get("pre_unlock_manifest_sha256")
+        != plan.analysis["pre_unlock_manifest_sha256"]
+        or receipt.get("worker_count") != 12
+        or receipt.get("task_count") != 60
+        or receipt.get("expected_file_count") != metadata["expected_file_count"]
+        or receipt.get("expected_bytes") != metadata["expected_bytes"]
+        or receipt.get("dry_run_report_sha256") != report_sha
+        or receipt.get("authoritative_real_profile") is not True
+        or receipt.get("effect_fields_read") is not False
+        or receipt.get("formal_effect_fields_read") is not False
+        or receipt.get("recovery_code_identity_evidence_status")
+        != RECOVERY_CODE_IDENTITY_EVIDENCE_STATUS
+        or receipt.get("paper_eligibility")
+        != CANONICAL_PAPER_ELIGIBILITY
+        or report.get("status") != "pass"
+        or report.get("schema_version")
+        != "task8b-phase-f-metadata-dry-run-v1"
+        or report.get("gaps") != []
+        or report.get("authoritative_real_profile") is not True
+        or set(report) != METADATA_DRY_RUN_REPORT_FIELDS
+        or report.get("gates") != expected_gates
+        or any(
+            report.get(key) != expected
+            for key, expected in expected_report_bindings.items()
+        )
+        or report.get("metadata_only") is not True
+        or report.get("large_payload_files_written") != 0
+        or report.get("large_payload_bytes_written") != 0
+        or not isinstance(report_free_bytes, int)
+        or isinstance(report_free_bytes, bool)
+        or not isinstance(report_reserve_bytes, int)
+        or isinstance(report_reserve_bytes, bool)
+        or report_free_bytes
+        < metadata["expected_bytes"] + report_reserve_bytes
+        or report.get("effect_fields_read") is not False
+        or report.get("formal_effect_fields_read") is not False
+        or report.get("limitations") != _declared_limitations()
+        or report.get("paper_eligibility") != CANONICAL_PAPER_ELIGIBILITY
+    ):
+        raise ConfigError("pre-materialization receipt/dry-run report binding 非法")
+    return receipt
+
+
+def _freeze_pre_materialization_evidence(
+    receipt_path: str | Path,
+    *,
+    receipt: Mapping[str, Any],
+    root: Path,
+) -> list[dict[str, Any]]:
+    source_receipt = Path(receipt_path).absolute()
+    receipt_bytes = source_receipt.read_bytes()
+    if (
+        _read_json_bytes(
+            receipt_bytes,
+            label="pre-materialization receipt freeze",
+        )
+        != dict(receipt)
+    ):
+        raise ConfigError("pre-materialization receipt 在验证后发生变化")
+    source_report = Path(str(receipt["dry_run_report_path"])).absolute()
+    report_bytes = source_report.read_bytes()
+    if (
+        hashlib.sha256(report_bytes).hexdigest()
+        != receipt["dry_run_report_sha256"]
+    ):
+        raise ConfigError("metadata dry-run report 在验证后发生变化")
+    targets = (
+        (PRE_MATERIALIZATION_REPORT_TARGET, report_bytes),
+        (PRE_MATERIALIZATION_RECEIPT_TARGET, receipt_bytes),
+    )
+    rows = []
+    for relative, payload in targets:
+        _write_new(root.joinpath(*relative.parts), payload)
+        rows.append(
+            {
+                "relative_path": relative.as_posix(),
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    return sorted(rows, key=lambda row: str(row["relative_path"]))
+
+
+def _canonical_manifest_tsv_bytes(
+    rows: Sequence[Mapping[str, Any]],
+) -> bytes:
+    handle = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        handle,
+        fieldnames=["relative_path", "size", "sha256"],
+        delimiter="\t",
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(
+            {
+                "relative_path": row["relative_path"],
+                "size": row["size"],
+                "sha256": row["sha256"],
+            }
+        )
+    return handle.getvalue().encode("utf-8")
+
+
+def _write_canonical_root_closure(
+    plan: MaterializationPlan,
+    *,
+    root: Path,
+    manifest_rows: Sequence[Mapping[str, Any]],
+    materializer_code_sha: str,
+    authoritative_real_profile: bool,
+) -> dict[str, Any]:
+    reserved = {
+        CANONICAL_FILE_MANIFEST_TARGET.as_posix(),
+        CANONICAL_ROOT_SEAL_TARGET.as_posix(),
+    }
+    normalized_rows = sorted(
+        (dict(row) for row in manifest_rows),
+        key=lambda row: str(row["relative_path"]),
+    )
+    if (
+        len({str(row["relative_path"]) for row in normalized_rows})
+        != len(normalized_rows)
+        or any(str(row["relative_path"]) in reserved for row in normalized_rows)
+    ):
+        raise ConfigError("canonical root manifest path 集合非法")
+    manifest_bytes = _canonical_manifest_tsv_bytes(normalized_rows)
+    manifest_path = root.joinpath(*CANONICAL_FILE_MANIFEST_TARGET.parts)
+    _write_new(manifest_path, manifest_bytes)
+    seal = {
+        "schema_version": "task8b-six-seed-canonical-root-seal-v1",
+        "status": "sealed_with_declared_limitation",
+        "materialization_id": plan.source_map["materialization_id"],
+        "source_map_sha256": plan.source_sha256,
+        "analysis_contract_sha256": plan.analysis["analysis_contract_sha256"],
+        "analysis_freeze_sha256": plan.analysis[
+            "pre_unlock_manifest_sha256"
+        ],
+        "materializer_code_sha": materializer_code_sha,
+        "materializer_file_sha256": _sha256_file(Path(__file__).absolute()),
+        "authoritative_real_profile": authoritative_real_profile,
+        "canonical_file_manifest": {
+            "relative_path": CANONICAL_FILE_MANIFEST_TARGET.as_posix(),
+            "size": len(manifest_bytes),
+            "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        },
+        "manifest_entry_count": len(normalized_rows),
+        "manifest_entry_bytes": sum(int(row["size"]) for row in normalized_rows),
+        "published_tree_file_count": len(normalized_rows) + 2,
+        "effect_fields_read": False,
+        "formal_effect_fields_read": False,
+        "recovery_code_identity_evidence_status": (
+            RECOVERY_CODE_IDENTITY_EVIDENCE_STATUS
+        ),
+        "paper_eligibility": CANONICAL_PAPER_ELIGIBILITY,
+        "limitations": _declared_limitations(),
+    }
+    seal_path = root.joinpath(*CANONICAL_ROOT_SEAL_TARGET.parts)
+    _write_json_new(seal_path, seal)
+    return {
+        "canonical_file_manifest_sha256": _sha256_file(manifest_path),
+        "canonical_root_seal_sha256": _sha256_file(seal_path),
+        "manifest_entry_count": len(normalized_rows),
+        "manifest_entry_bytes": sum(int(row["size"]) for row in normalized_rows),
     }
 
 
@@ -2482,65 +4624,60 @@ def _publish_staging_no_overwrite(staging: Path, destination: Path) -> None:
 def materialize_task8b_phase_f(
     source_map_path: str | Path,
     output_root: str | Path,
+    *,
+    authoritative_real_profile: bool = False,
+    pre_materialization_receipt_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Materialize one append-only, SHA-closed TASK8B six-seed Phase F tree."""
 
-    source_path = Path(source_map_path).absolute()
-    if source_path.is_symlink() or not source_path.is_file():
-        raise ConfigError("source map 缺失或为 symlink")
-    source_bytes = source_path.read_bytes()
-    source_sha = hashlib.sha256(source_bytes).hexdigest()
-    source_ref = ArtifactRef(
-        path=source_path,
-        size=len(source_bytes),
-        sha256=source_sha,
+    plan = _prepare_materialization(
+        source_map_path,
+        output_root,
+        authoritative_real_profile=authoritative_real_profile,
     )
-    source_map = _read_json_bytes(source_bytes, label="source map")
-    _require_exact_keys(
-        source_map,
-        {
-            "schema_version",
-            "materialization_id",
-            "protocol_id",
-            "archives",
-            "analysis",
-            "workers",
-        },
-        label="source map",
+    metadata = _build_metadata_plan(
+        plan,
+        authoritative_real_profile=authoritative_real_profile,
     )
-    if (
-        source_map.get("schema_version") != SOURCE_MAP_SCHEMA
-        or source_map.get("protocol_id") != PROTOCOL_ID
-    ):
-        raise ConfigError("source map schema/protocol 不匹配")
-    _safe_identifier(source_map["materialization_id"], label="materialization_id")
-    base = source_path.parent
-    archives = _load_archives(source_map["archives"], base=base)
-    analysis, contract_ref, preunlock_ref = _parse_analysis(
-        source_map["analysis"], base=base, archives=archives
-    )
-    workers = _parse_workers(source_map["workers"], base=base, archives=archives)
-    destination = Path(output_root).absolute()
-    partial = destination.parent / f"{destination.name}.partial-{source_sha[:12]}"
-    if destination.exists() or destination.is_symlink() or partial.exists() or partial.is_symlink():
-        raise FileExistsError(
-            f"canonical destination/partial 已存在，拒绝覆盖：{destination} / {partial}"
+    validated_receipt: dict[str, Any] | None = None
+    if authoritative_real_profile:
+        if pre_materialization_receipt_path is None:
+            raise ConfigError(
+                "authoritative real materialization 必须提供 pre-materialization receipt"
+            )
+        validated_receipt = _validate_pre_materialization_receipt(
+            pre_materialization_receipt_path,
+            plan=plan,
+            metadata=metadata,
         )
-    requests = _build_copy_requests(
-        source_map_ref=source_ref,
-        contract_ref=contract_ref,
-        preunlock_ref=preunlock_ref,
-        archives=archives,
-        workers=workers,
+    elif pre_materialization_receipt_path is not None:
+        raise ConfigError("generic materialization 不得使用 authoritative receipt")
+    plan.partial.mkdir(parents=True, exist_ok=False)
+    _execute_copy_requests(
+        requests=plan.requests,
+        archives=plan.archives,
+        root=plan.partial,
     )
-    partial.mkdir(parents=True, exist_ok=False)
-    _execute_copy_requests(requests=requests, archives=archives, root=partial)
+    _write_new(
+        plan.partial.joinpath(*EXCLUSION_LEDGER_TARGET.parts),
+        EXCLUSION_LEDGER_BYTES,
+    )
+    pre_materialization_rows: list[dict[str, Any]] = []
+    if validated_receipt is not None:
+        assert pre_materialization_receipt_path is not None
+        pre_materialization_rows = _freeze_pre_materialization_evidence(
+            pre_materialization_receipt_path,
+            receipt=validated_receipt,
+            root=plan.partial,
+        )
     manifests: list[dict[str, Any]] = []
     manifest_by_worker: dict[str, dict[str, Any]] = {}
     manifest_shas: dict[str, str] = {}
-    for worker in workers:
+    for worker in plan.workers:
         manifest, _lineage, manifest_sha = _materialize_worker(
-            worker, root=partial, archives=archives
+            worker,
+            root=plan.partial,
+            archives=plan.archives,
         )
         manifests.append(manifest)
         manifest_by_worker[worker.worker_id] = manifest
@@ -2555,29 +4692,110 @@ def materialize_task8b_phase_f(
     index = _build_manifest_index(
         manifests,
         manifest_shas,
-        contract_sha256=str(analysis["analysis_contract_sha256"]),
+        contract_sha256=str(plan.analysis["analysis_contract_sha256"]),
     )
-    _write_json_new(partial / "manifests" / "manifest_index.json", index)
+    _write_json_new(plan.partial / "manifests" / "manifest_index.json", index)
+    manifest_index_sha256 = _sha256_file(
+        plan.partial / "manifests" / "manifest_index.json"
+    )
     analysis_input = _build_analysis_input(
-        root=partial,
-        workers=workers,
+        workers=plan.workers,
         manifests=manifest_by_worker,
         manifest_shas=manifest_shas,
-        analysis=analysis,
+        analysis=plan.analysis,
+        manifest_index_sha256=manifest_index_sha256,
     )
-    _write_json_new(partial / "analysis_input.json", analysis_input)
-    if _sha256_file(source_path) != source_sha:
+    _write_json_new(plan.partial / "analysis_input.json", analysis_input)
+    if _sha256_file(plan.source_path) != plan.source_sha256:
         raise ConfigError("source map 在 materialization 期间发生变化")
-    if destination.exists() or destination.is_symlink():
-        raise FileExistsError(f"canonical destination 在发布前出现，拒绝覆盖：{destination}")
-    _publish_staging_no_overwrite(partial, destination)
+    actual_manifest_before_closure = _directory_manifest(plan.partial)
+    expected_before_closure = sorted(
+        [
+            *metadata["file_plan"],
+            *pre_materialization_rows,
+        ],
+        key=lambda row: str(row["relative_path"]),
+    )
+    if (
+        actual_manifest_before_closure != expected_before_closure
+    ):
+        raise ConfigError("canonical materialization 与 metadata dry-run file plan 不一致")
+    materializer_code_sha = "UNBOUND_GENERIC_PROFILE"
+    if authoritative_real_profile:
+        git_identity = _materializer_git_identity()
+        if (
+            validated_receipt is None
+            or git_identity["head_sha"]
+            != validated_receipt["materializer_code_sha"]
+            or git_identity["origin_main_sha"] != git_identity["head_sha"]
+            or git_identity["tracked_clean"] is not True
+            or git_identity["working_blob_sha"] != git_identity["head_blob_sha"]
+        ):
+            raise ConfigError(
+                "materializer git identity 在 materialization 期间发生变化"
+            )
+        materializer_code_sha = str(git_identity["head_sha"])
+    closure = _write_canonical_root_closure(
+        plan,
+        root=plan.partial,
+        manifest_rows=actual_manifest_before_closure,
+        materializer_code_sha=materializer_code_sha,
+        authoritative_real_profile=authoritative_real_profile,
+    )
+    actual_manifest = _directory_manifest(plan.partial)
+    final_by_path = {
+        str(row["relative_path"]): row for row in actual_manifest
+    }
+    closure_paths = {
+        CANONICAL_FILE_MANIFEST_TARGET.as_posix(),
+        CANONICAL_ROOT_SEAL_TARGET.as_posix(),
+    }
+    if (
+        len(actual_manifest) != len(actual_manifest_before_closure) + 2
+        or closure["manifest_entry_count"]
+        != len(actual_manifest_before_closure)
+        or closure["manifest_entry_bytes"]
+        != sum(int(row["size"]) for row in actual_manifest_before_closure)
+        or not closure_paths.issubset(final_by_path)
+        or final_by_path[CANONICAL_FILE_MANIFEST_TARGET.as_posix()][
+            "sha256"
+        ]
+        != closure["canonical_file_manifest_sha256"]
+        or final_by_path[CANONICAL_ROOT_SEAL_TARGET.as_posix()]["sha256"]
+        != closure["canonical_root_seal_sha256"]
+    ):
+        raise ConfigError("canonical root manifest/seal closure 非法")
+    if plan.destination.exists() or plan.destination.is_symlink():
+        raise FileExistsError(
+            f"canonical destination 在发布前出现，拒绝覆盖：{plan.destination}"
+        )
+    _publish_staging_no_overwrite(plan.partial, plan.destination)
     return {
         "status": "complete",
-        "output_root": str(destination),
-        "source_map_sha256": source_sha,
-        "manifest_index_sha256": _sha256_file(destination / "manifests" / "manifest_index.json"),
-        "analysis_input_sha256": _sha256_file(destination / "analysis_input.json"),
-        "worker_count": len(workers),
+        "output_root": str(plan.destination),
+        "source_map_sha256": plan.source_sha256,
+        "manifest_index_sha256": _sha256_file(
+            plan.destination / "manifests" / "manifest_index.json"
+        ),
+        "analysis_input_sha256": _sha256_file(
+            plan.destination / "analysis_input.json"
+        ),
+        "worker_count": len(plan.workers),
+        "task_count": 60,
+        "file_count": len(actual_manifest),
+        "byte_count": sum(int(row["size"]) for row in actual_manifest),
+        "canonical_file_manifest_sha256": closure[
+            "canonical_file_manifest_sha256"
+        ],
+        "canonical_root_seal_sha256": closure[
+            "canonical_root_seal_sha256"
+        ],
+        "canonical_status": "sealed_with_declared_limitation",
+        "paper_eligibility": CANONICAL_PAPER_ELIGIBILITY,
+        "recovery_code_identity_evidence_status": (
+            RECOVERY_CODE_IDENTITY_EVIDENCE_STATUS
+        ),
+        "effect_fields_read": False,
         "formal_effect_fields_read": False,
     }
 
@@ -2588,8 +4806,61 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--source-map", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
+    parser.add_argument("--metadata-only-dry-run", action="store_true")
+    parser.add_argument("--dry-run-report", type=Path)
+    parser.add_argument(
+        "--create-pre-materialization-receipt",
+        action="store_true",
+    )
+    parser.add_argument("--receipt-output", type=Path)
+    parser.add_argument("--authoritative-real-profile", action="store_true")
+    parser.add_argument("--pre-materialization-receipt", type=Path)
     args = parser.parse_args(argv)
-    result = materialize_task8b_phase_f(args.source_map, args.output_root)
+    if args.create_pre_materialization_receipt:
+        if (
+            args.metadata_only_dry_run
+            or args.dry_run_report is None
+            or args.receipt_output is None
+            or not args.authoritative_real_profile
+            or args.pre_materialization_receipt is not None
+        ):
+            parser.error(
+                "receipt creation requires --dry-run-report, "
+                "--receipt-output and --authoritative-real-profile only"
+            )
+        result = create_pre_materialization_receipt(
+            args.source_map,
+            args.output_root,
+            args.dry_run_report,
+            args.receipt_output,
+        )
+    elif args.metadata_only_dry_run:
+        if args.dry_run_report is None:
+            parser.error("--metadata-only-dry-run requires --dry-run-report")
+        if (
+            args.pre_materialization_receipt is not None
+            or args.receipt_output is not None
+        ):
+            parser.error(
+                "metadata dry-run does not accept receipt input/output"
+            )
+        result = metadata_only_dry_run_task8b_phase_f(
+            args.source_map,
+            args.output_root,
+            args.dry_run_report,
+            authoritative_real_profile=args.authoritative_real_profile,
+        )
+    else:
+        if args.dry_run_report is not None or args.receipt_output is not None:
+            parser.error(
+                "--dry-run-report/--receipt-output require a dry-run mode"
+            )
+        result = materialize_task8b_phase_f(
+            args.source_map,
+            args.output_root,
+            authoritative_real_profile=args.authoritative_real_profile,
+            pre_materialization_receipt_path=args.pre_materialization_receipt,
+        )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 

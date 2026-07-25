@@ -12,6 +12,7 @@ import pytest
 
 from agentmemeval.core.errors import ConfigError
 from agentmemeval.evaluation import task8b_analysis
+from agentmemeval.experiments import task8b_phase_f_materializer as materializer_module
 from agentmemeval.experiments.formal_protocol import sha256_json
 from agentmemeval.experiments.formal_runner import STATE_SCHEMA_VERSION
 from agentmemeval.experiments.task8b_phase_f_materializer import (
@@ -19,6 +20,7 @@ from agentmemeval.experiments.task8b_phase_f_materializer import (
     COMPOSITION_SCHEMA,
     EXPECTED_WORKERS,
     FROZEN_SCIENTIFIC_CODE_SHA,
+    METADATA_DRY_RUN_GATE_NAMES,
     PRIMARY_TASKS,
     PROTOCOL_ID,
     RECOVERED_WORKERS,
@@ -30,8 +32,18 @@ from agentmemeval.experiments.task8b_phase_f_materializer import (
     SECONDARY_TASKS,
     SOURCE_MAP_SCHEMA,
     _atomic_rename_noreplace,
+    _build_metadata_plan,
+    _build_state_rows,
+    _parse_state_bytes,
+    _prepare_materialization,
+    _validate_authoritative_real_selections,
+    _validate_authoritative_recovery_suffix,
+    _validate_pre_materialization_receipt,
+    _validate_recovery_state_anchor,
+    create_pre_materialization_receipt,
     main,
     materialize_task8b_phase_f,
+    metadata_only_dry_run_task8b_phase_f,
 )
 
 
@@ -948,6 +960,45 @@ def test_materializer_cli_builds_blind_complete_append_only_tree(
     assert result["status"] == "complete"
     assert result["worker_count"] == 12
     assert result["formal_effect_fields_read"] is False
+    assert (output / "exclusion_ledger.csv").read_bytes() == (
+        materializer_module.EXCLUSION_LEDGER_BYTES
+    )
+    root_manifest = output / "canonical_file_manifest.tsv"
+    root_seal = output / "canonical_root_seal.json"
+    assert result["canonical_file_manifest_sha256"] == _sha256(
+        root_manifest
+    )
+    assert result["canonical_root_seal_sha256"] == _sha256(root_seal)
+    with root_manifest.open(encoding="utf-8", newline="") as handle:
+        root_rows = list(csv.DictReader(handle, delimiter="\t"))
+    excluded = {
+        root_manifest.relative_to(output).as_posix(),
+        root_seal.relative_to(output).as_posix(),
+    }
+    actual_paths = {
+        path.relative_to(output).as_posix()
+        for path in output.rglob("*")
+        if path.is_file()
+    }
+    assert {row["relative_path"] for row in root_rows} == (
+        actual_paths - excluded
+    )
+    for row in root_rows:
+        path = output.joinpath(*Path(row["relative_path"]).parts)
+        assert int(row["size"]) == path.stat().st_size
+        assert row["sha256"] == _sha256(path)
+    seal = json.loads(root_seal.read_text(encoding="utf-8"))
+    assert seal["canonical_file_manifest"]["sha256"] == _sha256(
+        root_manifest
+    )
+    assert seal["published_tree_file_count"] == len(actual_paths)
+    assert seal["authoritative_real_profile"] is False
+    assert seal["status"] == "sealed_with_declared_limitation"
+    assert (
+        seal["paper_eligibility"]
+        == materializer_module.CANONICAL_PAPER_ELIGIBILITY
+    )
+    assert seal["limitations"] == materializer_module._declared_limitations()
     analysis_input = json.loads((output / "analysis_input.json").read_text(encoding="utf-8"))
     assert [row["worker_id"] for row in analysis_input["workers"]] == list(EXPECTED_WORKERS)
     assert analysis_input["synthetic_test_mode"] is False
@@ -1209,7 +1260,131 @@ def test_materializer_rejects_recovery_state_suffix_outside_authorized_sequence(
         materialize_task8b_phase_f(variant, output)
 
     assert not output.exists()
-    assert partial.is_dir()
+    assert not partial.exists()
+
+
+def _real_recovery_prefix_rows() -> list[dict[str, str]]:
+    payload, _rows = _state_bytes(
+        ["planned", "validating", "running", "failed", "validating", "running"],
+        worker_id="P07",
+    )
+    return _parse_state_bytes(payload, label="P07 real recovery prefix")
+
+
+def test_recovery_state_anchor_accepts_real_six_row_prefix_and_appends_tail() -> None:
+    rows = _real_recovery_prefix_rows()
+    anchor_sha = rows[3]["row_sha256"]
+
+    anchor_index = _validate_recovery_state_anchor(
+        rows,
+        original_terminal_state_sha256=anchor_sha,
+        label="P07",
+    )
+    appended = _build_state_rows(
+        rows,
+        [
+            {
+                "created_at_utc": "2026-07-25T14:27:00+00:00",
+                "status": "finalizing",
+                "detail": "phase-f canonical completion sealing",
+            },
+            {
+                "created_at_utc": "2026-07-25T14:28:00+00:00",
+                "status": "complete",
+                "detail": "phase-f canonical completion published",
+            },
+        ],
+        label="P07",
+    )
+
+    assert anchor_index == 3
+    assert [row["status"] for row in rows + appended] == [
+        "planned",
+        "validating",
+        "running",
+        "failed",
+        "validating",
+        "running",
+        "finalizing",
+        "complete",
+    ]
+    assert appended[0]["previous_sha256"] == rows[-1]["row_sha256"]
+    assert appended[1]["previous_sha256"] == appended[0]["row_sha256"]
+
+
+def test_recovery_state_anchor_rejects_state_without_failed_anchor() -> None:
+    payload, _rows = _state_bytes(
+        ["planned", "validating", "running"],
+        worker_id="P07",
+    )
+    rows = _parse_state_bytes(payload, label="P07 no failed state")
+
+    with pytest.raises(ConfigError, match="anchor 不唯一或缺失"):
+        _validate_recovery_state_anchor(
+            rows,
+            original_terminal_state_sha256="0" * 64,
+            label="P07",
+        )
+
+
+def test_recovery_state_anchor_rejects_duplicate_matching_anchor() -> None:
+    rows = _real_recovery_prefix_rows()
+    anchor_sha = rows[3]["row_sha256"]
+    duplicate_rows = copy.deepcopy(rows)
+    duplicate_rows[-1]["row_sha256"] = anchor_sha
+
+    with pytest.raises(ConfigError, match="anchor 不唯一或缺失"):
+        _validate_recovery_state_anchor(
+            duplicate_rows,
+            original_terminal_state_sha256=anchor_sha,
+            label="P07",
+        )
+
+
+def test_recovery_state_anchor_rejects_matching_non_failed_row() -> None:
+    rows = _real_recovery_prefix_rows()
+
+    with pytest.raises(ConfigError, match="anchor 非 failed"):
+        _validate_recovery_state_anchor(
+            rows,
+            original_terminal_state_sha256=rows[2]["row_sha256"],
+            label="P07",
+        )
+
+
+def test_recovery_state_anchor_rejects_certificate_sha_not_in_state() -> None:
+    rows = _real_recovery_prefix_rows()
+
+    with pytest.raises(ConfigError, match="anchor 不唯一或缺失"):
+        _validate_recovery_state_anchor(
+            rows,
+            original_terminal_state_sha256="f" * 64,
+            label="P07",
+        )
+
+
+def test_recovery_state_parser_rejects_broken_sha_chain() -> None:
+    payload, rows = _state_bytes(
+        ["planned", "validating", "running", "failed", "validating", "running"],
+        worker_id="P07",
+    )
+    assert payload
+    rows[4]["previous_sha256"] = "0" * 64
+    handle = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        handle,
+        fieldnames=list(rows[0]),
+        delimiter="\t",
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+
+    with pytest.raises(ConfigError, match="state hash chain"):
+        _parse_state_bytes(
+            handle.getvalue().encode("utf-8"),
+            label="P07 broken state",
+        )
 
 
 def test_materializer_rejects_archive_sha_before_destination(tmp_path: Path) -> None:
@@ -1226,7 +1401,7 @@ def test_materializer_rejects_archive_sha_before_destination(tmp_path: Path) -> 
     assert not list(tmp_path.glob("bad-archive-output.partial-*"))
 
 
-def test_materializer_preserves_partial_after_post_copy_receipt_failure(
+def test_materializer_rejects_bad_receipt_before_creating_partial(
     tmp_path: Path,
 ) -> None:
     source_map_path, source_map = _make_source_map(tmp_path)
@@ -1251,8 +1426,7 @@ def test_materializer_preserves_partial_after_post_copy_receipt_failure(
         materialize_task8b_phase_f(bad_map, output)
 
     assert not output.exists()
-    assert partial.is_dir()
-    assert (partial / "provenance" / "source_map.json").is_file()
+    assert not partial.exists()
 
 
 def test_materializer_rejects_changed_state_prefix_sha(tmp_path: Path) -> None:
@@ -1286,25 +1460,15 @@ def test_materializer_hashes_unselected_archive_members(tmp_path: Path) -> None:
         for row in rows
     ]
     manifest.write_text("\n".join(rows) + "\n", encoding="utf-8", newline="")
-    new_ref = _local_ref(manifest, source_map_path.parent)
-    archive = source_map["archives"]["formal"]  # type: ignore[index]
-    assert isinstance(archive, dict)
-    archive_manifest = archive["manifest"]
-    assert isinstance(archive_manifest, dict)
-    archive["manifest"] = {
-        **new_ref,
-        "format": archive_manifest["format"],
-        "has_header": archive_manifest["has_header"],
-    }
-    workers = source_map["workers"]
-    assert isinstance(workers, list)
-    for worker in workers:
-        assert isinstance(worker, dict)
-        shards = worker["shards"]
-        assert isinstance(shards, list)
-        for shard in shards:
-            assert isinstance(shard, dict)
-            shard["shard_manifest"] = copy.deepcopy(new_ref)
+    _rebind_formal_archive(
+        source_map_path,
+        source_map,
+        archive_path=source_map_path.parent / "formal.tar.gz",
+        manifest_path=manifest,
+        manifest_format="sha256-size-path-tsv-v1",
+        has_header=True,
+        profile="cross-host",
+    )
     bad_map = source_map_path.parent / "bad_member_manifest.json"
     _write_json(bad_map, source_map)
     output = tmp_path / "bad-member-output"
@@ -1319,6 +1483,7 @@ def test_materializer_hashes_unselected_archive_members(tmp_path: Path) -> None:
 
 def test_materializer_ignores_unrequested_regular_export_control_member(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_map_path, source_map = _make_source_map(tmp_path)
     root = source_map_path.parent
@@ -1350,6 +1515,33 @@ def test_materializer_ignores_unrequested_regular_export_control_member(
     variant = root / "unmanifested_control_source_map.json"
     _write_json(variant, source_map)
     output = tmp_path / "unmanifested-control-canonical"
+    plan = _prepare_materialization(
+        variant,
+        tmp_path / "unmanifested-control-plan",
+        authoritative_real_profile=False,
+    )
+    allowed_path = "task8b_full_matrix_exports/H01/source_roots.tsv"
+    monkeypatch.setattr(
+        materializer_module,
+        "AUTHORITATIVE_UNMANIFESTED_REGULAR_MEMBERS",
+        {"formal": frozenset({allowed_path})},
+    )
+    materializer_module._validate_archive_copy_plan(
+        requests=plan.requests,
+        archives=plan.archives,
+        authoritative_real_profile=True,
+    )
+    monkeypatch.setattr(
+        materializer_module,
+        "AUTHORITATIVE_UNMANIFESTED_REGULAR_MEMBERS",
+        {"formal": frozenset({"unapproved/hidden.bin"})},
+    )
+    with pytest.raises(ConfigError, match="allowlist 不闭合"):
+        materializer_module._validate_archive_copy_plan(
+            requests=plan.requests,
+            archives=plan.archives,
+            authoritative_real_profile=True,
+        )
 
     result = materialize_task8b_phase_f(variant, output)
 
@@ -1452,7 +1644,7 @@ def test_materializer_rejects_mixed_archive_seal_binding(tmp_path: Path) -> None
         materialize_task8b_phase_f(bad_map, output)
 
     assert not output.exists()
-    assert partial.is_dir()
+    assert not partial.exists()
 
 
 def test_materializer_accepts_no_header_transport_manifest_and_local_verification(
@@ -1621,7 +1813,7 @@ def test_materializer_rejects_tar_directory_masquerading_as_manifest_file(
         materialize_task8b_phase_f(variant, output)
 
     assert not output.exists()
-    assert partial.is_dir()
+    assert not partial.exists()
 
 
 def test_materializer_rejects_non_authoritative_contract_with_same_id(
@@ -1704,4 +1896,633 @@ def test_materializer_rejects_source_shard_id_reused_across_sides(
         materialize_task8b_phase_f(variant, output)
 
     assert not output.exists()
-    assert partial.is_dir()
+    assert not partial.exists()
+
+
+def test_metadata_dry_run_builds_exact_plan_without_payload_or_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_map_path, _source_map = _make_source_map(tmp_path)
+    output = tmp_path / "dry-run-canonical"
+    report = tmp_path / "metadata-dry-run.json"
+
+    def _payload_copy_must_not_run(**_kwargs: object) -> None:
+        raise AssertionError("metadata dry-run invoked the payload copy path")
+
+    monkeypatch.setattr(
+        materializer_module,
+        "_execute_copy_requests",
+        _payload_copy_must_not_run,
+    )
+    result = metadata_only_dry_run_task8b_phase_f(
+        source_map_path,
+        output,
+        report,
+    )
+
+    value = json.loads(report.read_text(encoding="utf-8"))
+    partial = tmp_path / (
+        f"dry-run-canonical.partial-{result['source_map_sha256'][:12]}"
+    )
+    assert result["status"] == "pass"
+    assert result["worker_count"] == 12
+    assert result["task_count"] == 60
+    assert result["effect_fields_read"] is False
+    assert result["formal_effect_fields_read"] is False
+    assert value["gaps"] == []
+    assert len(value["gates"]) == 18
+    assert len(value["provenance_targets"]) == value["archive_count"] * 3
+    assert len(value["file_plan"]) == value["expected_file_count"]
+    assert value["large_payload_files_written"] == 0
+    assert value["large_payload_bytes_written"] == 0
+    assert not output.exists()
+    assert not partial.exists()
+
+
+def test_post_unblind_analysis_supplement_requires_exact_provenance_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_map_path, source_map = _make_source_map(tmp_path)
+    analysis = source_map["analysis"]
+    assert isinstance(analysis, dict)
+    preunlock_ref = analysis["pre_unlock_manifest"]
+    assert isinstance(preunlock_ref, dict)
+    fixture_sha = str(preunlock_ref["sha256"])
+    monkeypatch.setattr(
+        materializer_module,
+        "APPROVED_PREUNLOCK_SHA256",
+        "0" * 64,
+    )
+    monkeypatch.setattr(
+        materializer_module,
+        "APPROVED_POST_UNBLIND_ANALYSIS_FREEZE_SHA256",
+        fixture_sha,
+    )
+    analysis["unlocked_by"] = (
+        materializer_module.APPROVED_POST_UNBLIND_UNLOCKED_BY
+    )
+    accepted = source_map_path.parent / "post_unblind_accepted.json"
+    _write_json(accepted, source_map)
+
+    plan = _prepare_materialization(
+        accepted,
+        tmp_path / "post-unblind-accepted-canonical",
+        authoritative_real_profile=False,
+    )
+
+    assert plan.analysis["pre_unlock_manifest_sha256"] == fixture_sha
+
+    analysis["unlocked_by"] = "unapproved-post-unblind-marker"
+    rejected = source_map_path.parent / "post_unblind_rejected.json"
+    _write_json(rejected, source_map)
+    with pytest.raises(
+        ConfigError,
+        match="post-unblind analysis supplement provenance",
+    ):
+        _prepare_materialization(
+            rejected,
+            tmp_path / "post-unblind-rejected-canonical",
+            authoritative_real_profile=False,
+        )
+
+
+def test_authoritative_materialization_id_rejects_generic_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_map_path, source_map = _make_source_map(tmp_path)
+    source_map["materialization_id"] = (
+        materializer_module.AUTHORITATIVE_REAL_MATERIALIZATION_ID
+    )
+    variant = source_map_path.parent / "authoritative_generic_bypass.json"
+    _write_json(variant, source_map)
+    monkeypatch.setattr(
+        materializer_module,
+        "AUTHORITATIVE_REAL_SOURCE_MAP_SHA256",
+        _sha256(variant),
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match="禁止 generic materialization",
+    ):
+        _prepare_materialization(
+            variant,
+            tmp_path / "forbidden-generic-canonical",
+            authoritative_real_profile=False,
+        )
+
+
+def test_authoritative_profile_rejects_nonofficial_id_and_sha(
+    tmp_path: Path,
+) -> None:
+    source_map_path, _source_map = _make_source_map(tmp_path)
+
+    with pytest.raises(
+        ConfigError,
+        match="必须绑定批准的 v8 ID/SHA",
+    ):
+        _prepare_materialization(
+            source_map_path,
+            tmp_path / "forbidden-fake-authoritative-canonical",
+            authoritative_real_profile=True,
+        )
+
+
+def test_materializer_git_identity_uses_command_scoped_safe_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    repo_root = Path(materializer_module.__file__).absolute().parents[3]
+
+    def _run(
+        args: list[str],
+        **_kwargs: object,
+    ) -> object:
+        calls.append(args)
+        tail = args[5:]
+        if tail == ["rev-parse", "--show-toplevel"]:
+            stdout = str(repo_root)
+        elif tail in (
+            ["rev-parse", "HEAD"],
+            ["rev-parse", "origin/main"],
+        ):
+            stdout = "a" * 40
+        elif tail == ["status", "--porcelain", "--untracked-files=no"]:
+            stdout = ""
+        elif tail[0:1] == ["rev-parse"]:
+            stdout = "b" * 40
+        elif tail[0:1] == ["hash-object"]:
+            stdout = "b" * 40
+        else:
+            raise AssertionError(f"unexpected git args: {tail}")
+        return materializer_module.subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    monkeypatch.setattr(materializer_module.subprocess, "run", _run)
+
+    identity = materializer_module._materializer_git_identity()
+
+    expected_safe = f"safe.directory={repo_root.as_posix()}"
+    assert identity["tracked_clean"] is True
+    assert calls
+    assert all(call[1:3] == ["-c", expected_safe] for call in calls)
+
+
+def test_active_pid_absence_profiles_require_exact_structural_identity(
+    tmp_path: Path,
+) -> None:
+    source_map_path, _source_map = _make_source_map(tmp_path)
+    plan = _prepare_materialization(
+        source_map_path,
+        tmp_path / "pid-profile-candidate",
+        authoritative_real_profile=False,
+    )
+    workers = {worker.worker_id: worker for worker in plan.workers}
+    cases = {
+        "P07": {
+            "active_process_absent": True,
+            "formal_worker_count": 0,
+            "host": "H07",
+            "observed_pid": 7427,
+            "pidfile": (
+                "/root/runtime_control/H07/P07/attempt01/"
+                "P07_attempt01.pid"
+            ),
+            "probe_utc": "2026-07-22T16:51:16Z",
+            "worker_id": "P07",
+        },
+        "P08": {
+            "active_process_absent": True,
+            "observed_pid": 7423,
+            "probe_utc": "2026-07-22T16:02:52Z",
+        },
+        "P09": {
+            "active_process_absent": True,
+            "host_id": "H09",
+            "observed_pid": 7008,
+            "pid_file": (
+                "/root/runtime_control/H09/P09/attempt01/"
+                "P09_attempt01.pid"
+            ),
+            "probe": "kill -0 returned no such process",
+            "probe_utc": "2026-07-22T16:06:52+00:00",
+            "schema_version": "task8b-active-pid-absence-v1",
+            "worker_id": "P09",
+        },
+        "P10": {
+            "active_process_absent": True,
+            "formal_worker_count": 0,
+            "host": "H10",
+            "observed_pid": 6926,
+            "pidfile": (
+                "/root/runtime_control/H10/P10/attempt01/"
+                "P10_attempt01.pid"
+            ),
+            "probe_utc": "2026-07-22T16:16:22Z",
+            "worker_id": "P10",
+        },
+        "P11": {
+            "active_process_absent": True,
+            "formal_worker_count": 0,
+            "host": "H11",
+            "observed_pid": 6801,
+            "probe_utc": "2026-07-22T17:01:49Z",
+            "worker_id": "P11",
+        },
+    }
+    for worker_id, value in cases.items():
+        profile = str(
+            materializer_module.AUTHORITATIVE_ACTIVE_PID_EVIDENCE[
+                worker_id
+            ]["profile"]
+        )
+        materializer_module._validate_active_pid_absence_payload(
+            workers[worker_id],
+            payload=_json_bytes(value),
+            profile=profile,
+        )
+        invalid = {**value, "active_process_absent": False}
+        with pytest.raises(ConfigError, match="identity 非法"):
+            materializer_module._validate_active_pid_absence_payload(
+                workers[worker_id],
+                payload=_json_bytes(invalid),
+                profile=profile,
+            )
+
+
+def test_metadata_dry_run_rejects_bad_task_receipt_before_report_or_partial(
+    tmp_path: Path,
+) -> None:
+    source_map_path, source_map = _make_source_map(tmp_path)
+    workers = source_map["workers"]
+    assert isinstance(workers, list)
+    p07 = workers[0]
+    assert isinstance(p07, dict)
+    tasks = p07["tasks"]
+    assert isinstance(tasks, list)
+    first, second = tasks[:2]
+    assert isinstance(first, dict) and isinstance(second, dict)
+    first["receipt"], second["receipt"] = second["receipt"], first["receipt"]
+    variant = source_map_path.parent / "dry_run_bad_receipt.json"
+    _write_json(variant, source_map)
+    output = tmp_path / "dry-run-bad-receipt-canonical"
+    report = tmp_path / "dry-run-bad-receipt-report.json"
+    partial = tmp_path / (
+        f"dry-run-bad-receipt-canonical.partial-{_sha256(variant)[:12]}"
+    )
+
+    with pytest.raises(ConfigError, match="task receipt"):
+        metadata_only_dry_run_task8b_phase_f(variant, output, report)
+
+    assert not report.exists()
+    assert not output.exists()
+    assert not partial.exists()
+
+
+def test_metadata_dry_run_fails_closed_when_disk_space_is_insufficient(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_map_path, _source_map = _make_source_map(tmp_path)
+    output = tmp_path / "dry-run-no-space-canonical"
+    report = tmp_path / "dry-run-no-space-report.json"
+
+    class _NoSpace:
+        free = 0
+
+    monkeypatch.setattr(materializer_module.shutil, "disk_usage", lambda _path: _NoSpace())
+    with pytest.raises(ConfigError, match="空间不足"):
+        metadata_only_dry_run_task8b_phase_f(source_map_path, output, report)
+
+    assert not report.exists()
+    assert not output.exists()
+
+
+def test_authoritative_real_selection_gate_accepts_only_four_frozen_sources(
+    tmp_path: Path,
+) -> None:
+    source_map_path, _source_map = _make_source_map(tmp_path)
+    plan = _prepare_materialization(
+        source_map_path,
+        tmp_path / "selection-candidate",
+        authoritative_real_profile=False,
+    )
+    formal = plan.archives["formal"]
+    archives = {"formal": formal}
+    for source_id in (
+        "full_H12",
+        "full_H02",
+        "full_H05",
+        "full_H01",
+        "extra_01",
+        "extra_02",
+        "extra_03",
+        "extra_04",
+        "extra_05",
+        "extra_06",
+        "extra_07",
+        "extra_08",
+        "extra_09",
+        "extra_10",
+        "extra_11",
+        "extra_12",
+    ):
+        archives[source_id] = formal
+    by_worker = {worker.worker_id: worker for worker in plan.workers}
+    frozen = {
+        key: (
+            str(value["archive_id"]),
+            str(value["source_prefix"]),
+            str(value["target_run_dir"]),
+        )
+        for key, value in (
+            materializer_module.AUTHORITATIVE_REAL_SELECTIONS.items()
+        )
+    }
+    for (worker_id, task_id), (archive_id, prefix, target) in frozen.items():
+        task = by_worker[worker_id].task_rows[task_id]
+        task["source_archive_id"] = archive_id
+        task["source_prefix"] = prefix
+        task["target_run_dir"] = target
+
+    rows = _validate_authoritative_real_selections(
+        archives=archives,
+        workers=plan.workers,
+    )
+    assert len(rows) == 4
+
+    for worker_id, task_id in frozen:
+        task = by_worker[worker_id].task_rows[task_id]
+        original_prefix = task["source_prefix"]
+        task["source_prefix"] = "root/not-an-authoritative-selection"
+        with pytest.raises(ConfigError, match="authoritative source selection"):
+            _validate_authoritative_real_selections(
+                archives=archives,
+                workers=plan.workers,
+            )
+        task["source_prefix"] = original_prefix
+
+
+def test_authoritative_real_recovery_requires_exact_six_row_prefix_and_append() -> None:
+    _payload, rows = _state_bytes(
+        ["planned", "validating", "running", "failed", "validating", "running"],
+        worker_id="P07",
+    )
+    append = [{"status": "finalizing"}, {"status": "complete"}]
+
+    _validate_authoritative_recovery_suffix(
+        rows,
+        original_terminal_state_sha256=rows[3]["row_sha256"],
+        state_append=append,
+        label="P07",
+    )
+
+    with pytest.raises(ConfigError, match="existing suffix"):
+        _validate_authoritative_recovery_suffix(
+            rows[:-1],
+            original_terminal_state_sha256=rows[3]["row_sha256"],
+            state_append=append,
+            label="P07",
+        )
+    with pytest.raises(ConfigError, match="authoritative recovery append"):
+        _validate_authoritative_recovery_suffix(
+            rows,
+            original_terminal_state_sha256=rows[3]["row_sha256"],
+            state_append=[
+                {"status": "validating"},
+                {"status": "running"},
+                {"status": "finalizing"},
+                {"status": "complete"},
+            ],
+            label="P07",
+        )
+
+
+def test_pre_materialization_receipt_binds_frozen_dry_run_and_file_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_map_path, _source_map = _make_source_map(tmp_path)
+    output = tmp_path / "receipt-candidate"
+    plan = _prepare_materialization(
+        source_map_path,
+        output,
+        authoritative_real_profile=False,
+    )
+    metadata = _build_metadata_plan(plan, authoritative_real_profile=False)
+    authoritative_selections = [
+        {
+            "worker_id": "P11",
+            "task_id": "isolation_async",
+            "source_archive_id": "full_H05",
+            "source_prefix": (
+                "root/pair_11-low-P11-isolation_async-attempt_02/"
+                "output/runs/isolation_async"
+            ),
+            "target_run_dir": "runs/isolation_async",
+        }
+    ]
+    monkeypatch.setattr(
+        materializer_module,
+        "_validate_authoritative_real_selections",
+        lambda **_kwargs: authoritative_selections,
+    )
+    monkeypatch.setattr(
+        materializer_module,
+        "_materializer_git_identity",
+        lambda: {
+            "repo_root": str(Path.cwd()),
+            "head_sha": "a" * 40,
+            "origin_main_sha": "a" * 40,
+            "tracked_clean": True,
+            "head_blob_sha": "c" * 40,
+            "working_blob_sha": "c" * 40,
+        },
+    )
+    report_path = tmp_path / "authoritative-report.json"
+    report = {
+        "schema_version": "task8b-phase-f-metadata-dry-run-v1",
+        "status": "pass",
+        "gaps": [],
+        "authoritative_real_profile": True,
+        "source_map_path": str(plan.source_path),
+        "source_map_sha256": plan.source_sha256,
+        "materialization_id": plan.source_map["materialization_id"],
+        "candidate_output_root": str(plan.destination),
+        "candidate_partial_root": str(plan.partial),
+        "analysis_contract_sha256": plan.analysis["analysis_contract_sha256"],
+        "pre_unlock_manifest_sha256": plan.analysis["pre_unlock_manifest_sha256"],
+        "archive_count": len(plan.archives),
+        "worker_count": len(plan.workers),
+        "task_count": sum(len(worker.expected_tasks) for worker in plan.workers),
+        "pair_count": len({worker.pair_id for worker in plan.workers}),
+        "gates": [
+            {"gate": name, "status": "pass"} for name in METADATA_DRY_RUN_GATE_NAMES
+        ],
+        "archive_copy_plan": plan.archive_copy_plan,
+        "authoritative_selections": authoritative_selections,
+        **metadata,
+        "metadata_only": True,
+        "large_payload_files_written": 0,
+        "large_payload_bytes_written": 0,
+        "effect_fields_read": False,
+        "formal_effect_fields_read": False,
+        "limitations": materializer_module._declared_limitations(),
+        "paper_eligibility": (
+            materializer_module.CANONICAL_PAPER_ELIGIBILITY
+        ),
+    }
+    _write_json(report_path, report)
+    monkeypatch.setattr(
+        materializer_module,
+        "AUTHORITATIVE_REAL_MATERIALIZATION_ID",
+        str(plan.source_map["materialization_id"]),
+    )
+    monkeypatch.setattr(
+        materializer_module,
+        "AUTHORITATIVE_REAL_SOURCE_MAP_SHA256",
+        _sha256(source_map_path),
+    )
+    generated_receipt_path = tmp_path / "generated-pre-materialization-receipt.json"
+    generated = create_pre_materialization_receipt(
+        source_map_path,
+        output,
+        report_path,
+        generated_receipt_path,
+    )
+    generated_value = json.loads(
+        generated_receipt_path.read_text(encoding="utf-8")
+    )
+    assert generated["status"] == "approved"
+    assert generated["receipt_sha256"] == _sha256(generated_receipt_path)
+    assert generated_value["dry_run_report_sha256"] == _sha256(report_path)
+    assert generated_value["materializer_code_sha"] == "a" * 40
+    receipt_path = tmp_path / "pre-materialization-receipt.json"
+    receipt = {
+        "schema_version": "task8b-phase-f-pre-materialization-receipt-v1",
+        "status": "approved",
+        "materializer_code_sha": "a" * 40,
+        "materializer_file_sha256": _sha256(Path(materializer_module.__file__)),
+        "source_map_sha256": plan.source_sha256,
+        "analysis_contract_sha256": plan.analysis["analysis_contract_sha256"],
+        "pre_unlock_manifest_sha256": plan.analysis["pre_unlock_manifest_sha256"],
+        "worker_count": 12,
+        "task_count": 60,
+        "expected_file_count": metadata["expected_file_count"],
+        "expected_bytes": metadata["expected_bytes"],
+        "dry_run_report_path": str(report_path),
+        "dry_run_report_sha256": _sha256(report_path),
+        "authoritative_real_profile": True,
+        "effect_fields_read": False,
+        "formal_effect_fields_read": False,
+        "recovery_code_identity_evidence_status": (
+            materializer_module.RECOVERY_CODE_IDENTITY_EVIDENCE_STATUS
+        ),
+        "paper_eligibility": (
+            materializer_module.CANONICAL_PAPER_ELIGIBILITY
+        ),
+    }
+    _write_json(receipt_path, receipt)
+
+    validated = _validate_pre_materialization_receipt(
+        receipt_path,
+        plan=plan,
+        metadata=metadata,
+    )
+    assert validated["dry_run_report_sha256"] == _sha256(report_path)
+    frozen_root = tmp_path / "frozen-pre-materialization-evidence"
+    frozen_root.mkdir()
+    frozen_rows = materializer_module._freeze_pre_materialization_evidence(
+        receipt_path,
+        receipt=validated,
+        root=frozen_root,
+    )
+    assert {row["relative_path"] for row in frozen_rows} == {
+        "provenance/pre_materialization/metadata_dry_run_report.json",
+        "provenance/pre_materialization/pre_materialization_receipt.json",
+    }
+    for row in frozen_rows:
+        frozen_path = frozen_root.joinpath(
+            *Path(str(row["relative_path"])).parts
+        )
+        assert row["sha256"] == _sha256(frozen_path)
+
+    pristine_report = copy.deepcopy(report)
+    report_mutations = {
+        "exact gate names": lambda value: value["gates"].__setitem__(
+            0,
+            {"gate": "gate-00", "status": "pass"},
+        ),
+        "file plan": lambda value: value.__setitem__("file_plan", []),
+        "archive copy plan": lambda value: value.__setitem__("archive_copy_plan", []),
+        "provenance targets": lambda value: value.__setitem__("provenance_targets", []),
+        "workers": lambda value: value.__setitem__("workers", []),
+        "recovery closure": lambda value: value.__setitem__(
+            "recovery_closure",
+            [{"tampered": True}],
+        ),
+        "authoritative selections": lambda value: value.__setitem__(
+            "authoritative_selections",
+            [],
+        ),
+        "analysis contract": lambda value: value.__setitem__(
+            "analysis_contract_sha256",
+            "0" * 64,
+        ),
+        "pre-unlock manifest": lambda value: value.__setitem__(
+            "pre_unlock_manifest_sha256",
+            "0" * 64,
+        ),
+        "manifest index": lambda value: value.__setitem__(
+            "manifest_index_sha256",
+            "0" * 64,
+        ),
+        "analysis input": lambda value: value.__setitem__(
+            "analysis_input_sha256",
+            "0" * 64,
+        ),
+    }
+    for label, mutate in report_mutations.items():
+        report = copy.deepcopy(pristine_report)
+        mutate(report)
+        _write_json(report_path, report)
+        receipt["dry_run_report_sha256"] = _sha256(report_path)
+        _write_json(receipt_path, receipt)
+        try:
+            _validate_pre_materialization_receipt(
+                receipt_path,
+                plan=plan,
+                metadata=metadata,
+            )
+        except ConfigError as exc:
+            assert "receipt/dry-run report binding" in str(exc)
+        else:
+            pytest.fail(f"receipt accepted mutated {label}")
+
+    receipt["expected_bytes"] = int(metadata["expected_bytes"]) + 1
+    _write_json(report_path, pristine_report)
+    receipt["dry_run_report_sha256"] = _sha256(report_path)
+    _write_json(receipt_path, receipt)
+    with pytest.raises(ConfigError, match="receipt/dry-run report binding"):
+        _validate_pre_materialization_receipt(
+            receipt_path,
+            plan=plan,
+            metadata=metadata,
+        )
+
+    receipt["expected_bytes"] = metadata["expected_bytes"]
+    receipt["materializer_code_sha"] = "b" * 40
+    _write_json(receipt_path, receipt)
+    with pytest.raises(ConfigError, match="receipt/dry-run report binding"):
+        _validate_pre_materialization_receipt(
+            receipt_path,
+            plan=plan,
+            metadata=metadata,
+        )
