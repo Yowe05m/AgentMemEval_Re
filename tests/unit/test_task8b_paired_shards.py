@@ -220,8 +220,8 @@ def _authorization(
                 "frozen_formal_runner_sha256": (
                     shards.FROZEN_FORMAL_RUNNER_SHA256
                 ),
-                "engineering_controller_sha256": _sha(
-                    Path(shards.__file__).resolve()
+                "engineering_controller_sha256": (
+                    "2f95e360c420997a72f206279be8ad3e2b195553d682d7674e6e7ec6d87f24b9"
                 ),
                 "task_union": list(shards.EXPECTED_TASKS["primary"]),
                 "effect_fields_read": False,
