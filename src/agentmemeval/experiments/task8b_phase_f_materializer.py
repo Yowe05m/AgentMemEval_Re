@@ -173,6 +173,7 @@ RECOVERY_SUPPORT_TARGETS = {
     "authorization": "authorization.bin",
 }
 RECOVERY_SOURCE_KEYS = tuple(RECOVERY_TARGETS) + tuple(RECOVERY_SUPPORT_TARGETS)
+RECOVERY_STATE_SEQUENCE = ("validating", "running", "finalizing", "complete")
 SECONDARY_NORMALIZATION_FILES = frozenset(
     {
         "certificate.identity_correction_audit.json",
@@ -1932,12 +1933,19 @@ def _validate_recovery(
         != "integer-versus-string mapping keys"
     ):
         raise ConfigError(f"{worker.worker_id} recovery canonical identity 非法")
-    if (
-        not source_state_rows
-        or source_state_rows[-1]["status"] != "failed"
-        or source_state_rows[-1]["row_sha256"] != evidence["original_terminal_state_sha256"]
-    ):
-        raise ConfigError(f"{worker.worker_id} original failed terminal state 不匹配")
+    failed_anchor_indices = [
+        index
+        for index, row in enumerate(source_state_rows)
+        if row["status"] == "failed"
+        and row["row_sha256"] == evidence["original_terminal_state_sha256"]
+    ]
+    if len(failed_anchor_indices) != 1:
+        raise ConfigError(f"{worker.worker_id} original failed state anchor 不唯一或缺失")
+    recovery_suffix = tuple(
+        row["status"] for row in source_state_rows[failed_anchor_indices[0] + 1 :]
+    )
+    if recovery_suffix != RECOVERY_STATE_SEQUENCE[: len(recovery_suffix)]:
+        raise ConfigError(f"{worker.worker_id} recovery state suffix 非法")
 
 
 def _validate_shard_identity_receipts(

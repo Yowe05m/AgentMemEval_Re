@@ -913,6 +913,29 @@ def _rewrite_tar_member_as_directory(
                     output_archive.addfile(member, extracted)
 
 
+def _replace_worker_state_prefix(
+    source_map_path: Path,
+    source_map: dict[str, object],
+    *,
+    worker_id: str,
+    statuses: list[str],
+) -> dict[str, object]:
+    workers = source_map["workers"]
+    assert isinstance(workers, list)
+    worker = next(
+        row
+        for row in workers
+        if isinstance(row, dict) and row.get("worker_id") == worker_id
+    )
+    state_ref = worker["state_prefix"]
+    assert isinstance(state_ref, dict)
+    state_path = source_map_path.parent / str(state_ref["path"])
+    payload, _rows = _state_bytes(statuses, worker_id=worker_id)
+    state_path.write_bytes(payload)
+    worker["state_prefix"] = _local_ref(state_path, source_map_path.parent)
+    return worker
+
+
 def test_materializer_cli_builds_blind_complete_append_only_tree(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1128,6 +1151,65 @@ def test_materializer_copies_provenance_for_recovery_only_archive(
         / "recovery_adoptions"
         / "isolation_no_memory.canonicalization_audit.json"
     ).read_bytes() == canonical_payload
+
+
+def test_materializer_accepts_recovery_failed_anchor_with_valid_prefix_suffix(
+    tmp_path: Path,
+) -> None:
+    source_map_path, source_map = _make_source_map(tmp_path)
+    p07 = _replace_worker_state_prefix(
+        source_map_path,
+        source_map,
+        worker_id="P07",
+        statuses=["validating", "failed", "validating", "running"],
+    )
+    state_append = p07["state_append"]
+    assert isinstance(state_append, list)
+    p07["state_append"] = state_append[-2:]
+    variant = source_map_path.parent / "recovery_middle_anchor_source_map.json"
+    _write_json(variant, source_map)
+    output = tmp_path / "recovery-middle-anchor-output"
+
+    materialize_task8b_phase_f(variant, output)
+
+    state_path = output / "snapshots" / "P07" / "2026090107" / "attempt_01" / "state.tsv"
+    statuses = [
+        row["status"]
+        for row in csv.DictReader(
+            io.StringIO(state_path.read_text(encoding="utf-8")),
+            delimiter="\t",
+        )
+    ]
+    assert statuses == [
+        "validating",
+        "failed",
+        "validating",
+        "running",
+        "finalizing",
+        "complete",
+    ]
+
+
+def test_materializer_rejects_recovery_state_suffix_outside_authorized_sequence(
+    tmp_path: Path,
+) -> None:
+    source_map_path, source_map = _make_source_map(tmp_path)
+    _replace_worker_state_prefix(
+        source_map_path,
+        source_map,
+        worker_id="P07",
+        statuses=["validating", "failed", "validating", "waiting_dependency"],
+    )
+    variant = source_map_path.parent / "bad_recovery_suffix_source_map.json"
+    _write_json(variant, source_map)
+    output = tmp_path / "bad-recovery-suffix-output"
+    partial = tmp_path / f"bad-recovery-suffix-output.partial-{_sha256(variant)[:12]}"
+
+    with pytest.raises(ConfigError, match="recovery state suffix"):
+        materialize_task8b_phase_f(variant, output)
+
+    assert not output.exists()
+    assert partial.is_dir()
 
 
 def test_materializer_rejects_archive_sha_before_destination(tmp_path: Path) -> None:
