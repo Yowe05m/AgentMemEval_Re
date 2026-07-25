@@ -203,6 +203,10 @@ def test_task_completeness_rejects_evaluate_all_target_or_hand_splice(
         ("isolation_expr", "Expr"),
         ("isolation_sync", "Sync"),
         ("isolation_async", "Async"),
+        ("expr_online", "Expr"),
+        ("expr_without", "Expr"),
+        ("async_online", "Async"),
+        ("async_without", "Async"),
     ),
 )
 def test_formal_isolation_mechanism_aliases_are_canonical(

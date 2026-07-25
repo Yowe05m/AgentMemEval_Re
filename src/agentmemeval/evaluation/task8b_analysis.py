@@ -374,7 +374,7 @@ PHASE_F_AUDITED_RECOVERY_OVERLAY_AST_SHA256 = {
     ),
     "_formal_metric_rows": "d5a0ec7cbcac4ac8d682afdbeaecc1f441d0c4865c16e2bfafd6c2f730823678",
     "_formal_mechanism_by_target": (
-        "3a258c59c25dfb51f0aa92663e178d517df264072d16592b8a9b17f82778e800"
+        "e320c2aef7f19324003c7280ca8c0824c5b5163537093975004c6ed4d5f5a600"
     ),
     "_normalize_data_lineage_rows": (
         "8721336f265d8ba3d71699fbafff49bed636bd17f7ebbcfb5a21a35cb5e50a95"
@@ -3639,15 +3639,17 @@ def _formal_mechanism_by_target(
     config: dict[str, Any],
 ) -> dict[str, str]:
     mechanism_by_target = _mechanism_by_target(task_id, experiment, config)
-    isolation_alias = {
+    formal_alias = {
         "isolation_sync": "Sync",
         "isolation_async": "Async",
+        "async_online": "Async",
+        "async_without": "Async",
     }.get(task_id)
-    if isolation_alias is None:
+    if formal_alias is None:
         return mechanism_by_target
     if len(mechanism_by_target) != 1:
         raise ConfigError(f"formal {task_id} 必须且只能有一个 target agent")
-    return {target: isolation_alias for target in mechanism_by_target}
+    return {target: formal_alias for target in mechanism_by_target}
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
