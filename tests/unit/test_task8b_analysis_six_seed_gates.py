@@ -99,13 +99,13 @@ def _normalization_fixture(
     dict[str, object],
     dict[str, Path],
 ]:
-    root = tmp_path / "snapshots" / "S08" / "2026090108" / "attempt_01"
+    root = tmp_path / "snapshots" / "S06" / "2026090106" / "attempt_01"
     task_root = root / "runs" / "mixed_ecological"
     task_root.mkdir(parents=True)
     manifest = {
-        "worker_id": "S08",
+        "worker_id": "S06",
         "role": "secondary",
-        "seed_bundle": 2026090108,
+        "seed_bundle": 2026090106,
     }
     manifest_path = root / "worker_manifest.json"
     _write_json(manifest_path, manifest)
@@ -132,7 +132,7 @@ def _normalization_fixture(
     }
     task_audit_path = task_root / "task_identity_audit.json"
     _write_json(task_audit_path, task_audit)
-    recovery_id = "TASK8B-H02-S08-mixed-fixture-v1"
+    recovery_id = "TASK8B-H06-S06-mixed-fixture-v1"
     receipt_path = root / "task_receipts" / "mixed_ecological.json"
     receipt = {
         "schema_version": "task8-worker-task-receipt-v1",
@@ -158,11 +158,11 @@ def _normalization_fixture(
     _write_json(receipt_path, receipt)
 
     server_attempt = (
-        "/root/autodl-tmp/task8b_six_seed_pair_shards/H02/"
-        "paired_shards/S08/fixture/output"
+        "/root/autodl-tmp/task8b_six_seed_pair_shards/H06/"
+        "paired_shards/S06/fixture/output"
     )
     server_evidence = (
-        "/root/autodl-tmp/task8b_six_seed_control/H02/" "receipts/recovery/s08-fixture"
+        "/root/autodl-tmp/task8b_six_seed_control/H06/" "receipts/recovery/s06-fixture"
     )
     correction = {
         "corrected_actual_sha256": actual["resolved_config_sha256"],
@@ -178,8 +178,8 @@ def _normalization_fixture(
     correction_audit = {
         "schema_version": "task8b-paired-identity-correction-audit-v1",
         "status": "verified-recovered",
-        "worker_id": "S08",
-        "seed": 2026090108,
+        "worker_id": "S06",
+        "seed": 2026090106,
         "task_id": "mixed_ecological",
         "recovery_id": recovery_id,
         "attempt_root": server_attempt,
@@ -195,7 +195,7 @@ def _normalization_fixture(
         "effect_fields_read": False,
         "health": task8b_analysis.SECONDARY_NORMALIZATION_HEALTH,
     }
-    execution_root = tmp_path / "composition" / "execution" / "s08-normalization"
+    execution_root = tmp_path / "composition" / "execution" / "s06-normalization"
     correction_audit_path = (
         execution_root / "certificate.identity_correction_audit.json"
     )
@@ -204,8 +204,8 @@ def _normalization_fixture(
         "schema_version": "task8b-paired-completed-recovery-certificate-v1",
         "status": "execution_complete_recovered",
         "role": "secondary",
-        "worker_id": "S08",
-        "seed": 2026090108,
+        "worker_id": "S06",
+        "seed": 2026090106,
         "task_id": "mixed_ecological",
         "recovery_id": recovery_id,
         "attempt_root": server_attempt,
@@ -247,8 +247,8 @@ def _normalization_fixture(
         {
             "schema_version": "task8b-paired-recovery-ledger-entry-v1",
             "status": "append-only",
-            "worker_id": "S08",
-            "seed": 2026090108,
+            "worker_id": "S06",
+            "seed": 2026090106,
             "task_id": "mixed_ecological",
             "recovery_id": recovery_id,
             "attempt_root": server_attempt,
@@ -266,9 +266,9 @@ def _normalization_fixture(
             "status": "complete",
             "source_kind": "execution",
             "role": "secondary",
-            "worker_id": "S08",
-            "seed": 2026090108,
-            "pair_id": "pair_08",
+            "worker_id": "S06",
+            "seed": 2026090106,
+            "pair_id": "pair_06",
             "selected_task_ids": ["mixed_ecological"],
             "shard_role": "low",
             "effect_fields_read": False,
@@ -281,7 +281,7 @@ def _normalization_fixture(
                     "schema_version": "task8b-paired-shard-task-v1",
                     "status": "complete",
                     "task_id": "mixed_ecological",
-                    "producer_worker_id": "S08",
+                    "producer_worker_id": "S06",
                     "run_dir": receipt["run_dir"],
                     "planned_hands": 2700,
                     "actual_hands": 2700,
@@ -300,16 +300,16 @@ def _normalization_fixture(
         "ledger": ledger_path,
         "seal": shard_seal_path,
     }
-    high_receipt_path = tmp_path / "composition" / "execution" / "s08-high.json"
+    high_receipt_path = tmp_path / "composition" / "execution" / "s06-high.json"
     _write_json(high_receipt_path, {"status": "complete"})
-    composition_path = tmp_path / "composition" / "S08.json"
+    composition_path = tmp_path / "composition" / "S06.json"
     _write_json(
         composition_path,
         {
             "schema_version": "task8b-six-seed-composition-receipt-v1",
-            "worker_id": "S08",
-            "seed": 2026090108,
-            "pair_id": "pair_08",
+            "worker_id": "S06",
+            "seed": 2026090106,
+            "pair_id": "pair_06",
             "sides": [
                 {
                     "side": "low",
@@ -351,13 +351,13 @@ def _normalization_fixture(
         },
     )
     worker: dict[str, object] = {
-        "worker_id": "S08",
+        "worker_id": "S06",
         "pod_id": "pod08",
-        "seed": 2026090108,
+        "seed": 2026090106,
         "expected_worker_manifest_sha256": _sha256(manifest_path),
         "shard_lineage": {
-            "pair_id": "pair_08",
-            "composition_receipt_path": "composition/S08.json",
+            "pair_id": "pair_06",
+            "composition_receipt_path": "composition/S06.json",
             "composition_receipt_sha256": _sha256(composition_path),
         },
     }
@@ -446,25 +446,15 @@ def test_secondary_normalization_accepts_exact_post_frozen_physical_manifest_cha
         evidence,
     ) = _normalization_fixture(tmp_path)
     physical_manifest_sha = "1" * 64
+    selection_key = ("S06", 2026090106, "mixed_ecological")
     monkeypatch.setitem(
-        task8b_analysis.SECONDARY_POST_FROZEN_CONTINUATION_SELECTION,
-        "worker_id",
-        "S08",
-    )
-    monkeypatch.setitem(
-        task8b_analysis.SECONDARY_POST_FROZEN_CONTINUATION_SELECTION,
-        "seed",
-        2026090108,
-    )
-    monkeypatch.setitem(
-        task8b_analysis.SECONDARY_POST_FROZEN_CONTINUATION_SELECTION,
-        "logical_manifest_sha256",
-        _sha256(root / "worker_manifest.json"),
-    )
-    monkeypatch.setitem(
-        task8b_analysis.SECONDARY_POST_FROZEN_CONTINUATION_SELECTION,
-        "physical_manifest_sha256",
-        physical_manifest_sha,
+        task8b_analysis.SECONDARY_COMPOSED_MANIFEST_SELECTIONS,
+        selection_key,
+        {
+            "logical_manifest_sha256": _sha256(root / "worker_manifest.json"),
+            "physical_manifest_sha256": physical_manifest_sha,
+            "continuation_after_frozen_complete": True,
+        },
     )
     certificate = json.loads(evidence["certificate"].read_text(encoding="utf-8"))
     certificate["recovery_continuation_after_frozen_complete"] = True
@@ -473,6 +463,17 @@ def test_secondary_normalization_accepts_exact_post_frozen_physical_manifest_cha
     shard_seal = json.loads(evidence["seal"].read_text(encoding="utf-8"))
     shard_seal["derived_manifest_sha256"] = physical_manifest_sha
     _write_json(evidence["seal"], shard_seal)
+    source_manifest_path = evidence["seal"].parent / "01-shard-manifest.tsv"
+    source_relative = (
+        str(certificate["attempt_root"]).split("/root/autodl-tmp/", maxsplit=1)[1]
+        + "/worker_manifest.json"
+    )
+    source_manifest_path.write_text(
+        "sha256\tbytes\trelative_path\n"
+        f"{physical_manifest_sha}\t8211\t{source_relative}\n",
+        encoding="utf-8",
+        newline="",
+    )
     _refresh_composition_hashes(evidence["composition"], worker)
     task_audit = json.loads(
         (task_root / "task_identity_audit.json").read_text(encoding="utf-8")
@@ -521,17 +522,34 @@ def test_secondary_normalization_accepts_exact_post_frozen_physical_manifest_cha
     _write_json(manifest_path, manifest)
     worker["expected_worker_manifest_sha256"] = _sha256(manifest_path)
 
-    monkeypatch.setitem(
-        task8b_analysis.SECONDARY_POST_FROZEN_CONTINUATION_SELECTION,
-        "worker_id",
-        "S07",
+    monkeypatch.delitem(
+        task8b_analysis.SECONDARY_COMPOSED_MANIFEST_SELECTIONS,
+        selection_key,
     )
     with pytest.raises(ConfigError, match="recovery certificate"):
         validate()
     monkeypatch.setitem(
-        task8b_analysis.SECONDARY_POST_FROZEN_CONTINUATION_SELECTION,
-        "worker_id",
-        "S08",
+        task8b_analysis.SECONDARY_COMPOSED_MANIFEST_SELECTIONS,
+        selection_key,
+        {
+            "logical_manifest_sha256": _sha256(root / "worker_manifest.json"),
+            "physical_manifest_sha256": physical_manifest_sha,
+            "continuation_after_frozen_complete": True,
+        },
+    )
+    source_manifest_path.write_text(
+        "sha256\tbytes\trelative_path\n"
+        f"{'2' * 64}\t8211\t{source_relative}\n",
+        encoding="utf-8",
+        newline="",
+    )
+    with pytest.raises(ConfigError, match="physical worker manifest row"):
+        validate()
+    source_manifest_path.write_text(
+        "sha256\tbytes\trelative_path\n"
+        f"{physical_manifest_sha}\t8211\t{source_relative}\n",
+        encoding="utf-8",
+        newline="",
     )
     shard_seal["derived_manifest_sha256"] = "2" * 64
     _write_json(evidence["seal"], shard_seal)

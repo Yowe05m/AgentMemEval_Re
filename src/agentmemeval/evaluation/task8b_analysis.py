@@ -76,16 +76,61 @@ SECONDARY_NORMALIZATION_CHECKPOINT_CORRECTION = {
     "old_resolved_config_sha256": None,
     "only_authorized_field": "resolved_config_sha256",
 }
-SECONDARY_POST_FROZEN_CONTINUATION_SELECTION = {
-    "worker_id": "S07",
-    "seed": 2026090107,
-    "task_id": SECONDARY_NORMALIZATION_TASK_ID,
-    "logical_manifest_sha256": (
-        "f7210ee6f916dd7ea736c6ed1fa8ea444b1fc177188587e955fc2511085df0dc"
-    ),
-    "physical_manifest_sha256": (
-        "0edc4da793c509e38d9e31cb9346ed698b5285908cf6c93d01a745bc76456ff1"
-    ),
+SECONDARY_COMPOSED_MANIFEST_SELECTIONS = {
+    ("S07", 2026090107, SECONDARY_NORMALIZATION_TASK_ID): {
+        "logical_manifest_sha256": (
+            "f7210ee6f916dd7ea736c6ed1fa8ea444b1fc177188587e955fc2511085df0dc"
+        ),
+        "physical_manifest_sha256": (
+            "0edc4da793c509e38d9e31cb9346ed698b5285908cf6c93d01a745bc76456ff1"
+        ),
+        "continuation_after_frozen_complete": True,
+    },
+    ("S08", 2026090108, SECONDARY_NORMALIZATION_TASK_ID): {
+        "logical_manifest_sha256": (
+            "1e08e31ae57b4cc6883ab91dc11e8fd059a2cba9fca09e558e3b36539127681d"
+        ),
+        "physical_manifest_sha256": (
+            "a32e3b755f2ace8478d6418c7e4954a2e24c7d1ca984221356f3aea8ee41b1e8"
+        ),
+        "continuation_after_frozen_complete": False,
+    },
+    ("S09", 2026090109, SECONDARY_NORMALIZATION_TASK_ID): {
+        "logical_manifest_sha256": (
+            "aabc9a9f8c1c34b1170d59a40162841cb8d682bea20d313fc20ee8a140cb083b"
+        ),
+        "physical_manifest_sha256": (
+            "3e4b5b7360dca0e03b74f29ad87ea29974038b9037d2c10ad7ed3a79fbb9f33c"
+        ),
+        "continuation_after_frozen_complete": False,
+    },
+    ("S10", 2026090110, SECONDARY_NORMALIZATION_TASK_ID): {
+        "logical_manifest_sha256": (
+            "5fbf6ba87ad978af6c389ffbfab00fd0a8d56d1cb94a9f5648f234a1d40d9dd1"
+        ),
+        "physical_manifest_sha256": (
+            "69469858b2159e89fbe6e9e9b14b1e46f9de35e7d91ff64c0c091e35c8f5b169"
+        ),
+        "continuation_after_frozen_complete": False,
+    },
+    ("S11", 2026090111, SECONDARY_NORMALIZATION_TASK_ID): {
+        "logical_manifest_sha256": (
+            "8e614acd85194ce7a5b977197edf8e59c712e9419b5b6855ffb360113059c46b"
+        ),
+        "physical_manifest_sha256": (
+            "eeeb8c4fa813e4c36090573ee49046973534fe00f071beee84f52dd0c7b00f56"
+        ),
+        "continuation_after_frozen_complete": False,
+    },
+    ("S12", 2026090112, SECONDARY_NORMALIZATION_TASK_ID): {
+        "logical_manifest_sha256": (
+            "7a4dfa401de78cf4fdea4460b74dd69cfdb5c49f7969c88f656680f53eef9d99"
+        ),
+        "physical_manifest_sha256": (
+            "cb8d003bb7366c0186030d2ba66c8ca7765912c43dfd1c229fe128b0abdc32a1"
+        ),
+        "continuation_after_frozen_complete": False,
+    },
 }
 RECOVERY_DISPOSITION = "VERIFIER_FALSE_POSITIVE_SAME_ATTEMPT_RECOVERY"
 RECOVERY_PROTOCOL_AMENDMENT_ID = "TASK8B-VFPR-20260722"
@@ -347,7 +392,7 @@ PHASE_F_AUDITED_RECOVERY_OVERLAY_AST_SHA256 = {
         "22078927262286a13b0148a9d5f60a2716c5be16c97f945e858940ad6164abeb"
     ),
     "_validate_secondary_standalone_identity_normalization": (
-        "57fd69f49bf40c1e4364f4758bed82417d881ed755f6e9656eb3e2160b616826"
+        "a7f00bc392d92f9ce69d789e9c2c077a8e4781c31dba171784924c668bb0a84a"
     ),
     "_validate_task_data_completeness": (
         "fe2ec04c243894af2db74d368eccdc5cdaef3e59b43e003c7b1da2ac11a3d756"
@@ -2326,7 +2371,7 @@ def _validate_secondary_standalone_identity_normalization(
         "certificate.identity_correction_audit.json"
     ]
     _, ledger = evidence["ledger.json"]
-    _, shard_seal = evidence["shard_seal.json"]
+    shard_seal_path, shard_seal = evidence["shard_seal.json"]
     correction = {
         "corrected_actual_sha256": corrected,
         "only_authorized_difference": (
@@ -2338,25 +2383,26 @@ def _validate_secondary_standalone_identity_normalization(
     }
     worker_id = str(worker.get("worker_id", ""))
     seed = worker.get("seed")
-    post_frozen_continuation = (
-        worker_id == SECONDARY_POST_FROZEN_CONTINUATION_SELECTION["worker_id"]
-        and seed == SECONDARY_POST_FROZEN_CONTINUATION_SELECTION["seed"]
-        and task_audit.get("task_id")
-        == SECONDARY_POST_FROZEN_CONTINUATION_SELECTION["task_id"]
+    composed_selection = SECONDARY_COMPOSED_MANIFEST_SELECTIONS.get(
+        (
+            worker_id,
+            seed,
+            str(task_audit.get("task_id", "")),
+        )
     )
+    continuation_after_frozen_complete = False
     expected_derived_manifest_sha = current_manifest_sha
-    if post_frozen_continuation:
+    if composed_selection is not None:
         if (
             current_manifest_sha
-            != SECONDARY_POST_FROZEN_CONTINUATION_SELECTION[
-                "logical_manifest_sha256"
-            ]
+            != composed_selection["logical_manifest_sha256"]
         ):
-            raise ConfigError("S07 logical composed manifest identity 非法")
-        expected_derived_manifest_sha = (
-            SECONDARY_POST_FROZEN_CONTINUATION_SELECTION[
-                "physical_manifest_sha256"
-            ]
+            raise ConfigError("Secondary logical composed manifest identity 非法")
+        expected_derived_manifest_sha = str(
+            composed_selection["physical_manifest_sha256"]
+        )
+        continuation_after_frozen_complete = bool(
+            composed_selection["continuation_after_frozen_complete"]
         )
     health = SECONDARY_NORMALIZATION_HEALTH
     checkpoint_correction = SECONDARY_NORMALIZATION_CHECKPOINT_CORRECTION
@@ -2387,7 +2433,7 @@ def _validate_secondary_standalone_identity_normalization(
         or certificate.get("standard_resume_task_ids") != []
         or certificate.get("unrecovered_selected_task_ids") != []
         or certificate.get("recovery_continuation_after_frozen_complete")
-        is not post_frozen_continuation
+        is not continuation_after_frozen_complete
         or certificate.get("planned_hands") != 2700
         or certificate.get("actual_hands") != 2700
         or certificate.get("health") != health
@@ -2409,6 +2455,35 @@ def _validate_secondary_standalone_identity_normalization(
         or certificate.get("identity_correction_audit_sha256") != _sha256(audit_path)
     ):
         raise ConfigError("Secondary standalone recovery certificate 非法")
+    if composed_selection is not None:
+        source_manifest_path = _resolve_secondary_normalization_path(
+            shard_seal_path.parent,
+            Path("01-shard-manifest.tsv"),
+        )
+        if not source_manifest_path.is_file():
+            raise ConfigError("Secondary physical source manifest 缺失")
+        with source_manifest_path.open("r", encoding="utf-8", newline="") as handle:
+            source_rows = list(csv.DictReader(handle, delimiter="\t"))
+        try:
+            source_attempt = PurePosixPath(
+                str(certificate.get("attempt_root", ""))
+            ).relative_to("/root/autodl-tmp")
+        except ValueError as exc:
+            raise ConfigError("Secondary physical attempt root 非法") from exc
+        expected_source_relative = str(source_attempt / "worker_manifest.json")
+        physical_rows = [
+            row
+            for row in source_rows
+            if row.get("sha256") == expected_derived_manifest_sha
+            and str(row.get("relative_path", "")).replace("\\", "/")
+            == expected_source_relative
+        ]
+        if (
+            len(physical_rows) != 1
+            or not str(physical_rows[0].get("bytes", "")).isdigit()
+            or int(str(physical_rows[0]["bytes"])) <= 0
+        ):
+            raise ConfigError("Secondary physical worker manifest row 非法")
     _validate_secondary_normalization_state_binding(root, certificate)
     if (
         correction_audit.get("status") != "verified-recovered"
