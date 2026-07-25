@@ -105,6 +105,8 @@ JSON_ASSERTION_FIELDS = frozenset(
 ARCHIVE_EVIDENCE_PROFILES: dict[str, set[str | None]] = {
     "task8b-full-matrix-export-receipt-v1": {"source_manifest_complete"},
     "task8b-full-matrix-export-seal-v1": {"sealed"},
+    "task8b-recovery-support-export-receipt-v1": {"source_manifest_complete"},
+    "task8b-recovery-support-export-seal-v1": {"sealed"},
     "task8b-local-export-verification-v1": {None},
     "task8b-six-seed-original-evidence-freeze-v1": {None},
     "task8b-paired-shard-cross-host-bundle-v1": {"sealed"},

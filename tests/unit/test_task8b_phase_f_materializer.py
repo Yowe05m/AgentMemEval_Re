@@ -809,8 +809,7 @@ def _rebind_formal_archive(
             "status": "sealed",
             "effect_fields_read": False,
         }
-    else:
-        assert profile == "cross-host"
+    elif profile == "cross-host":
         _write_json(
             receipt,
             {
@@ -830,6 +829,37 @@ def _rebind_formal_archive(
             {
                 "schema_version": "task8b-paired-shard-cross-host-bundle-v1",
                 "status": "sealed",
+                "effect_fields_read": False,
+            },
+        )
+        seal_assertions = {
+            "status": "sealed",
+            "effect_fields_read": False,
+        }
+    else:
+        assert profile == "recovery-support"
+        _write_json(
+            receipt,
+            {
+                "schema_version": "task8b-recovery-support-export-receipt-v1",
+                "status": "source_manifest_complete",
+                "archive_sha256": _sha256(archive_path),
+                "server_manifest_sha256": _sha256(manifest_path),
+                "effect_fields_read": False,
+            },
+        )
+        receipt_assertions = {
+            "status": "source_manifest_complete",
+            "effect_fields_read": False,
+        }
+        _write_json(
+            seal,
+            {
+                "schema_version": "task8b-recovery-support-export-seal-v1",
+                "status": "sealed",
+                "archive_sha256": _sha256(archive_path),
+                "server_manifest_sha256": _sha256(manifest_path),
+                "export_receipt_sha256": _sha256(receipt),
                 "effect_fields_read": False,
             },
         )
@@ -1169,6 +1199,30 @@ def test_materializer_accepts_files_json_cross_host_summary_and_bundle_profile(
     _write_json(variant, source_map)
 
     result = materialize_task8b_phase_f(variant, tmp_path / "files-json-canonical")
+
+    assert result["status"] == "complete"
+    assert result["formal_effect_fields_read"] is False
+
+
+def test_materializer_accepts_recovery_support_export_profile(tmp_path: Path) -> None:
+    source_map_path, source_map = _make_source_map(tmp_path)
+    root = source_map_path.parent
+    _rebind_formal_archive(
+        source_map_path,
+        source_map,
+        archive_path=root / "formal.tar.gz",
+        manifest_path=root / "formal_manifest.tsv",
+        manifest_format="sha256-size-path-tsv-v1",
+        has_header=True,
+        profile="recovery-support",
+    )
+    variant = root / "recovery_support_source_map.json"
+    _write_json(variant, source_map)
+
+    result = materialize_task8b_phase_f(
+        variant,
+        tmp_path / "recovery-support-canonical",
+    )
 
     assert result["status"] == "complete"
     assert result["formal_effect_fields_read"] is False
