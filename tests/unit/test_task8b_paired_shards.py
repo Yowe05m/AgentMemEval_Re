@@ -221,7 +221,7 @@ def _authorization(
                     shards.FROZEN_FORMAL_RUNNER_SHA256
                 ),
                 "engineering_controller_sha256": (
-                    "2f95e360c420997a72f206279be8ad3e2b195553d682d7674e6e7ec6d87f24b9"
+                    shards.H06_MIXED_FIX_V1_CONTROLLER_SHA256
                 ),
                 "task_union": list(shards.EXPECTED_TASKS["primary"]),
                 "effect_fields_read": False,
@@ -1868,11 +1868,7 @@ def test_completed_recovery_accepts_verified_secondary_source_controller(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _mock_frozen_standard_resume(monkeypatch)
-    source_controller = next(
-        item
-        for item in shards.RECOVERY_SOURCE_CONTROLLER_SHA256S
-        if item != shards.RECOVERY_SOURCE_CONTROLLER_SHA256
-    )
+    source_controller = shards.H06_MIXED_FIX_V1_CONTROLLER_SHA256
     paths = _completed_recovery_fixture(
         tmp_path,
         recovery_source_controller=source_controller,
