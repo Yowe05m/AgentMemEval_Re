@@ -9,10 +9,11 @@ import hashlib
 import json
 import platform
 import re
+import stat
 import subprocess
 from collections import defaultdict
 from decimal import Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import matplotlib
@@ -43,6 +44,37 @@ FORMAL_SECONDARY_TASKS = {
     "expr_without": (600, {"R1-E5"}),
     "async_online": (600, {"R1-E4"}),
     "async_without": (600, {"R1-E5"}),
+}
+SECONDARY_NORMALIZATION_TASK_ID = "mixed_ecological"
+SECONDARY_NORMALIZATION_REASON = "secondary-standalone-runtime-identity-normalization"
+SECONDARY_NORMALIZATION_IDENTITY_FIELDS = (
+    "code_sha",
+    "embedding_fingerprint",
+    "model_fingerprint",
+    "prompt_sha256",
+    "resolved_config_sha256",
+    "schedule_sha256",
+)
+SECONDARY_NORMALIZATION_RUNTIME_TRANSFORM = {
+    "checkpoint_interval_removed": True,
+    "checkpoint_set": [300],
+    "memory_mode": "Frozen",
+    "update_memory_test": False,
+}
+SECONDARY_NORMALIZATION_HEALTH = {
+    "behavior_valid": True,
+    "execution_health_valid": True,
+    "execution_valid": True,
+    "fallback_count": 0,
+    "memory_revision_fallback_count": 0,
+    "reward_conservation_violation_count": 0,
+    "stack_conservation_violation_count": 0,
+}
+SECONDARY_NORMALIZATION_CHECKPOINT_CORRECTION = {
+    "applied": False,
+    "new_resolved_config_sha256": None,
+    "old_resolved_config_sha256": None,
+    "only_authorized_field": "resolved_config_sha256",
 }
 RECOVERY_DISPOSITION = "VERIFIER_FALSE_POSITIVE_SAME_ATTEMPT_RECOVERY"
 RECOVERY_PROTOCOL_AMENDMENT_ID = "TASK8B-VFPR-20260722"
@@ -230,7 +262,6 @@ PHASE_F_FROZEN_CONTRACT_FIELDS = (
 PHASE_F_PROTECTED_ANALYSIS_FUNCTIONS = (
     "_select_attempt",
     "_assess_attempt",
-    "_assess_formal_worker",
     "_formal_execution_health_reasons",
     "_validate_selected_seed_pods",
     "_validate_formal_task_topology",
@@ -284,6 +315,24 @@ PHASE_F_AUDITED_RECOVERY_OVERLAY_AST_SHA256 = {
     "_formal_metric_rows": "049fc448f3c9f163c4e2e0b3a39d9d2a9829701a95fb06ebc762f8d0a7a8fe4f",
     "_normalize_data_lineage_rows": (
         "8721336f265d8ba3d71699fbafff49bed636bd17f7ebbcfb5a21a35cb5e50a95"
+    ),
+    "_assess_formal_worker": (
+        "b781c9a18b759dd2ada4cf5f959b2fa2eef1aa73f60fc79865807047cf2ba5b0"
+    ),
+    "_resolve_secondary_normalization_path": (
+        "3d75cbd592a0362c9c89a61adde559634eefda64dcfcaa3da5f1b386d2cbaa75"
+    ),
+    "_secondary_normalization_evidence": (
+        "94ecdb7d30982da8aac72a1ecd19f23ef87295ccc22d3f7ec19e4b6931363d6f"
+    ),
+    "_validate_secondary_normalization_state_binding": (
+        "29ccc05e5a13c803b4fdee88e9d82ad959084e2e8372c0faca28337a143cd026"
+    ),
+    "_formal_worker_crn_reasons": (
+        "22078927262286a13b0148a9d5f60a2716c5be16c97f945e858940ad6164abeb"
+    ),
+    "_validate_secondary_standalone_identity_normalization": (
+        "6e6986be69a4d73e9e46872e0eca96b0ec4c59a89adb7064ccbbe8492deaf046"
     ),
     "_compact_lineage_source": "7f72ec412c753708f09ff9020bfd13c0221dc26feb4be4679fd2ad579ae7d3ba",
     "_paper_lineage_rows": "a97ab3dffc34cbd98faa194680441df9c0c4bc01f7aaccbd1b405efd4cd0c515",
@@ -2030,6 +2079,409 @@ def _metric_and_lineage_rows(
     return lineage, metrics
 
 
+def _resolve_secondary_normalization_path(
+    base: Path,
+    relative: Path,
+) -> Path:
+    cursor = base
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    for part in relative.parts:
+        cursor = cursor / part
+        try:
+            junction_check = getattr(cursor, "is_junction", None)
+            if (
+                cursor.is_symlink()
+                or (callable(junction_check) and junction_check())
+                or bool(getattr(cursor.lstat(), "st_file_attributes", 0) & reparse_flag)
+            ):
+                raise ConfigError(
+                    "Secondary identity normalization path 禁止 symlink/junction/reparse"
+                )
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ConfigError(
+                "Secondary identity normalization path 无法安全检查"
+            ) from exc
+    resolved_base = base.resolve()
+    candidate = (base / relative).resolve()
+    try:
+        candidate.relative_to(resolved_base)
+    except ValueError as exc:
+        raise ConfigError("Secondary identity normalization path 越界") from exc
+    return candidate
+
+
+def _secondary_normalization_evidence(
+    root: Path,
+    worker: dict[str, Any],
+) -> dict[str, tuple[Path, dict[str, Any]]]:
+    lineage = worker.get("shard_lineage")
+    if not isinstance(lineage, dict):
+        raise ConfigError("Secondary identity normalization 缺 shard lineage")
+    relative = Path(str(lineage.get("composition_receipt_path", "")))
+    if not str(relative) or relative.is_absolute() or ".." in relative.parts:
+        raise ConfigError("Secondary identity normalization composition path 非法")
+    expected_composition_sha = str(lineage.get("composition_receipt_sha256", ""))
+    if re.fullmatch(r"[0-9a-f]{64}", expected_composition_sha) is None:
+        raise ConfigError("Secondary identity normalization composition SHA 非法")
+    candidates = []
+    for ancestor in root.parents:
+        candidate = _resolve_secondary_normalization_path(ancestor, relative)
+        if candidate.is_file() and _sha256(candidate) == expected_composition_sha:
+            candidates.append(candidate)
+    if len(candidates) != 1:
+        raise ConfigError(
+            "Secondary identity normalization composition receipt 必须唯一且 SHA 绑定"
+        )
+    composition_path = candidates[0]
+    composition = _read_json(composition_path)
+    if (
+        composition.get("schema_version") != "task8b-six-seed-composition-receipt-v1"
+        or composition.get("worker_id") != worker.get("worker_id")
+        or composition.get("pair_id") != lineage.get("pair_id")
+        or composition.get("seed") != worker.get("seed")
+    ):
+        raise ConfigError("Secondary identity normalization composition identity 非法")
+    sides = composition.get("sides")
+    low_sides = (
+        [side for side in sides if isinstance(side, dict) and side.get("side") == "low"]
+        if isinstance(sides, list)
+        else []
+    )
+    if len(low_sides) != 1:
+        raise ConfigError("Secondary identity normalization low side 不唯一")
+    low = low_sides[0]
+    if (
+        low.get("task_ids") != [SECONDARY_NORMALIZATION_TASK_ID]
+        or low.get("actual_hands") != 2700
+    ):
+        raise ConfigError("Secondary identity normalization low side task/hands 非法")
+    rows = low.get("execution_receipts")
+    if not isinstance(rows, list) or not rows:
+        raise ConfigError("Secondary identity normalization 缺 execution receipts")
+    expected_schemas = {
+        "certificate.json": "task8b-paired-completed-recovery-certificate-v1",
+        "certificate.identity_correction_audit.json": (
+            "task8b-paired-identity-correction-audit-v1"
+        ),
+        "ledger.json": "task8b-paired-recovery-ledger-entry-v1",
+        "shard_seal.json": "task8b-paired-shard-receipt-v1",
+    }
+    evidence: dict[str, tuple[Path, dict[str, Any]]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ConfigError("Secondary identity normalization execution row 非法")
+        execution_relative = Path(str(row.get("path", "")))
+        if (
+            not str(execution_relative)
+            or execution_relative.is_absolute()
+            or ".." in execution_relative.parts
+        ):
+            raise ConfigError("Secondary identity normalization execution path 非法")
+        name = execution_relative.name
+        if name not in expected_schemas:
+            continue
+        execution_path = _resolve_secondary_normalization_path(
+            composition_path.parent,
+            execution_relative,
+        )
+        if (
+            composition_path.parent not in execution_path.parents
+            or not execution_path.is_file()
+            or re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", ""))) is None
+            or _sha256(execution_path) != row.get("sha256")
+            or name in evidence
+        ):
+            raise ConfigError(
+                "Secondary identity normalization execution evidence SHA 非法或重复"
+            )
+        value = _read_json(execution_path)
+        if value.get("schema_version") != expected_schemas[name]:
+            raise ConfigError("Secondary identity normalization evidence schema 非法")
+        evidence[name] = (execution_path, value)
+    if set(evidence) != set(expected_schemas):
+        raise ConfigError("Secondary identity normalization recovery evidence 不完整")
+    return evidence
+
+
+def _validate_secondary_normalization_state_binding(
+    root: Path,
+    certificate: dict[str, Any],
+) -> None:
+    state_path = _resolve_secondary_normalization_path(
+        root,
+        Path("state.tsv"),
+    )
+    if not state_path.is_file():
+        raise ConfigError("Secondary standalone recovery state 缺失")
+    _verify_analysis_state(state_path)
+    with state_path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    state_hashes = [str(row.get("row_sha256", "")) for row in rows]
+    failed_hash = str(certificate.get("failed_state_row_sha256", ""))
+    appended_hashes = [
+        str(value) for value in certificate.get("appended_state_row_sha256", [])
+    ]
+    if (
+        state_hashes.count(failed_hash) != 1
+        or failed_hash in appended_hashes
+        or len(set(appended_hashes)) != len(appended_hashes)
+        or any(state_hashes.count(value) != 1 for value in appended_hashes)
+    ):
+        raise ConfigError("Secondary standalone recovery state hashes 非唯一或未绑定")
+    failed_index = state_hashes.index(failed_hash)
+    if (
+        rows[failed_index].get("status") != "failed"
+        or state_hashes[failed_index + 1 :] != appended_hashes
+    ):
+        raise ConfigError("Secondary standalone recovery state suffix 顺序非法")
+
+
+def _validate_secondary_standalone_identity_normalization(
+    *,
+    root: Path,
+    worker: dict[str, Any],
+    manifest: dict[str, Any],
+    task_root: Path,
+    task_audit: dict[str, Any],
+    expected: dict[str, Any],
+    actual: dict[str, Any],
+) -> None:
+    identity_fields = set(SECONDARY_NORMALIZATION_IDENTITY_FIELDS)
+    manifest_path = _resolve_secondary_normalization_path(
+        root,
+        Path("worker_manifest.json"),
+    )
+    if (
+        not manifest_path.is_file()
+        or _read_json(manifest_path) != manifest
+        or manifest.get("role") != "secondary"
+        or manifest.get("worker_id") != worker.get("worker_id")
+        or manifest.get("seed_bundle") != worker.get("seed")
+        or task_audit.get("schema_version") != "task8-task-identity-audit-v1"
+        or task_audit.get("status") != "verified"
+        or task_audit.get("task_id") != SECONDARY_NORMALIZATION_TASK_ID
+        or task_audit.get("actual") != actual
+        or set(expected) != identity_fields
+        or set(actual) != identity_fields | {"code_dirty"}
+        or actual.get("code_dirty") is not False
+    ):
+        raise ConfigError("Secondary standalone identity normalization scope 非法")
+    for field in identity_fields - {"resolved_config_sha256"}:
+        if actual.get(field) != expected.get(field):
+            raise ConfigError(
+                "Secondary standalone identity normalization 超出 resolved config"
+            )
+    original = str(expected.get("resolved_config_sha256", ""))
+    corrected = str(actual.get("resolved_config_sha256", ""))
+    if (
+        original == corrected
+        or re.fullmatch(r"[0-9a-f]{64}", original) is None
+        or re.fullmatch(r"[0-9a-f]{64}", corrected) is None
+    ):
+        raise ConfigError("Secondary standalone resolved config bridge 非法")
+    receipt_path = root / "task_receipts" / (f"{SECONDARY_NORMALIZATION_TASK_ID}.json")
+    receipt = _read_json(receipt_path)
+    task_row = receipt.get("task_row")
+    if (
+        receipt.get("schema_version") != RECOVERY_TASK_RECEIPT_SCHEMA
+        or receipt.get("task_id") != SECONDARY_NORMALIZATION_TASK_ID
+        or not isinstance(task_row, dict)
+        or task_row.get("task_id") != SECONDARY_NORMALIZATION_TASK_ID
+        or task_row.get("status") != "complete"
+        or task_row.get("memory_mode") != "Frozen"
+        or task_row.get("run_dir") != receipt.get("run_dir")
+        or task_row.get("identity_audit") != actual
+        or _inside_attempt(root, str(receipt.get("run_dir", ""))) != task_root.resolve()
+    ):
+        raise ConfigError("Secondary standalone task receipt binding 非法")
+    recovery_id = str(task_row.get("recovery_id", ""))
+    if not recovery_id:
+        raise ConfigError("Secondary standalone task receipt 缺 recovery id")
+    evidence = _secondary_normalization_evidence(root, worker)
+    _, certificate = evidence["certificate.json"]
+    audit_path, correction_audit = evidence[
+        "certificate.identity_correction_audit.json"
+    ]
+    _, ledger = evidence["ledger.json"]
+    _, shard_seal = evidence["shard_seal.json"]
+    correction = {
+        "corrected_actual_sha256": corrected,
+        "only_authorized_difference": (
+            "frozen secondary standalone runtime normalization"
+        ),
+        "original_expected_sha256": original,
+        "reason": SECONDARY_NORMALIZATION_REASON,
+        "runtime_transform": SECONDARY_NORMALIZATION_RUNTIME_TRANSFORM,
+    }
+    worker_id = str(worker.get("worker_id", ""))
+    seed = worker.get("seed")
+    current_manifest_sha = _sha256(manifest_path)
+    health = SECONDARY_NORMALIZATION_HEALTH
+    checkpoint_correction = SECONDARY_NORMALIZATION_CHECKPOINT_CORRECTION
+    sha_fields = (
+        "authorization_sha256",
+        "baseline_sha256",
+        "derived_manifest_sha256",
+        "failed_state_row_sha256",
+        "pre_recovery_archive_sha256",
+        "recovery_tool_sha256",
+    )
+    if (
+        certificate.get("status") != "execution_complete_recovered"
+        or certificate.get("role") != "secondary"
+        or certificate.get("worker_id") != worker_id
+        or certificate.get("seed") != seed
+        or certificate.get("task_id") != SECONDARY_NORMALIZATION_TASK_ID
+        or certificate.get("recovery_id") != recovery_id
+        or certificate.get("reason") != SECONDARY_NORMALIZATION_REASON
+        or certificate.get("identity_correction") != correction
+        or certificate.get("checkpoint_receipt_identity_correction")
+        != checkpoint_correction
+        or certificate.get("effect_fields_read") is not False
+        or certificate.get("recovered_task_scientific_files_modified") is not False
+        or certificate.get("failed_state_preserved") is not True
+        or certificate.get("shard_closed") is not True
+        or certificate.get("standard_resume_used_frozen_runner") is not True
+        or certificate.get("standard_resume_task_ids") != []
+        or certificate.get("unrecovered_selected_task_ids") != []
+        or certificate.get("recovery_continuation_after_frozen_complete") is not False
+        or certificate.get("planned_hands") != 2700
+        or certificate.get("actual_hands") != 2700
+        or certificate.get("health") != health
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(certificate.get(field, ""))) is None
+            for field in sha_fields
+        )
+        or certificate.get("derived_manifest_sha256") != current_manifest_sha
+        or not isinstance(certificate.get("appended_state_row_sha256"), list)
+        or not certificate["appended_state_row_sha256"]
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(value)) is None
+            for value in certificate["appended_state_row_sha256"]
+        )
+        or certificate.get("task_identity_audit_sha256")
+        != _sha256(task_root / "task_identity_audit.json")
+        or certificate.get("task_receipt_sha256") != _sha256(receipt_path)
+        or certificate.get("identity_correction_audit_sha256") != _sha256(audit_path)
+    ):
+        raise ConfigError("Secondary standalone recovery certificate 非法")
+    _validate_secondary_normalization_state_binding(root, certificate)
+    if (
+        correction_audit.get("status") != "verified-recovered"
+        or correction_audit.get("worker_id") != worker_id
+        or correction_audit.get("seed") != seed
+        or correction_audit.get("task_id") != SECONDARY_NORMALIZATION_TASK_ID
+        or correction_audit.get("recovery_id") != recovery_id
+        or correction_audit.get("expected") != expected
+        or correction_audit.get("actual") != actual
+        or correction_audit.get("identity_correction") != correction
+        or correction_audit.get("checkpoint_receipt_identity_correction")
+        != checkpoint_correction
+        or correction_audit.get("effect_fields_read") is not False
+        or correction_audit.get("health") != health
+    ):
+        raise ConfigError("Secondary standalone identity correction audit 非法")
+    attempt_root = PurePosixPath(str(certificate.get("attempt_root", "")))
+    audit_attempt_root = PurePosixPath(str(correction_audit.get("attempt_root", "")))
+    ledger_attempt_root = PurePosixPath(str(ledger.get("attempt_root", "")))
+    source_task_audit = PurePosixPath(
+        str(correction_audit.get("standard_task_identity_audit_path", ""))
+    )
+    source_correction_audit = PurePosixPath(
+        str(certificate.get("identity_correction_audit_path", ""))
+    )
+    source_certificate = PurePosixPath(str(ledger.get("certificate_path", "")))
+    if (
+        not attempt_root.is_absolute()
+        or audit_attempt_root != attempt_root
+        or ledger_attempt_root != attempt_root
+        or source_task_audit
+        != attempt_root
+        / "runs"
+        / SECONDARY_NORMALIZATION_TASK_ID
+        / "task_identity_audit.json"
+        or not source_correction_audit.is_absolute()
+        or not source_certificate.is_absolute()
+        or source_correction_audit.name != "certificate.identity_correction_audit.json"
+        or source_certificate.name != "certificate.json"
+        or source_correction_audit.parent != source_certificate.parent
+        or ledger.get("status") != "append-only"
+        or ledger.get("worker_id") != worker_id
+        or ledger.get("seed") != seed
+        or ledger.get("task_id") != SECONDARY_NORMALIZATION_TASK_ID
+        or ledger.get("recovery_id") != recovery_id
+        or ledger.get("effect_fields_read") is not False
+        or ledger.get("shard_closed") is not True
+        or ledger.get("certificate_sha256_pending_at_publication") is not True
+    ):
+        raise ConfigError("Secondary standalone recovery ledger/path binding 非法")
+    sealed_tasks = shard_seal.get("tasks")
+    sealed_task = (
+        sealed_tasks[0]
+        if isinstance(sealed_tasks, list)
+        and len(sealed_tasks) == 1
+        and isinstance(sealed_tasks[0], dict)
+        else {}
+    )
+    source_task_receipt = PurePosixPath(str(sealed_task.get("task_receipt_path", "")))
+    if (
+        shard_seal.get("status") != "complete"
+        or shard_seal.get("source_kind") != "execution"
+        or shard_seal.get("role") != "secondary"
+        or shard_seal.get("worker_id") != worker_id
+        or shard_seal.get("seed") != seed
+        or shard_seal.get("pair_id") != worker.get("shard_lineage", {}).get("pair_id")
+        or shard_seal.get("selected_task_ids") != [SECONDARY_NORMALIZATION_TASK_ID]
+        or shard_seal.get("shard_role") != "low"
+        or shard_seal.get("effect_fields_read") is not False
+        or PurePosixPath(str(shard_seal.get("attempt_root", ""))) != attempt_root
+        or shard_seal.get("derived_manifest_sha256")
+        != certificate.get("derived_manifest_sha256")
+        or shard_seal.get("derived_manifest_sha256") != current_manifest_sha
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(shard_seal.get("canonical_manifest_sha256", "")),
+        )
+        is None
+        or shard_seal.get("frozen_code_sha") != FROZEN_SCIENTIFIC_CODE_SHA
+        or sealed_task.get("schema_version") != "task8b-paired-shard-task-v1"
+        or sealed_task.get("status") != "complete"
+        or sealed_task.get("task_id") != SECONDARY_NORMALIZATION_TASK_ID
+        or sealed_task.get("producer_worker_id") != worker_id
+        or sealed_task.get("run_dir") != receipt.get("run_dir")
+        or sealed_task.get("planned_hands") != 2700
+        or sealed_task.get("actual_hands") != 2700
+        or sealed_task.get("files") != receipt.get("files")
+        or sealed_task.get("task_receipt_sha256") != _sha256(receipt_path)
+        or source_task_receipt
+        != attempt_root / "task_receipts" / f"{SECONDARY_NORMALIZATION_TASK_ID}.json"
+    ):
+        raise ConfigError("Secondary standalone shard seal binding 非法")
+
+
+def _formal_worker_crn_reasons(
+    manifest: dict[str, Any],
+    task_rows: list[dict[str, Any]],
+) -> list[str]:
+    role = str(manifest.get("role", ""))
+    if role == "secondary":
+        return []
+    if role != "primary":
+        return ["IDENTITY_INVALID"]
+    isolation_schedules = {
+        str(task.get("expected_identity", {}).get("schedule_sha256", ""))
+        for task in task_rows
+        if str(task.get("task_id", "")).startswith("isolation_")
+    }
+    return (
+        ["CRN_INVALID"]
+        if len(isolation_schedules) != 1 or "" in isolation_schedules
+        else []
+    )
+
+
 def _assess_formal_worker(
     root: Path,
     worker: dict[str, Any],
@@ -2039,7 +2491,10 @@ def _assess_formal_worker(
     reasons: list[str] = []
     manifest = _read_json(root / "worker_manifest.json")
     expected_manifest_sha = str(worker.get("expected_worker_manifest_sha256", ""))
-    if expected_manifest_sha and _sha256(root / "worker_manifest.json") != expected_manifest_sha:
+    if (
+        expected_manifest_sha
+        and _sha256(root / "worker_manifest.json") != expected_manifest_sha
+    ):
         reasons.append("IDENTITY_INVALID")
     common = manifest.get("common_identity")
     if not isinstance(common, dict):
@@ -2098,20 +2553,37 @@ def _assess_formal_worker(
         ):
             path = root / Path(relative)
             row = files.get(relative)
-            if row is None or not path.is_file() or row != (path.stat().st_size, _sha256(path)):
+            if (
+                row is None
+                or not path.is_file()
+                or row != (path.stat().st_size, _sha256(path))
+            ):
                 reasons.append("ARTIFACT_HASH_INVALID")
         if not task_root.is_dir():
             continue
         audit = _read_json(task_root / "task_identity_audit.json")
         actual = audit.get("actual")
         task_expected = task.get("expected_identity")
-        if (
+        identity_structure_invalid = (
             audit.get("status") != "verified"
             or not isinstance(actual, dict)
             or not isinstance(task_expected, dict)
-            or any(actual.get(key) != value for key, value in task_expected.items())
-        ):
+        )
+        if identity_structure_invalid:
             reasons.append("IDENTITY_INVALID")
+        elif any(actual.get(key) != value for key, value in task_expected.items()):
+            try:
+                _validate_secondary_standalone_identity_normalization(
+                    root=root,
+                    worker=worker,
+                    manifest=manifest,
+                    task_root=task_root,
+                    task_audit=audit,
+                    expected=task_expected,
+                    actual=actual,
+                )
+            except ConfigError:
+                reasons.append("IDENTITY_INVALID")
         metrics = _read_json(task_root / "metrics.json")
         execution = metrics.get("execution_health")
         validity = metrics.get("run_validity")
@@ -2132,13 +2604,7 @@ def _assess_formal_worker(
             )
         except ConfigError:
             reasons.append("ARTIFACT_HASH_INVALID")
-    isolation_schedules = {
-        str(task.get("expected_identity", {}).get("schedule_sha256", ""))
-        for task in task_rows
-        if str(task.get("task_id", "")).startswith("isolation_")
-    }
-    if len(isolation_schedules) != 1 or "" in isolation_schedules:
-        reasons.append("CRN_INVALID")
+    reasons.extend(_formal_worker_crn_reasons(manifest, task_rows))
     return sorted(set(reasons)), observed
 
 

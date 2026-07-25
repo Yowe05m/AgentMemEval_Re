@@ -253,6 +253,11 @@ def build_parser() -> argparse.ArgumentParser:
     task8b_freeze.add_argument("--output", required=True)
     task8b_freeze.add_argument("--repository-root")
     task8b_freeze.add_argument("--frozen-at-utc")
+    task8b_freeze.add_argument(
+        "--analysis-contract",
+        required=True,
+        help="显式选择并 SHA 绑定 six-seed analysis contract；禁止隐式 legacy n=12",
+    )
     task8b_analysis_input = sub.add_parser(
         "task8b-build-analysis-input", help="从冻结 manifests 与本地回收 attempts 构建 Phase F 输入"
     )
@@ -260,6 +265,11 @@ def build_parser() -> argparse.ArgumentParser:
     task8b_analysis_input.add_argument("--snapshot-root", required=True)
     task8b_analysis_input.add_argument("--pre-unlock-manifest", required=True)
     task8b_analysis_input.add_argument("--output", required=True)
+    task8b_analysis_input.add_argument(
+        "--analysis-contract",
+        required=True,
+        help="显式选择并 SHA 绑定 six-seed analysis contract；禁止隐式 legacy n=12",
+    )
     report = sub.add_parser("report", help="从 run 目录重建报告")
     report.add_argument("--input", required=True, help="outputs/<run_id> 目录")
     report.add_argument("--big-blind", type=int, default=2, help="重算 BB/100 使用的大盲")
@@ -495,6 +505,7 @@ def _task8b_freeze_phase_f(args: argparse.Namespace) -> int:
         args.output,
         repository_root=args.repository_root,
         frozen_at_utc=args.frozen_at_utc,
+        analysis_contract_path=args.analysis_contract,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -506,6 +517,7 @@ def _task8b_build_analysis_input(args: argparse.Namespace) -> int:
         args.snapshot_root,
         args.output,
         args.pre_unlock_manifest,
+        analysis_contract_path=args.analysis_contract,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
