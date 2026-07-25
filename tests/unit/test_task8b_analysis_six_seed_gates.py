@@ -749,3 +749,91 @@ def test_phase_f_cli_forwards_explicit_six_seed_contract(
     )
 
     assert captured == [contract, contract]
+
+
+def _p07_sync_recovered_identity_fixture() -> tuple[
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+]:
+    expected = {
+        "code_sha": "a" * 40,
+        "embedding_fingerprint": "b" * 64,
+        "model_fingerprint": "c" * 64,
+        "prompt_sha256": "d" * 64,
+        "resolved_config_sha256": "e" * 64,
+        "schedule_sha256": "f" * 64,
+    }
+    actual = {**expected, "code_dirty": False}
+    audit = {
+        "schema_version": "task8-task-identity-audit-v1",
+        "protocol_status": "frozen/expedited-formal-candidate",
+        "status": "verified-recovered",
+        "task_id": "isolation_sync",
+        "expected": expected,
+        "actual": actual,
+        "effect_fields_read": False,
+        "health": task8b_analysis.SECONDARY_NORMALIZATION_HEALTH,
+        "identity_correction": {
+            "corrected_actual_sha256": expected["resolved_config_sha256"],
+            "key_level_diff": [
+                {
+                    "legacy_key": str(checkpoint),
+                    "legacy_key_type": "string",
+                    "original_key": str(checkpoint),
+                    "original_key_type": "integer",
+                    "path": "$.experiment.checkpoint_test_hands_by_checkpoint",
+                }
+                for checkpoint in (30, 75, 150, 300)
+            ],
+            "legacy_json_roundtrip_actual_sha256": "0" * 64,
+            "only_authorized_difference": "integer-versus-string mapping keys",
+            "original_expected_sha256": expected["resolved_config_sha256"],
+            "reason": task8b_analysis.RECOVERY_REASON,
+            "semantic_equivalence_after_stringifying_mapping_keys": True,
+        },
+    }
+    worker = {"worker_id": "P07", "seed": 2026090107}
+    return audit, worker, expected
+
+
+def test_strict_p07_sync_recovered_identity_audit_is_accepted() -> None:
+    audit, worker, expected = _p07_sync_recovered_identity_fixture()
+
+    assert task8b_analysis._strict_recovered_identity_audit_valid(
+        audit,
+        worker=worker,
+        task_id="isolation_sync",
+        expected=expected,
+        actual=audit["actual"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "value"),
+    [
+        ("worker_id", "P08"),
+        ("seed", 2026090108),
+        ("effect_fields_read", True),
+        ("reason", "broader-recovery"),
+    ],
+)
+def test_strict_p07_sync_recovered_identity_audit_rejects_tampering(
+    target: str,
+    value: object,
+) -> None:
+    audit, worker, expected = _p07_sync_recovered_identity_fixture()
+    if target in worker:
+        worker[target] = value
+    elif target == "reason":
+        audit["identity_correction"]["reason"] = value
+    else:
+        audit[target] = value
+
+    assert not task8b_analysis._strict_recovered_identity_audit_valid(
+        audit,
+        worker=worker,
+        task_id="isolation_sync",
+        expected=expected,
+        actual=audit["actual"],
+    )

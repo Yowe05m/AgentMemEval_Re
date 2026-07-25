@@ -85,6 +85,11 @@ RECOVERY_ATTESTATION_SCHEMA = "task8b-task1-adoption-attestation-v1"
 RECOVERY_CANONICAL_AUDIT_SCHEMA = "task8b-canonicalization-equivalence-audit-v1"
 RECOVERY_REASON = "resolved-config-integer-key-canonicalization"
 FROZEN_SCIENTIFIC_CODE_SHA = "a1d1eb97efb41d52585057ab7c9594dcd19227ae"
+RECOVERED_IDENTITY_AUDIT_SELECTION = {
+    "worker_id": "P07",
+    "seed": 2026090107,
+    "task_id": "isolation_sync",
+}
 RECOVERY_EVIDENCE_FIELDS = (
     "protocol_amendment_sha256",
     "verifier_code_sha",
@@ -2564,8 +2569,24 @@ def _assess_formal_worker(
         audit = _read_json(task_root / "task_identity_audit.json")
         actual = audit.get("actual")
         task_expected = task.get("expected_identity")
+        recovered_identity_valid = _strict_recovered_identity_audit_valid(
+            audit,
+            worker=worker,
+            task_id=task_id,
+            expected=task_expected,
+            actual=actual,
+        ) and _strict_recovered_identity_evidence_valid(
+            root=root,
+            task_root=task_root,
+            worker=worker,
+            task_id=task_id,
+            audit=audit,
+        )
         identity_structure_invalid = (
-            audit.get("status") != "verified"
+            (
+                audit.get("status") != "verified"
+                and not recovered_identity_valid
+            )
             or not isinstance(actual, dict)
             or not isinstance(task_expected, dict)
         )
@@ -2606,6 +2627,217 @@ def _assess_formal_worker(
             reasons.append("ARTIFACT_HASH_INVALID")
     reasons.extend(_formal_worker_crn_reasons(manifest, task_rows))
     return sorted(set(reasons)), observed
+
+
+def _strict_recovered_identity_audit_valid(
+    audit: dict[str, Any],
+    *,
+    worker: dict[str, Any],
+    task_id: str,
+    expected: Any,
+    actual: Any,
+) -> bool:
+    """Accept the one frozen P07 Sync recovery audit without widening identity."""
+
+    if (
+        worker.get("worker_id") != RECOVERED_IDENTITY_AUDIT_SELECTION["worker_id"]
+        or worker.get("seed") != RECOVERED_IDENTITY_AUDIT_SELECTION["seed"]
+        or task_id != RECOVERED_IDENTITY_AUDIT_SELECTION["task_id"]
+        or audit.get("schema_version") != "task8-task-identity-audit-v1"
+        or audit.get("protocol_status") != "frozen/expedited-formal-candidate"
+        or audit.get("status") != "verified-recovered"
+        or audit.get("task_id") != task_id
+        or audit.get("effect_fields_read") is not False
+        or set(audit)
+        != {
+            "actual",
+            "effect_fields_read",
+            "expected",
+            "health",
+            "identity_correction",
+            "protocol_status",
+            "schema_version",
+            "status",
+            "task_id",
+        }
+        or not isinstance(expected, dict)
+        or not isinstance(actual, dict)
+        or audit.get("expected") != expected
+        or audit.get("actual") != actual
+        or actual != {**expected, "code_dirty": False}
+        or audit.get("health") != SECONDARY_NORMALIZATION_HEALTH
+    ):
+        return False
+    expected_config_sha = str(expected.get("resolved_config_sha256", ""))
+    correction = audit.get("identity_correction")
+    if (
+        not isinstance(correction, dict)
+        or set(correction)
+        != {
+            "corrected_actual_sha256",
+            "key_level_diff",
+            "legacy_json_roundtrip_actual_sha256",
+            "only_authorized_difference",
+            "original_expected_sha256",
+            "reason",
+            "semantic_equivalence_after_stringifying_mapping_keys",
+        }
+        or correction.get("reason") != RECOVERY_REASON
+        or correction.get("only_authorized_difference")
+        != "integer-versus-string mapping keys"
+        or correction.get("semantic_equivalence_after_stringifying_mapping_keys")
+        is not True
+        or correction.get("original_expected_sha256") != expected_config_sha
+        or correction.get("corrected_actual_sha256") != expected_config_sha
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(correction.get("legacy_json_roundtrip_actual_sha256", "")),
+        )
+        is None
+        or correction.get("legacy_json_roundtrip_actual_sha256")
+        == expected_config_sha
+    ):
+        return False
+    expected_key_diffs = [
+        {
+            "legacy_key": str(checkpoint),
+            "legacy_key_type": "string",
+            "original_key": str(checkpoint),
+            "original_key_type": "integer",
+            "path": "$.experiment.checkpoint_test_hands_by_checkpoint",
+        }
+        for checkpoint in (30, 75, 150, 300)
+    ]
+    return correction.get("key_level_diff") == expected_key_diffs
+
+
+def _strict_recovered_identity_evidence_valid(
+    *,
+    root: Path,
+    task_root: Path,
+    worker: dict[str, Any],
+    task_id: str,
+    audit: dict[str, Any],
+) -> bool:
+    receipt_path = root / "task_receipts" / f"{task_id}.json"
+    if not receipt_path.is_file() or receipt_path.is_symlink():
+        return False
+    receipt = _read_json(receipt_path)
+    task_row = receipt.get("task_row")
+    audit_path = task_root / "task_identity_audit.json"
+    audit_relative = audit_path.relative_to(task_root).as_posix()
+    audit_rows = [
+        row
+        for row in receipt.get("files", [])
+        if isinstance(row, dict) and row.get("relative_path") == audit_relative
+    ]
+    if (
+        receipt.get("schema_version") != RECOVERY_TASK_RECEIPT_SCHEMA
+        or receipt.get("task_id") != task_id
+        or receipt.get("run_dir") != task_root.relative_to(root).as_posix()
+        or not isinstance(task_row, dict)
+        or task_row.get("task_id") != task_id
+        or task_row.get("run_dir") != receipt.get("run_dir")
+        or task_row.get("status") != "complete"
+        or not str(task_row.get("recovery_id", "")).strip()
+        or task_row.get("identity_audit") != audit.get("actual")
+        or len(audit_rows) != 1
+        or audit_rows[0].get("size") != audit_path.stat().st_size
+        or audit_rows[0].get("sha256") != _sha256(audit_path)
+    ):
+        return False
+
+    lineage = worker.get("shard_lineage")
+    if not isinstance(lineage, dict):
+        return False
+    relative = Path(str(lineage.get("composition_receipt_path", "")))
+    expected_sha = str(lineage.get("composition_receipt_sha256", ""))
+    if (
+        not str(relative)
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None
+    ):
+        return False
+    candidates = []
+    for ancestor in root.parents:
+        candidate = _resolve_secondary_normalization_path(ancestor, relative)
+        if candidate.is_file() and _sha256(candidate) == expected_sha:
+            candidates.append(candidate)
+    if len(candidates) != 1:
+        return False
+    composition_path = candidates[0]
+    composition = _read_json(composition_path)
+    sides = composition.get("sides")
+    if (
+        composition.get("schema_version")
+        != "task8b-six-seed-composition-receipt-v1"
+        or composition.get("worker_id") != worker.get("worker_id")
+        or composition.get("seed") != worker.get("seed")
+        or not isinstance(sides, list)
+    ):
+        return False
+    side_rows = [
+        side
+        for side in sides
+        if isinstance(side, dict) and task_id in side.get("task_ids", [])
+    ]
+    if len(side_rows) != 1:
+        return False
+    local_receipt_sha = _sha256(receipt_path)
+    binding_count = 0
+    for row in side_rows[0].get("execution_receipts", []):
+        if not isinstance(row, dict):
+            return False
+        execution_relative = Path(str(row.get("path", "")))
+        if (
+            not str(execution_relative)
+            or execution_relative.is_absolute()
+            or ".." in execution_relative.parts
+        ):
+            return False
+        execution_path = _resolve_secondary_normalization_path(
+            composition_path.parent,
+            execution_relative,
+        )
+        if (
+            not execution_path.is_file()
+            or _sha256(execution_path) != row.get("sha256")
+            or execution_path.suffix.lower() != ".json"
+        ):
+            continue
+        value = _read_json(execution_path)
+        if value.get("schema_version") != "task8b-paired-shard-receipt-v1":
+            continue
+        selected = value.get("selected_task_ids")
+        if not isinstance(selected, list) or task_id not in selected:
+            continue
+        sealed_tasks = [
+            task
+            for task in value.get("tasks", [])
+            if isinstance(task, dict) and task.get("task_id") == task_id
+        ]
+        if (
+            value.get("status") != "complete"
+            or value.get("worker_id") != worker.get("worker_id")
+            or value.get("seed") != worker.get("seed")
+            or value.get("pair_id") != composition.get("pair_id")
+            or value.get("physical_slot") != "H07"
+            or value.get("shard_role") != "high"
+            or value.get("source_kind") != "execution"
+            or value.get("effect_fields_read") is not False
+            or selected != [task_id]
+            or len(sealed_tasks) != 1
+            or sealed_tasks[0].get("status") != "complete"
+            or sealed_tasks[0].get("planned_hands") != 1350
+            or sealed_tasks[0].get("actual_hands") != 1350
+            or sealed_tasks[0].get("run_dir") != receipt.get("run_dir")
+            or sealed_tasks[0].get("files") != receipt.get("files")
+            or sealed_tasks[0].get("task_receipt_sha256") != local_receipt_sha
+        ):
+            return False
+        binding_count += 1
+    return binding_count >= 1
 
 
 def _formal_execution_health_reasons(execution: dict[str, Any]) -> list[str]:
