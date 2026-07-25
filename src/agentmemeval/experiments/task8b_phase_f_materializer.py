@@ -1361,6 +1361,30 @@ def _build_copy_requests(
             catalog.manifest_ref,
             PurePosixPath(f"provenance/archive_manifests/{source_id}{suffix}"),
         )
+        receipt_suffix = (
+            catalog.receipt_ref.path.suffix
+            if catalog.receipt_ref.path is not None
+            else PurePosixPath(catalog.receipt_ref.member or "").suffix
+        )
+        _add_copy(
+            requests,
+            targets,
+            catalog.receipt_ref,
+            PurePosixPath(
+                f"provenance/archive_receipts/{source_id}{receipt_suffix or '.json'}"
+            ),
+        )
+        seal_suffix = (
+            catalog.seal_ref.path.suffix
+            if catalog.seal_ref.path is not None
+            else PurePosixPath(catalog.seal_ref.member or "").suffix
+        )
+        _add_copy(
+            requests,
+            targets,
+            catalog.seal_ref,
+            PurePosixPath(f"provenance/archive_seals/{source_id}{seal_suffix or '.json'}"),
+        )
     for worker in workers:
         attempt = PurePosixPath(f"snapshots/{worker.worker_id}/{worker.seed}/attempt_01")
         _add_copy(

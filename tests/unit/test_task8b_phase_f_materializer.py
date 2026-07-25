@@ -1007,6 +1007,129 @@ def test_materializer_cli_builds_blind_complete_append_only_tree(
         materialize_task8b_phase_f(source_map, output)
 
 
+def test_materializer_copies_provenance_for_recovery_only_archive(
+    tmp_path: Path,
+) -> None:
+    source_map_path, source_map = _make_source_map(tmp_path)
+    root = source_map_path.parent
+    workers = source_map["workers"]
+    assert isinstance(workers, list)
+    p07 = next(
+        worker
+        for worker in workers
+        if isinstance(worker, dict) and worker.get("worker_id") == "P07"
+    )
+    recovery = p07["recovery_adoptions"]
+    assert isinstance(recovery, dict)
+    canonical_ref = recovery["canonicalization_audit"]
+    assert isinstance(canonical_ref, dict)
+    canonical_path = root / str(canonical_ref["path"])
+    canonical_payload = canonical_path.read_bytes()
+    member = "recovery/P07/canonicalization_audit.json"
+
+    recovery_archive = root / "recovery_H07.tar.gz"
+    with tarfile.open(recovery_archive, mode="w:gz") as handle:
+        info = tarfile.TarInfo(member)
+        info.size = len(canonical_payload)
+        info.mtime = 0
+        handle.addfile(info, io.BytesIO(canonical_payload))
+    recovery_manifest = root / "recovery_H07_server_manifest.tsv"
+    recovery_manifest.write_text(
+        "sha256\tsize\trelative_path\n"
+        f"{hashlib.sha256(canonical_payload).hexdigest()}"
+        f"\t{len(canonical_payload)}\t{member}\n",
+        encoding="utf-8",
+        newline="",
+    )
+    recovery_receipt = root / "recovery_H07_export_receipt.json"
+    _write_json(
+        recovery_receipt,
+        {
+            "schema_version": "task8b-recovery-support-export-receipt-v1",
+            "status": "source_manifest_complete",
+            "archive_sha256": _sha256(recovery_archive),
+            "server_manifest_sha256": _sha256(recovery_manifest),
+            "effect_fields_read": False,
+        },
+    )
+    recovery_seal = root / "recovery_H07_export_seal.json"
+    _write_json(
+        recovery_seal,
+        {
+            "schema_version": "task8b-recovery-support-export-seal-v1",
+            "status": "sealed",
+            "archive_sha256": _sha256(recovery_archive),
+            "server_manifest_sha256": _sha256(recovery_manifest),
+            "export_receipt_sha256": _sha256(recovery_receipt),
+            "effect_fields_read": False,
+        },
+    )
+
+    archives = source_map["archives"]
+    assert isinstance(archives, dict)
+    archives["recovery_H07"] = {
+        "path": recovery_archive.relative_to(root).as_posix(),
+        "size": recovery_archive.stat().st_size,
+        "sha256": _sha256(recovery_archive),
+        "manifest": {
+            **_local_ref(recovery_manifest, root),
+            "format": "sha256-size-path-tsv-v1",
+            "has_header": True,
+        },
+        "receipt": _local_ref(
+            recovery_receipt,
+            root,
+            json_assertions={
+                "status": "source_manifest_complete",
+                "effect_fields_read": False,
+            },
+        ),
+        "seal": _local_ref(
+            recovery_seal,
+            root,
+            json_assertions={"status": "sealed", "effect_fields_read": False},
+        ),
+    }
+    recovery["canonicalization_audit"] = {
+        "archive_id": "recovery_H07",
+        "member": member,
+        "size": len(canonical_payload),
+        "sha256": hashlib.sha256(canonical_payload).hexdigest(),
+    }
+    recovery_map = root / "source_map_recovery_archive.json"
+    _write_json(recovery_map, source_map)
+    output = tmp_path / "recovery-archive-output"
+
+    materialize_task8b_phase_f(recovery_map, output)
+
+    copied = {
+        output
+        / "provenance"
+        / "archive_manifests"
+        / "recovery_H07.tsv": recovery_manifest,
+        output
+        / "provenance"
+        / "archive_receipts"
+        / "recovery_H07.json": recovery_receipt,
+        output
+        / "provenance"
+        / "archive_seals"
+        / "recovery_H07.json": recovery_seal,
+    }
+    for destination, source in copied.items():
+        assert destination.read_bytes() == source.read_bytes()
+        assert _sha256(destination) == _sha256(source)
+    assert (
+        output
+        / "snapshots"
+        / "P07"
+        / "2026090107"
+        / "attempt_01"
+        / "recovery_adoptions"
+        / "isolation_no_memory.canonicalization_audit.json"
+    ).read_bytes() == canonical_payload
+
+
 def test_materializer_rejects_archive_sha_before_destination(tmp_path: Path) -> None:
     source_map_path, source_map = _make_source_map(tmp_path)
     source_map["archives"]["formal"]["sha256"] = "0" * 64  # type: ignore[index]
