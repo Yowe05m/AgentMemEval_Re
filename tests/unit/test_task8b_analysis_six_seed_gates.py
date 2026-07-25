@@ -354,6 +354,7 @@ def _normalization_fixture(
         "worker_id": "S08",
         "pod_id": "pod08",
         "seed": 2026090108,
+        "expected_worker_manifest_sha256": _sha256(manifest_path),
         "shard_lineage": {
             "pair_id": "pair_08",
             "composition_receipt_path": "composition/S08.json",
@@ -429,6 +430,114 @@ def test_secondary_normalization_accepts_only_real_sha_bound_recovery_chain(
         expected=expected,
         actual=actual,
     )
+
+
+def test_secondary_normalization_accepts_exact_post_frozen_physical_manifest_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        root,
+        task_root,
+        worker,
+        manifest,
+        expected,
+        actual,
+        evidence,
+    ) = _normalization_fixture(tmp_path)
+    physical_manifest_sha = "1" * 64
+    monkeypatch.setitem(
+        task8b_analysis.SECONDARY_POST_FROZEN_CONTINUATION_SELECTION,
+        "worker_id",
+        "S08",
+    )
+    monkeypatch.setitem(
+        task8b_analysis.SECONDARY_POST_FROZEN_CONTINUATION_SELECTION,
+        "seed",
+        2026090108,
+    )
+    monkeypatch.setitem(
+        task8b_analysis.SECONDARY_POST_FROZEN_CONTINUATION_SELECTION,
+        "logical_manifest_sha256",
+        _sha256(root / "worker_manifest.json"),
+    )
+    monkeypatch.setitem(
+        task8b_analysis.SECONDARY_POST_FROZEN_CONTINUATION_SELECTION,
+        "physical_manifest_sha256",
+        physical_manifest_sha,
+    )
+    certificate = json.loads(evidence["certificate"].read_text(encoding="utf-8"))
+    certificate["recovery_continuation_after_frozen_complete"] = True
+    certificate["derived_manifest_sha256"] = physical_manifest_sha
+    _write_json(evidence["certificate"], certificate)
+    shard_seal = json.loads(evidence["seal"].read_text(encoding="utf-8"))
+    shard_seal["derived_manifest_sha256"] = physical_manifest_sha
+    _write_json(evidence["seal"], shard_seal)
+    _refresh_composition_hashes(evidence["composition"], worker)
+    task_audit = json.loads(
+        (task_root / "task_identity_audit.json").read_text(encoding="utf-8")
+    )
+
+    def validate(candidate_manifest: dict[str, object] = manifest) -> None:
+        task8b_analysis._validate_secondary_standalone_identity_normalization(
+            root=root,
+            worker=worker,
+            manifest=candidate_manifest,
+            task_root=task_root,
+            task_audit=task_audit,
+            expected=expected,
+            actual=actual,
+        )
+
+    validate()
+
+    certificate["recovery_continuation_after_frozen_complete"] = False
+    _write_json(evidence["certificate"], certificate)
+    _refresh_composition_hashes(evidence["composition"], worker)
+    with pytest.raises(ConfigError, match="recovery certificate"):
+        validate()
+    certificate["recovery_continuation_after_frozen_complete"] = True
+    _write_json(evidence["certificate"], certificate)
+
+    certificate["derived_manifest_sha256"] = "2" * 64
+    shard_seal["derived_manifest_sha256"] = "2" * 64
+    _write_json(evidence["certificate"], certificate)
+    _write_json(evidence["seal"], shard_seal)
+    _refresh_composition_hashes(evidence["composition"], worker)
+    with pytest.raises(ConfigError, match="recovery certificate"):
+        validate()
+    certificate["derived_manifest_sha256"] = physical_manifest_sha
+    shard_seal["derived_manifest_sha256"] = physical_manifest_sha
+    _write_json(evidence["certificate"], certificate)
+    _write_json(evidence["seal"], shard_seal)
+    _refresh_composition_hashes(evidence["composition"], worker)
+
+    manifest_path = root / "worker_manifest.json"
+    altered_manifest = {**manifest, "unexpected": "tamper"}
+    _write_json(manifest_path, altered_manifest)
+    worker["expected_worker_manifest_sha256"] = _sha256(manifest_path)
+    with pytest.raises(ConfigError, match="logical composed manifest"):
+        validate(altered_manifest)
+    _write_json(manifest_path, manifest)
+    worker["expected_worker_manifest_sha256"] = _sha256(manifest_path)
+
+    monkeypatch.setitem(
+        task8b_analysis.SECONDARY_POST_FROZEN_CONTINUATION_SELECTION,
+        "worker_id",
+        "S07",
+    )
+    with pytest.raises(ConfigError, match="recovery certificate"):
+        validate()
+    monkeypatch.setitem(
+        task8b_analysis.SECONDARY_POST_FROZEN_CONTINUATION_SELECTION,
+        "worker_id",
+        "S08",
+    )
+    shard_seal["derived_manifest_sha256"] = "2" * 64
+    _write_json(evidence["seal"], shard_seal)
+    _refresh_composition_hashes(evidence["composition"], worker)
+    with pytest.raises(ConfigError, match="shard seal binding"):
+        validate()
 
 
 def test_secondary_normalization_rejects_non_config_identity_mismatch(
@@ -520,7 +629,7 @@ def test_secondary_normalization_rejects_derived_manifest_splice(
         (task_root / "task_identity_audit.json").read_text(encoding="utf-8")
     )
 
-    with pytest.raises(ConfigError, match="certificate"):
+    with pytest.raises(ConfigError, match="identity normalization scope"):
         task8b_analysis._validate_secondary_standalone_identity_normalization(
             root=root,
             worker=worker,

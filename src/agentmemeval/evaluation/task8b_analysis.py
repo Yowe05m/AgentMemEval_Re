@@ -76,6 +76,17 @@ SECONDARY_NORMALIZATION_CHECKPOINT_CORRECTION = {
     "old_resolved_config_sha256": None,
     "only_authorized_field": "resolved_config_sha256",
 }
+SECONDARY_POST_FROZEN_CONTINUATION_SELECTION = {
+    "worker_id": "S07",
+    "seed": 2026090107,
+    "task_id": SECONDARY_NORMALIZATION_TASK_ID,
+    "logical_manifest_sha256": (
+        "f7210ee6f916dd7ea736c6ed1fa8ea444b1fc177188587e955fc2511085df0dc"
+    ),
+    "physical_manifest_sha256": (
+        "0edc4da793c509e38d9e31cb9346ed698b5285908cf6c93d01a745bc76456ff1"
+    ),
+}
 RECOVERY_DISPOSITION = "VERIFIER_FALSE_POSITIVE_SAME_ATTEMPT_RECOVERY"
 RECOVERY_PROTOCOL_AMENDMENT_ID = "TASK8B-VFPR-20260722"
 RECOVERY_TASK_ID = "isolation_no_memory"
@@ -270,7 +281,6 @@ PHASE_F_PROTECTED_ANALYSIS_FUNCTIONS = (
     "_formal_execution_health_reasons",
     "_validate_selected_seed_pods",
     "_validate_formal_task_topology",
-    "_validate_task_data_completeness",
     "_primary_effect_rows",
     "_validate_formal_primary_effects",
     "_e6_rows",
@@ -322,7 +332,7 @@ PHASE_F_AUDITED_RECOVERY_OVERLAY_AST_SHA256 = {
         "8721336f265d8ba3d71699fbafff49bed636bd17f7ebbcfb5a21a35cb5e50a95"
     ),
     "_assess_formal_worker": (
-        "b781c9a18b759dd2ada4cf5f959b2fa2eef1aa73f60fc79865807047cf2ba5b0"
+        "4e5f80864414fda7aa67a84fa14d1aa206994db7173e6a804e516f10bba0bea6"
     ),
     "_resolve_secondary_normalization_path": (
         "3d75cbd592a0362c9c89a61adde559634eefda64dcfcaa3da5f1b386d2cbaa75"
@@ -337,7 +347,10 @@ PHASE_F_AUDITED_RECOVERY_OVERLAY_AST_SHA256 = {
         "22078927262286a13b0148a9d5f60a2716c5be16c97f945e858940ad6164abeb"
     ),
     "_validate_secondary_standalone_identity_normalization": (
-        "6e6986be69a4d73e9e46872e0eca96b0ec4c59a89adb7064ccbbe8492deaf046"
+        "57fd69f49bf40c1e4364f4758bed82417d881ed755f6e9656eb3e2160b616826"
+    ),
+    "_validate_task_data_completeness": (
+        "fe2ec04c243894af2db74d368eccdc5cdaef3e59b43e003c7b1da2ac11a3d756"
     ),
     "_compact_lineage_source": "7f72ec412c753708f09ff9020bfd13c0221dc26feb4be4679fd2ad579ae7d3ba",
     "_paper_lineage_rows": "a97ab3dffc34cbd98faa194680441df9c0c4bc01f7aaccbd1b405efd4cd0c515",
@@ -2258,12 +2271,15 @@ def _validate_secondary_standalone_identity_normalization(
         root,
         Path("worker_manifest.json"),
     )
+    if not manifest_path.is_file():
+        raise ConfigError("Secondary standalone worker manifest 缺失")
+    current_manifest_sha = _sha256(manifest_path)
     if (
-        not manifest_path.is_file()
-        or _read_json(manifest_path) != manifest
+        _read_json(manifest_path) != manifest
         or manifest.get("role") != "secondary"
         or manifest.get("worker_id") != worker.get("worker_id")
         or manifest.get("seed_bundle") != worker.get("seed")
+        or worker.get("expected_worker_manifest_sha256") != current_manifest_sha
         or task_audit.get("schema_version") != "task8-task-identity-audit-v1"
         or task_audit.get("status") != "verified"
         or task_audit.get("task_id") != SECONDARY_NORMALIZATION_TASK_ID
@@ -2322,7 +2338,26 @@ def _validate_secondary_standalone_identity_normalization(
     }
     worker_id = str(worker.get("worker_id", ""))
     seed = worker.get("seed")
-    current_manifest_sha = _sha256(manifest_path)
+    post_frozen_continuation = (
+        worker_id == SECONDARY_POST_FROZEN_CONTINUATION_SELECTION["worker_id"]
+        and seed == SECONDARY_POST_FROZEN_CONTINUATION_SELECTION["seed"]
+        and task_audit.get("task_id")
+        == SECONDARY_POST_FROZEN_CONTINUATION_SELECTION["task_id"]
+    )
+    expected_derived_manifest_sha = current_manifest_sha
+    if post_frozen_continuation:
+        if (
+            current_manifest_sha
+            != SECONDARY_POST_FROZEN_CONTINUATION_SELECTION[
+                "logical_manifest_sha256"
+            ]
+        ):
+            raise ConfigError("S07 logical composed manifest identity 非法")
+        expected_derived_manifest_sha = (
+            SECONDARY_POST_FROZEN_CONTINUATION_SELECTION[
+                "physical_manifest_sha256"
+            ]
+        )
     health = SECONDARY_NORMALIZATION_HEALTH
     checkpoint_correction = SECONDARY_NORMALIZATION_CHECKPOINT_CORRECTION
     sha_fields = (
@@ -2351,7 +2386,8 @@ def _validate_secondary_standalone_identity_normalization(
         or certificate.get("standard_resume_used_frozen_runner") is not True
         or certificate.get("standard_resume_task_ids") != []
         or certificate.get("unrecovered_selected_task_ids") != []
-        or certificate.get("recovery_continuation_after_frozen_complete") is not False
+        or certificate.get("recovery_continuation_after_frozen_complete")
+        is not post_frozen_continuation
         or certificate.get("planned_hands") != 2700
         or certificate.get("actual_hands") != 2700
         or certificate.get("health") != health
@@ -2359,7 +2395,8 @@ def _validate_secondary_standalone_identity_normalization(
             re.fullmatch(r"[0-9a-f]{64}", str(certificate.get(field, ""))) is None
             for field in sha_fields
         )
-        or certificate.get("derived_manifest_sha256") != current_manifest_sha
+        or certificate.get("derived_manifest_sha256")
+        != expected_derived_manifest_sha
         or not isinstance(certificate.get("appended_state_row_sha256"), list)
         or not certificate["appended_state_row_sha256"]
         or any(
@@ -2444,7 +2481,8 @@ def _validate_secondary_standalone_identity_normalization(
         or PurePosixPath(str(shard_seal.get("attempt_root", ""))) != attempt_root
         or shard_seal.get("derived_manifest_sha256")
         != certificate.get("derived_manifest_sha256")
-        or shard_seal.get("derived_manifest_sha256") != current_manifest_sha
+        or shard_seal.get("derived_manifest_sha256")
+        != expected_derived_manifest_sha
         or re.fullmatch(
             r"[0-9a-f]{64}",
             str(shard_seal.get("canonical_manifest_sha256", "")),
@@ -3036,19 +3074,78 @@ def _validate_task_data_completeness(task_root: Path, *, expected_schedule_sha25
         if isinstance(row, dict) and row.get("phase") == "heldout"
     )
     hands = _read_jsonl(task_root / "hand_summaries.jsonl")
-    observed = sorted(
-        (
-            int(row["checkpoint_hand"]),
-            str(row["heldout_table_id"]),
-            int(row["hand_number"]),
-        )
-        for row in hands
-        if row.get("stage") == "test"
-    )
-    if observed != expected:
-        raise ConfigError("task heldout hands 与 schedule 不闭合")
     config = _read_yaml(task_root / "resolved_config.yaml")
-    expected_train = int(config.get("experiment", {}).get("train_hands", 0))
+    experiment = config.get("experiment", {})
+    if not isinstance(experiment, dict):
+        raise ConfigError("task experiment config 非法")
+    evaluate_all_train_agents = experiment.get("evaluate_all_train_agents", False)
+    if not isinstance(evaluate_all_train_agents, bool):
+        raise ConfigError("task evaluate_all_train_agents 非布尔值")
+    test_hands = [row for row in hands if row.get("stage") == "test"]
+    if evaluate_all_train_agents:
+        roster = experiment.get("agent_roster")
+        if not isinstance(roster, list) or not roster:
+            raise ConfigError("task evaluate-all agent roster 为空")
+        agent_ids = [
+            str(row.get("agent_id", ""))
+            for row in roster
+            if isinstance(row, dict)
+        ]
+        if (
+            len(agent_ids) != len(roster)
+            or any(not agent_id for agent_id in agent_ids)
+            or len(set(agent_ids)) != len(agent_ids)
+        ):
+            raise ConfigError("task evaluate-all agent roster 非法")
+        expected_expanded = sorted(
+            (*schedule_key, agent_id)
+            for schedule_key in expected
+            for agent_id in agent_ids
+        )
+        observed_expanded = sorted(
+            (
+                int(row["checkpoint_hand"]),
+                str(row["heldout_table_id"]),
+                int(row["hand_number"]),
+                str(row.get("evaluation_target_id", "")),
+            )
+            for row in test_hands
+        )
+        if observed_expanded != expected_expanded:
+            raise ConfigError("task heldout evaluate-all targets 与 schedule 不闭合")
+        hand_ids_by_schedule: dict[tuple[int, str, int], set[str]] = {}
+        for row in test_hands:
+            schedule_key = (
+                int(row["checkpoint_hand"]),
+                str(row["heldout_table_id"]),
+                int(row["hand_number"]),
+            )
+            hand_ids_by_schedule.setdefault(schedule_key, set()).add(
+                str(row.get("hand_id", ""))
+            )
+        sole_hand_ids = [
+            next(iter(hand_ids_by_schedule.get(schedule_key, set())), "")
+            for schedule_key in expected
+            if len(hand_ids_by_schedule.get(schedule_key, set())) == 1
+        ]
+        if (
+            len(sole_hand_ids) != len(expected)
+            or any(not hand_id for hand_id in sole_hand_ids)
+            or len(set(sole_hand_ids)) != len(sole_hand_ids)
+        ):
+            raise ConfigError("task heldout evaluate-all hand identity 不闭合")
+    else:
+        observed = sorted(
+            (
+                int(row["checkpoint_hand"]),
+                str(row["heldout_table_id"]),
+                int(row["hand_number"]),
+            )
+            for row in test_hands
+        )
+        if observed != expected:
+            raise ConfigError("task heldout hands 与 schedule 不闭合")
+    expected_train = int(experiment.get("train_hands", 0))
     observed_train = sum(row.get("stage") == "train" for row in hands)
     if observed_train != expected_train:
         raise ConfigError("task source train hands 与 config 不闭合")

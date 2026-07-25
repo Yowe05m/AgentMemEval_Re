@@ -55,6 +55,147 @@ def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     )
 
 
+def _multitarget_completeness_fixture(tmp_path: Path) -> tuple[Path, str]:
+    task = tmp_path / "multitarget"
+    schedule_body = {
+        "schema_version": "task8-heldout-schedule-v1",
+        "source_namespace": "task8/source/v1",
+        "heldout_namespace": "task8/heldout/v1",
+        "rows": [
+            {
+                "phase": "heldout",
+                "checkpoint_hand": 300,
+                "table_id": "H01",
+                "hand_number": 1,
+            }
+        ],
+    }
+    schedule_sha256 = sha256_json(schedule_body)
+    _write_json(
+        task / "schedule_manifest.json",
+        {**schedule_body, "schedule_sha256": schedule_sha256},
+    )
+    (task / "resolved_config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "experiment": {
+                    "train_hands": 1,
+                    "evaluate_all_train_agents": True,
+                    "agent_roster": [
+                        {"agent_id": "fact_00", "mechanism": "fact"},
+                        {"agent_id": "expr_00", "mechanism": "expr"},
+                    ],
+                }
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+        newline="",
+    )
+    _write_jsonl(
+        task / "hand_summaries.jsonl",
+        [
+            {"stage": "train", "hand_id": "train-1", "hand_number": 1},
+            {
+                "stage": "test",
+                "hand_id": "test-H01-1",
+                "checkpoint_hand": 300,
+                "heldout_table_id": "H01",
+                "hand_number": 1,
+                "evaluation_target_id": "fact_00",
+            },
+            {
+                "stage": "test",
+                "hand_id": "test-H01-1",
+                "checkpoint_hand": 300,
+                "heldout_table_id": "H01",
+                "hand_number": 1,
+                "evaluation_target_id": "expr_00",
+            },
+        ],
+    )
+    return task, schedule_sha256
+
+
+def test_task_completeness_accepts_exact_evaluate_all_target_expansion(
+    tmp_path: Path,
+) -> None:
+    task, schedule_sha256 = _multitarget_completeness_fixture(tmp_path)
+
+    task8b_analysis._validate_task_data_completeness(
+        task,
+        expected_schedule_sha256=schedule_sha256,
+    )
+
+
+def test_task_completeness_rejects_evaluate_all_target_or_hand_splice(
+    tmp_path: Path,
+) -> None:
+    task, schedule_sha256 = _multitarget_completeness_fixture(tmp_path)
+    rows = [
+        json.loads(line)
+        for line in (task / "hand_summaries.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    rows[-1]["evaluation_target_id"] = "fact_00"
+    _write_jsonl(task / "hand_summaries.jsonl", rows)
+    with pytest.raises(ConfigError, match="evaluate-all targets"):
+        task8b_analysis._validate_task_data_completeness(
+            task,
+            expected_schedule_sha256=schedule_sha256,
+        )
+
+    second_task, _ = _multitarget_completeness_fixture(tmp_path / "second")
+    schedule = json.loads(
+        (second_task / "schedule_manifest.json").read_text(encoding="utf-8")
+    )
+    schedule.pop("schedule_sha256")
+    schedule["rows"].append(
+        {
+            "phase": "heldout",
+            "checkpoint_hand": 300,
+            "table_id": "H02",
+            "hand_number": 1,
+        }
+    )
+    second_schedule_sha256 = sha256_json(schedule)
+    _write_json(
+        second_task / "schedule_manifest.json",
+        {**schedule, "schedule_sha256": second_schedule_sha256},
+    )
+    second_rows = [
+        json.loads(line)
+        for line in (second_task / "hand_summaries.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    second_rows.extend(
+        {
+            "stage": "test",
+            "hand_id": "test-H01-1",
+            "checkpoint_hand": 300,
+            "heldout_table_id": "H02",
+            "hand_number": 1,
+            "evaluation_target_id": agent_id,
+        }
+        for agent_id in ("fact_00", "expr_00")
+    )
+    _write_jsonl(second_task / "hand_summaries.jsonl", second_rows)
+    with pytest.raises(ConfigError, match="evaluate-all hand identity"):
+        task8b_analysis._validate_task_data_completeness(
+            second_task,
+            expected_schedule_sha256=second_schedule_sha256,
+        )
+
+    rows[-1]["evaluation_target_id"] = "expr_00"
+    rows[-1]["hand_id"] = "spliced-hand"
+    _write_jsonl(task / "hand_summaries.jsonl", rows)
+    with pytest.raises(ConfigError, match="evaluate-all hand identity"):
+        task8b_analysis._validate_task_data_completeness(
+            task,
+            expected_schedule_sha256=schedule_sha256,
+        )
+
+
 def _formal_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     attempt = tmp_path / "formal-worker" / "P01" / "attempt_01"
     task_id = "isolation_fact"
