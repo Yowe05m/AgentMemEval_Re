@@ -62,6 +62,9 @@ RECOVERY_COMPLETION_CONTROLLER_SHA256S = {
     RECOVERY_COMPLETION_CONTROLLER_SHA256,
     "3fd0b92db3928c45f59a22ca0c68d4fabb9321e7dac01033a2de7d8240c9f110",
 }
+RECOVERY_CONTINUATION_TOOL_SHA256S = {
+    "3db39dfdc50d869c8cb36ed8531a444b58cf1f41ff84f32d9b52a64a4815e337",
+}
 SEALED_SOURCE_CONTROLLER_SHA256S = {
     RECOVERY_SOURCE_CONTROLLER_SHA256,
     "736f67d95812f872dda4ceff16702301ecad81669e6088484e104587591d9e29",
@@ -1354,6 +1357,7 @@ def run_authorized_shard(
 def _verified_task_rows(
     manifest: dict[str, Any],
     root: Path,
+    recovered_config_identities: dict[str, tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     worker_id, _seed, _role = _worker_seed_role(manifest)
     rows: list[dict[str, Any]] = []
@@ -1381,6 +1385,29 @@ def _verified_task_rows(
         actual_hands = _structural_hand_count(child)
         identity_audit = marker.get("task_row", {}).get("identity_audit")
         expected_identity = task.get("expected_identity")
+        recovered_config_identity = (
+            (recovered_config_identities or {}).get(task_id)
+        )
+        identity_matches = (
+            isinstance(identity_audit, dict)
+            and isinstance(expected_identity, dict)
+            and all(
+                identity_audit.get(field) == expected_identity.get(field)
+                for field in formal_runner.REQUIRED_IDENTITY_FIELDS
+                if field != "resolved_config_sha256"
+            )
+            and (
+                identity_audit.get("resolved_config_sha256")
+                == expected_identity.get("resolved_config_sha256")
+                or (
+                    recovered_config_identity is not None
+                    and expected_identity.get("resolved_config_sha256")
+                    == recovered_config_identity[0]
+                    and identity_audit.get("resolved_config_sha256")
+                    == recovered_config_identity[1]
+                )
+            )
+        )
         if (
             marker.get("schema_version") != "task8-worker-task-receipt-v1"
             or marker.get("task_id") != task_id
@@ -1388,12 +1415,7 @@ def _verified_task_rows(
             or marker.get("files") != files
             or marker.get("task_row", {}).get("task_id") != task_id
             or marker.get("task_row", {}).get("status") != "complete"
-            or not isinstance(identity_audit, dict)
-            or not isinstance(expected_identity, dict)
-            or any(
-                identity_audit.get(field) != expected_identity.get(field)
-                for field in formal_runner.REQUIRED_IDENTITY_FIELDS
-            )
+            or not identity_matches
             or actual_hands != int(task.get("planned_hands", -1))
         ):
             raise ConfigError(f"paired-shard task receipt/hash 非法：{task_id}")
@@ -2112,6 +2134,10 @@ def recover_completed_execution(
         if isinstance(task, dict)
     }
     authorization_path = Path(str(shard["authorization_path"]))
+    current_recovery_tool_sha256 = _sha256(Path(__file__).resolve())
+    baseline_recovery_tool_sha256 = str(
+        baseline.get("recovery_tool_sha256", "")
+    )
     if (
         baseline.get("schema_version") != COMPLETED_RECOVERY_BASELINE_SCHEMA
         or baseline.get("status") != "activated"
@@ -2123,8 +2149,11 @@ def recover_completed_execution(
         or baseline.get("attempt_root") != str(root)
         or baseline.get("derived_manifest_sha256") != _sha256(manifest_path)
         or baseline.get("authorization_sha256") != _sha256(authorization_path)
-        or baseline.get("recovery_tool_sha256")
-        != _sha256(Path(__file__).resolve())
+        or baseline_recovery_tool_sha256
+        not in {
+            current_recovery_tool_sha256,
+            *RECOVERY_CONTINUATION_TOOL_SHA256S,
+        }
         or baseline.get("pre_recovery_archive_path") != str(archive)
         or not archive.is_file()
         or archive.is_symlink()
@@ -2144,7 +2173,25 @@ def recover_completed_execution(
     ):
         raise ConfigError("paired recovery pre-recovery file manifest 非法")
     _verify_recovery_archive(archive, pre_files)
-    if not certificate.exists() and _directory_manifest(root) != pre_files:
+    observed_state = _state_rows(root / "state.tsv")
+    recovery_continuation = (
+        baseline_recovery_tool_sha256
+        in RECOVERY_CONTINUATION_TOOL_SHA256S
+        and bool(observed_state)
+        and observed_state[-1]["status"] == "complete"
+    )
+    if (
+        baseline_recovery_tool_sha256 != current_recovery_tool_sha256
+        and not recovery_continuation
+    ):
+        raise ConfigError(
+            "paired recovery prior-tool baseline 仅允许 complete continuation"
+        )
+    if (
+        not certificate.exists()
+        and not recovery_continuation
+        and _directory_manifest(root) != pre_files
+    ):
         raise ConfigError("paired recovery pre-recovery file manifest 不闭合")
     for row in pre_files:
         if row["relative_path"] == "state.tsv":
@@ -2160,7 +2207,6 @@ def recover_completed_execution(
             or _sha256(target) != row["sha256"]
         ):
             raise ConfigError("paired recovery baseline scientific file 已变化")
-    observed_state = _state_rows(root / "state.tsv")
     recovery_id = str(baseline["recovery_id"])
     failed_indices = [
         index
@@ -2380,17 +2426,18 @@ def recover_completed_execution(
         and f"task_receipts/{selected_id}.json"
         not in pre_recovery_relative_paths
     ]
-    _resume_recovered_execution(
-        manifest_path,
-        scientific_checkout=Path(str(shard["scientific_checkout"])),
-        receipt_root=approved_receipts,
-        legacy_audit_path=(audit_path if legacy_audit_bridge else None),
-        legacy_audit_sha256=(
-            _sha256(audit_path) if legacy_audit_bridge else None
-        ),
-        legacy_receipt_config_sha256=legacy_receipt_config_sha256,
-        corrected_receipt_config_sha256=corrected_receipt_config_sha256,
-    )
+    if not recovery_continuation:
+        _resume_recovered_execution(
+            manifest_path,
+            scientific_checkout=Path(str(shard["scientific_checkout"])),
+            receipt_root=approved_receipts,
+            legacy_audit_path=(audit_path if legacy_audit_bridge else None),
+            legacy_audit_sha256=(
+                _sha256(audit_path) if legacy_audit_bridge else None
+            ),
+            legacy_receipt_config_sha256=legacy_receipt_config_sha256,
+            corrected_receipt_config_sha256=corrected_receipt_config_sha256,
+        )
     completion_path = root / "completion_receipt.json"
     files_path = root / "files.tsv"
     close_execution = (
@@ -2403,7 +2450,16 @@ def recover_completed_execution(
     )
     if not close_execution:
         raise ConfigError("paired recovery frozen resume 未闭合 selected tasks")
-    _verified_task_rows(manifest, root)
+    _verified_task_rows(
+        manifest,
+        root,
+        {
+            task_id: (
+                str(correction["original_expected_sha256"]),
+                str(correction["corrected_actual_sha256"]),
+            )
+        },
+    )
     _verify_files_tsv(root)
     completion = _read_json(completion_path)
     if (
@@ -2460,6 +2516,9 @@ def recover_completed_execution(
         "recovered_task_scientific_files_modified": False,
         "standard_resume_task_ids": standard_resume_task_ids,
         "standard_resume_used_frozen_runner": True,
+        "recovery_continuation_after_frozen_complete": (
+            recovery_continuation
+        ),
         "shard_closed": close_execution,
         "unrecovered_selected_task_ids": [
             selected_id
@@ -2526,6 +2585,7 @@ def build_shard_receipt(
         shard.get("engineering_controller_sha256", "")
     )
     current_controller_sha256 = _sha256(Path(__file__).resolve())
+    recovered_config_identities: dict[str, tuple[str, str]] = {}
     if source_controller_sha256 in RECOVERY_SOURCE_CONTROLLER_SHA256S:
         if recovery_certificate_path is None:
             raise ConfigError(
@@ -2565,6 +2625,8 @@ def build_shard_receipt(
                 "legacy recovered execution seal evidence 缺失或为 symlink"
             )
         recovery_tool_sha256 = certificate.get("recovery_tool_sha256")
+        correction_audit_value = _read_json(correction_audit)
+        identity_correction = certificate.get("identity_correction")
         if (
             certificate.get("schema_version")
             != COMPLETED_RECOVERY_CERTIFICATE_SCHEMA
@@ -2587,6 +2649,8 @@ def build_shard_receipt(
             != _sha256(identity_audit)
             or certificate.get("identity_correction_audit_sha256")
             != _sha256(correction_audit)
+            or correction_audit_value.get("identity_correction")
+            != identity_correction
             or certificate.get("task_receipt_sha256")
             != _sha256(task_receipt)
             or certificate.get("recovered_task_scientific_files_modified")
@@ -2599,6 +2663,28 @@ def build_shard_receipt(
         ):
             raise ConfigError(
                 "legacy recovered execution seal certificate binding failed"
+            )
+        if not isinstance(identity_correction, dict):
+            raise ConfigError(
+                "legacy recovered execution seal identity correction 非法"
+            )
+        old_config_sha256 = str(
+            identity_correction.get("original_expected_sha256", "")
+        )
+        new_config_sha256 = str(
+            identity_correction.get("corrected_actual_sha256", "")
+        )
+        if (
+            not _is_sha256(old_config_sha256)
+            or not _is_sha256(new_config_sha256)
+        ):
+            raise ConfigError(
+                "legacy recovered execution seal config correction 非法"
+            )
+        if old_config_sha256 != new_config_sha256:
+            recovered_config_identities[task_id] = (
+                old_config_sha256,
+                new_config_sha256,
             )
         rebuilt = derive_authorized_manifest(
             str(shard.get("canonical_manifest_path", "")),
@@ -2643,10 +2729,19 @@ def build_shard_receipt(
     ):
         raise ConfigError("paired-shard completion/files.tsv gate failed")
     first_files_tsv = _verify_files_tsv(root)
-    rows = _verified_task_rows(manifest, root)
+    rows = _verified_task_rows(
+        manifest,
+        root,
+        recovered_config_identities,
+    )
     if (
         _verify_files_tsv(root) != first_files_tsv
-        or _verified_task_rows(manifest, root) != rows
+        or _verified_task_rows(
+            manifest,
+            root,
+            recovered_config_identities,
+        )
+        != rows
     ):
         raise ConfigError("paired-shard evidence changed during execution seal")
     receipt = _base_shard_receipt(

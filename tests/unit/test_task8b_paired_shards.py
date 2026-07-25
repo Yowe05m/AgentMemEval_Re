@@ -1967,6 +1967,37 @@ def test_secondary_standalone_recovery_accepts_only_frozen_runtime_transform(
     )
 
 
+def test_completed_recovery_continues_after_frozen_complete_outer_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_frozen_standard_resume(monkeypatch)
+    paths = _completed_recovery_fixture(tmp_path, legacy_controller=True)
+    first = _run_completed_recovery(paths)
+    assert first["status"] == "execution_complete_recovered"
+    paths["certificate"].unlink()
+    paths["ledger"].unlink()
+    baseline = json.loads(paths["baseline"].read_text(encoding="utf-8"))
+    baseline["recovery_tool_sha256"] = next(
+        iter(shards.RECOVERY_CONTINUATION_TOOL_SHA256S)
+    )
+    _write_json(paths["baseline"], baseline)
+
+    continued = _run_completed_recovery(paths)
+    assert continued["status"] == "execution_complete_recovered"
+    certificate = json.loads(
+        paths["certificate"].read_text(encoding="utf-8")
+    )
+    assert certificate["recovery_continuation_after_frozen_complete"] is True
+    receipt = shards.build_shard_receipt(
+        paths["derived"],
+        paths["root"],
+        paths["shard_receipt"],
+        paths["certificate"],
+    )
+    assert receipt["status"] == "complete"
+
+
 def test_recovery_preserves_exact_legacy_custom_identity_audit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
