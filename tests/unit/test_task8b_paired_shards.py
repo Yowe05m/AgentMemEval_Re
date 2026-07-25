@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
@@ -1889,6 +1890,81 @@ def test_completed_recovery_accepts_verified_secondary_source_controller(
     assert receipt["status"] == "complete"
     assert receipt["selected_task_ids"] == ["isolation_async"]
     assert receipt["effect_fields_read"] is False
+
+
+def test_secondary_standalone_recovery_accepts_only_frozen_runtime_transform(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "mixed_ecological.yaml"
+    source = {
+        "experiment": {
+            "scenario": "test",
+            "seed": 1,
+            "heldout_table_set": ["H01", "H02", "H03"],
+            "checkpoint_interval": 30,
+        },
+        "agent": {},
+        "provider": {},
+    }
+    config_path.write_text(
+        yaml.safe_dump(source, sort_keys=True),
+        encoding="utf-8",
+    )
+    manifest = {
+        "role": "secondary",
+        "seed_bundle": 2026090107,
+        "heldout_table_set": ["H01", "H02", "H03"],
+        "checkpoint_set": [30, 75, 150, 300],
+    }
+    task = {
+        "dependency_mode": "standalone",
+        "memory_mode": "Frozen",
+        "checkpoint_set": [300],
+        "config_path": str(config_path),
+        "config_sha256": _sha(config_path),
+    }
+    expected_semantic = (
+        formal_runner.canonicalize_resolved_config_identity(source)
+    )
+    expected_semantic["experiment"]["seed"] = 2026090107
+    expected_sha256 = formal_runner.sha256_json(expected_semantic)
+    actual = copy.deepcopy(source)
+    experiment = actual["experiment"]
+    experiment["seed"] = 2026090107
+    experiment.pop("checkpoint_interval")
+    experiment["checkpoint_set"] = [300]
+    experiment["memory_mode"] = "Frozen"
+    experiment["update_memory_test"] = False
+    actual_sha256 = formal_runner.sha256_json(
+        formal_runner.canonicalize_resolved_config_identity(actual)
+    )
+
+    correction = shards._secondary_standalone_identity_correction(
+        manifest,
+        task,
+        actual,
+        expected_sha256=expected_sha256,
+        actual_sha256=actual_sha256,
+    )
+    assert correction is not None
+    assert (
+        correction["reason"]
+        == shards.COMPLETED_RECOVERY_SECONDARY_STANDALONE_REASON
+    )
+    tampered = copy.deepcopy(actual)
+    tampered["experiment"]["memory_mode"] = "Online"
+    assert (
+        shards._secondary_standalone_identity_correction(
+            manifest,
+            task,
+            tampered,
+            expected_sha256=expected_sha256,
+            actual_sha256=formal_runner.sha256_json(
+                formal_runner.canonicalize_resolved_config_identity(tampered)
+            ),
+        )
+        is None
+    )
 
 
 def test_recovery_preserves_exact_legacy_custom_identity_audit(

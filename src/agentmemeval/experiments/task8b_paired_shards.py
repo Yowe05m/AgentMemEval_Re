@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from agentmemeval.config.loader import ConfigError
+from agentmemeval.config.loader import ConfigError, load_config
 from agentmemeval.experiments import formal_runner
 from agentmemeval.experiments.formal_protocol import (
     sha256_json,
@@ -41,6 +41,13 @@ COMPLETED_RECOVERY_CERTIFICATE_SCHEMA = (
 )
 COMPLETED_RECOVERY_LEDGER_SCHEMA = "task8b-paired-recovery-ledger-entry-v1"
 COMPLETED_RECOVERY_REASON = "resolved-config-integer-key-canonicalization"
+COMPLETED_RECOVERY_SECONDARY_STANDALONE_REASON = (
+    "secondary-standalone-runtime-identity-normalization"
+)
+COMPLETED_RECOVERY_REASONS = {
+    COMPLETED_RECOVERY_REASON,
+    COMPLETED_RECOVERY_SECONDARY_STANDALONE_REASON,
+}
 RECOVERY_SOURCE_CONTROLLER_SHA256 = (
     "ac1a57480ab8b6366c9f00356cc3a1ec7a512b5716c5c282d51e42ddebed7f8c"
 )
@@ -566,7 +573,21 @@ def read_json_with_recovered_task_receipt_bridge(path):
     return result
 
 def verify_completed_task_identity_with_recovered_config(**kwargs):
-    identity = original_verify_completed_task_identity(**kwargs)
+    bridged_kwargs = kwargs
+    if legacy_receipt_config_sha256 is not None:
+        raw_task = kwargs.get("raw_task")
+        if isinstance(raw_task, dict):
+            expected = raw_task.get("expected_identity")
+            if (
+                isinstance(expected, dict)
+                and expected.get("resolved_config_sha256")
+                == legacy_receipt_config_sha256
+            ):
+                bridged_kwargs = copy.deepcopy(kwargs)
+                bridged_kwargs["raw_task"]["expected_identity"][
+                    "resolved_config_sha256"
+                ] = corrected_receipt_config_sha256
+    identity = original_verify_completed_task_identity(**bridged_kwargs)
     return recovered_identity(identity)
 
 formal_runner._read_json_object = read_json_with_recovered_task_receipt_bridge
@@ -1675,6 +1696,80 @@ def _files_tsv_bytes(root: Path) -> bytes:
     return content.encode("utf-8")
 
 
+def _secondary_standalone_identity_correction(
+    manifest: dict[str, Any],
+    task: dict[str, Any],
+    actual_config: dict[str, Any],
+    *,
+    expected_sha256: str,
+    actual_sha256: str,
+) -> dict[str, Any] | None:
+    if (
+        manifest.get("role") != "secondary"
+        or task.get("dependency_mode") != "standalone"
+    ):
+        return None
+    config_path = Path(str(task.get("config_path", "")))
+    if not config_path.is_absolute():
+        config_path = (Path.cwd() / config_path).resolve()
+    if (
+        not config_path.is_file()
+        or config_path.is_symlink()
+        or _sha256(config_path) != task.get("config_sha256")
+    ):
+        raise ConfigError(
+            "paired recovery secondary standalone source config binding failed"
+        )
+    source = load_config(config_path)
+    source_semantic = formal_runner.canonicalize_resolved_config_identity(
+        source
+    )
+    source_semantic["experiment"]["seed"] = int(manifest["seed_bundle"])
+    if sha256_json(source_semantic) != expected_sha256:
+        raise ConfigError(
+            "paired recovery secondary standalone expected config mismatch"
+        )
+    transformed = copy.deepcopy(source)
+    experiment = transformed["experiment"]
+    experiment["seed"] = int(manifest["seed_bundle"])
+    experiment["heldout_table_set"] = list(manifest["heldout_table_set"])
+    experiment.pop("checkpoint_interval", None)
+    experiment["checkpoint_set"] = list(
+        task.get("checkpoint_set", manifest["checkpoint_set"])
+    )
+    mode = str(task.get("memory_mode", "Frozen"))
+    experiment["memory_mode"] = mode
+    experiment["update_memory_test"] = mode == "Online"
+    transformed_semantic = (
+        formal_runner.canonicalize_resolved_config_identity(transformed)
+    )
+    actual_semantic = formal_runner.canonicalize_resolved_config_identity(
+        actual_config
+    )
+    if (
+        sha256_json(transformed_semantic) != actual_sha256
+        or sha256_json(actual_semantic) != actual_sha256
+        or actual_sha256 == expected_sha256
+    ):
+        return None
+    return {
+        "reason": COMPLETED_RECOVERY_SECONDARY_STANDALONE_REASON,
+        "original_expected_sha256": expected_sha256,
+        "corrected_actual_sha256": actual_sha256,
+        "runtime_transform": {
+            "checkpoint_interval_removed": True,
+            "checkpoint_set": list(
+                task.get("checkpoint_set", manifest["checkpoint_set"])
+            ),
+            "memory_mode": mode,
+            "update_memory_test": mode == "Online",
+        },
+        "only_authorized_difference": (
+            "frozen secondary standalone runtime normalization"
+        ),
+    }
+
+
 def _recovery_identity_and_health(
     manifest: dict[str, Any],
     task: dict[str, Any],
@@ -1727,7 +1822,7 @@ def _recovery_identity_and_health(
             raise ConfigError(
                 f"paired recovery task/common identity mismatch：{field}"
             )
-    for field in expected_fields:
+    for field in expected_fields - {"resolved_config_sha256"}:
         if actual.get(field) != expected.get(field):
             raise ConfigError(f"paired recovery identity mismatch：{field}")
     if actual["code_dirty"] is not False:
@@ -1735,11 +1830,31 @@ def _recovery_identity_and_health(
     legacy_hash = sha256_json(legacy_config)
     corrected_hash = actual["resolved_config_sha256"]
     if (
-        legacy_hash == corrected_hash
-        or corrected_hash != expected["resolved_config_sha256"]
-        or not key_level_diff
+        legacy_hash != corrected_hash
+        and corrected_hash == expected["resolved_config_sha256"]
+        and key_level_diff
     ):
-        raise ConfigError("paired recovery 非唯一 mapping-key canonicalization 差异")
+        correction = {
+            "reason": COMPLETED_RECOVERY_REASON,
+            "legacy_json_roundtrip_actual_sha256": legacy_hash,
+            "original_expected_sha256": expected["resolved_config_sha256"],
+            "corrected_actual_sha256": corrected_hash,
+            "semantic_equivalence_after_stringifying_mapping_keys": True,
+            "only_authorized_difference": "integer-versus-string mapping keys",
+            "key_level_diff": key_level_diff,
+        }
+    else:
+        correction = _secondary_standalone_identity_correction(
+            manifest,
+            task,
+            config,
+            expected_sha256=str(expected["resolved_config_sha256"]),
+            actual_sha256=corrected_hash,
+        )
+        if correction is None:
+            raise ConfigError(
+                "paired recovery resolved config canonicalization difference 未获授权"
+            )
     audit = _read_json(child / "protocol_audit.json")
     validity = audit.get("run_validity")
     health = audit.get("execution_health")
@@ -1781,15 +1896,6 @@ def _recovery_identity_and_health(
         value = health[field]
         if isinstance(value, bool) or not isinstance(value, int) or value != 0:
             raise ConfigError(f"paired recovery health counter 非零：{field}")
-    correction = {
-        "reason": COMPLETED_RECOVERY_REASON,
-        "legacy_json_roundtrip_actual_sha256": legacy_hash,
-        "original_expected_sha256": expected["resolved_config_sha256"],
-        "corrected_actual_sha256": corrected_hash,
-        "semantic_equivalence_after_stringifying_mapping_keys": True,
-        "only_authorized_difference": "integer-versus-string mapping keys",
-        "key_level_diff": key_level_diff,
-    }
     health_summary = {
         "execution_valid": True,
         "behavior_valid": True,
@@ -2007,7 +2113,7 @@ def recover_completed_execution(
     if (
         baseline.get("schema_version") != COMPLETED_RECOVERY_BASELINE_SCHEMA
         or baseline.get("status") != "activated"
-        or baseline.get("reason") != COMPLETED_RECOVERY_REASON
+        or baseline.get("reason") not in COMPLETED_RECOVERY_REASONS
         or baseline.get("worker_id") != worker_id
         or int(baseline.get("seed", -1)) != seed
         or task_id not in tasks
@@ -2088,6 +2194,8 @@ def recover_completed_execution(
         task,
         child,
     )
+    if correction.get("reason") != baseline.get("reason"):
+        raise ConfigError("paired recovery baseline reason binding failed")
     standard_audit = {
         "schema_version": "task8-task-identity-audit-v1",
         "task_id": task_id,
@@ -2170,8 +2278,18 @@ def recover_completed_execution(
     marker_path = root / "task_receipts" / f"{task_id}.json"
     _same_or_new_json(marker_path, marker)
     receipt_identity = manifest.get("receipt_identity")
-    legacy_receipt_config_sha256: str | None = None
-    corrected_receipt_config_sha256: str | None = None
+    legacy_receipt_config_sha256: str | None = (
+        str(correction["original_expected_sha256"])
+        if correction["reason"]
+        == COMPLETED_RECOVERY_SECONDARY_STANDALONE_REASON
+        else None
+    )
+    corrected_receipt_config_sha256: str | None = (
+        str(correction["corrected_actual_sha256"])
+        if correction["reason"]
+        == COMPLETED_RECOVERY_SECONDARY_STANDALONE_REASON
+        else None
+    )
     checkpoint_receipt_identity_correction = {
         "applied": False,
         "old_resolved_config_sha256": None,
@@ -2310,7 +2428,7 @@ def recover_completed_execution(
             "execution_complete_recovered"
         ),
         "recovery_id": recovery_id,
-        "reason": COMPLETED_RECOVERY_REASON,
+        "reason": baseline["reason"],
         "worker_id": worker_id,
         "seed": seed,
         "role": role,
