@@ -44,6 +44,10 @@ COMPLETED_RECOVERY_REASON = "resolved-config-integer-key-canonicalization"
 RECOVERY_SOURCE_CONTROLLER_SHA256 = (
     "ac1a57480ab8b6366c9f00356cc3a1ec7a512b5716c5c282d51e42ddebed7f8c"
 )
+RECOVERY_SOURCE_CONTROLLER_SHA256S = {
+    RECOVERY_SOURCE_CONTROLLER_SHA256,
+    "2f95e360c420997a72f206279be8ad3e2b195553d682d7674e6e7ec6d87f24b9",
+}
 RECOVERY_COMPLETION_CONTROLLER_SHA256 = (
     "224cfc525abb97760f53d9694173b63cbe94e1151ad47c411162da6f4535d751"
 )
@@ -912,10 +916,10 @@ def derive_authorized_manifest(
     if _recovery_source_controller_sha256 is not None:
         if (
             _recovery_source_controller_sha256
-            != RECOVERY_SOURCE_CONTROLLER_SHA256
+            not in RECOVERY_SOURCE_CONTROLLER_SHA256S
         ):
             raise ConfigError("paired-shard recovery source controller 非法")
-        expected_controller_sha256 = RECOVERY_SOURCE_CONTROLLER_SHA256
+        expected_controller_sha256 = _recovery_source_controller_sha256
     if (
         authorization.get("schema_version") != AUTHORIZATION_SCHEMA
         or authorization.get("active") is not True
@@ -1917,12 +1921,12 @@ def recover_completed_execution(
         shard.get("engineering_controller_sha256", "")
     )
     current_controller_sha256 = _sha256(Path(__file__).resolve())
-    if source_controller_sha256 == RECOVERY_SOURCE_CONTROLLER_SHA256:
+    if source_controller_sha256 in RECOVERY_SOURCE_CONTROLLER_SHA256S:
         rebuilt = derive_authorized_manifest(
             str(shard.get("canonical_manifest_path", "")),
             str(shard.get("authorization_path", "")),
             _recovery_source_controller_sha256=(
-                RECOVERY_SOURCE_CONTROLLER_SHA256
+                source_controller_sha256
             ),
         )
     elif source_controller_sha256 == current_controller_sha256:
@@ -2402,7 +2406,7 @@ def build_shard_receipt(
         shard.get("engineering_controller_sha256", "")
     )
     current_controller_sha256 = _sha256(Path(__file__).resolve())
-    if source_controller_sha256 == RECOVERY_SOURCE_CONTROLLER_SHA256:
+    if source_controller_sha256 in RECOVERY_SOURCE_CONTROLLER_SHA256S:
         if recovery_certificate_path is None:
             raise ConfigError(
                 "legacy recovered execution seal 必须绑定 recovery certificate"
@@ -2480,7 +2484,7 @@ def build_shard_receipt(
             str(shard.get("canonical_manifest_path", "")),
             str(shard.get("authorization_path", "")),
             _recovery_source_controller_sha256=(
-                RECOVERY_SOURCE_CONTROLLER_SHA256
+                source_controller_sha256
             ),
         )
     elif source_controller_sha256 == current_controller_sha256:

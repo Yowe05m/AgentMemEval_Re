@@ -1304,6 +1304,7 @@ def _completed_recovery_fixture(
     extra_receipt_identity_field: bool = False,
     receipt_config_override: str | None = None,
     legacy_controller: bool = False,
+    recovery_source_controller: str | None = None,
     archive_prefix: str | None = None,
 ) -> dict[str, Path]:
     selected = selected or [recovered_task_id]
@@ -1377,11 +1378,13 @@ def _completed_recovery_fixture(
         selected=selected,
         shard_id=f"recover-{recovered_task_id}",
     )
-    if legacy_controller:
-        auth_value = json.loads(authorization.read_text(encoding="utf-8"))
-        auth_value["engineering_controller_sha256"] = (
-            shards.RECOVERY_SOURCE_CONTROLLER_SHA256
+    if legacy_controller or recovery_source_controller is not None:
+        source_controller = (
+            recovery_source_controller
+            or shards.RECOVERY_SOURCE_CONTROLLER_SHA256
         )
+        auth_value = json.loads(authorization.read_text(encoding="utf-8"))
+        auth_value["engineering_controller_sha256"] = source_controller
         auth_value["authorization_id"] = shards._authorization_id(
             auth_value,
             role=manifest["role"],
@@ -1391,7 +1394,7 @@ def _completed_recovery_fixture(
             canonical,
             authorization,
             _recovery_source_controller_sha256=(
-                shards.RECOVERY_SOURCE_CONTROLLER_SHA256
+                source_controller
             ),
         )
     else:
@@ -1856,6 +1859,35 @@ def test_legacy_recovered_execution_seal_requires_bound_certificate(
     )
     assert receipt["status"] == "complete"
     assert receipt["selected_task_ids"] == ["isolation_sync"]
+    assert receipt["effect_fields_read"] is False
+
+
+def test_completed_recovery_accepts_verified_secondary_source_controller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_frozen_standard_resume(monkeypatch)
+    source_controller = next(
+        item
+        for item in shards.RECOVERY_SOURCE_CONTROLLER_SHA256S
+        if item != shards.RECOVERY_SOURCE_CONTROLLER_SHA256
+    )
+    paths = _completed_recovery_fixture(
+        tmp_path,
+        recovery_source_controller=source_controller,
+    )
+    result = _run_completed_recovery(paths)
+    receipt = shards.build_shard_receipt(
+        paths["derived"],
+        paths["root"],
+        paths["shard_receipt"],
+        paths["certificate"],
+    )
+
+    assert result["status"] == "execution_complete_recovered"
+    assert result["shard_closed"] is True
+    assert receipt["status"] == "complete"
+    assert receipt["selected_task_ids"] == ["isolation_async"]
     assert receipt["effect_fields_read"] is False
 
 
