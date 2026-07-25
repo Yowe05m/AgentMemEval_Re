@@ -372,7 +372,10 @@ PHASE_F_AUDITED_RECOVERY_OVERLAY_AST_SHA256 = {
     "_formal_execution_health_reasons": (
         "468a12309881b38348a2af90db32a2f8fb170eb3972df32c54c7a67968006d3f"
     ),
-    "_formal_metric_rows": "049fc448f3c9f163c4e2e0b3a39d9d2a9829701a95fb06ebc762f8d0a7a8fe4f",
+    "_formal_metric_rows": "d5a0ec7cbcac4ac8d682afdbeaecc1f441d0c4865c16e2bfafd6c2f730823678",
+    "_formal_mechanism_by_target": (
+        "3a258c59c25dfb51f0aa92663e178d517df264072d16592b8a9b17f82778e800"
+    ),
     "_normalize_data_lineage_rows": (
         "8721336f265d8ba3d71699fbafff49bed636bd17f7ebbcfb5a21a35cb5e50a95"
     ),
@@ -3247,7 +3250,11 @@ def _formal_metric_rows(
         task_identity = identity_audit.get("actual", {})
         hand_path = task_root / "hand_summaries.jsonl"
         hands = _read_jsonl(hand_path)
-        mechanism_by_target = _mechanism_by_target(task_id, experiment, config)
+        mechanism_by_target = _formal_mechanism_by_target(
+            task_id,
+            experiment,
+            config,
+        )
         checkpoints = sorted(
             {
                 int(row.get("checkpoint_hand"))
@@ -3624,6 +3631,23 @@ def _mechanism_by_target(
     elif "_" in task_id and task_id.split("_", 1)[0] in {"expr", "async"}:
         mechanism = task_id.split("_", 1)[0]
     return {target: labels.get(mechanism, mechanism)}
+
+
+def _formal_mechanism_by_target(
+    task_id: str,
+    experiment: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, str]:
+    mechanism_by_target = _mechanism_by_target(task_id, experiment, config)
+    isolation_alias = {
+        "isolation_sync": "Sync",
+        "isolation_async": "Async",
+    }.get(task_id)
+    if isolation_alias is None:
+        return mechanism_by_target
+    if len(mechanism_by_target) != 1:
+        raise ConfigError(f"formal {task_id} 必须且只能有一个 target agent")
+    return {target: isolation_alias for target in mechanism_by_target}
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:

@@ -196,6 +196,43 @@ def test_task_completeness_rejects_evaluate_all_target_or_hand_splice(
         )
 
 
+@pytest.mark.parametrize(
+    ("task_id", "expected_mechanism"),
+    (
+        ("isolation_fact", "Fact"),
+        ("isolation_expr", "Expr"),
+        ("isolation_sync", "Sync"),
+        ("isolation_async", "Async"),
+    ),
+)
+def test_formal_isolation_mechanism_aliases_are_canonical(
+    task_id: str,
+    expected_mechanism: str,
+) -> None:
+    assert task8b_analysis._formal_mechanism_by_target(
+        task_id,
+        {"target_agent_id": "agent_00"},
+        {"agent": {"mechanism": "ignored"}},
+    ) == {"agent_00": expected_mechanism}
+
+
+def test_formal_isolation_alias_rejects_multiple_targets() -> None:
+    experiment = {
+        "evaluate_all_train_agents": True,
+        "agent_roster": [
+            {"agent_id": "async_00", "mechanism": "fact_expr_async"},
+            {"agent_id": "async_01", "mechanism": "fact_expr_async"},
+        ],
+    }
+
+    with pytest.raises(ConfigError, match="一个 target agent"):
+        task8b_analysis._formal_mechanism_by_target(
+            "isolation_async",
+            experiment,
+            {},
+        )
+
+
 def _formal_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     attempt = tmp_path / "formal-worker" / "P01" / "attempt_01"
     task_id = "isolation_fact"
