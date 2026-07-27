@@ -961,10 +961,19 @@ class FactualMemory:
         )
 
         if self.facts_path is not None:
-            _assert_regular_canonical_fact_file(
-                self.facts_path,
-                _canonical_fact_bytes(restored_records),
-            )
+            restored_canonical = _canonical_fact_bytes(restored_records)
+            current_canonical = self._assert_canonical_facts_current()
+            if current_canonical:
+                _assert_regular_canonical_fact_file(
+                    self.facts_path,
+                    restored_canonical,
+                )
+            elif restored_canonical:
+                # A newly created run binds an empty canonical file before the
+                # formal clone snapshot is restored.  Seeding that verified
+                # empty destination is materialization, not replacement of an
+                # existing fact history.  Non-empty destinations remain strict.
+                self._atomic_replace_facts_file(restored_canonical)
 
         # Commit only after every field has passed validation.  A rejected
         # snapshot must leave the live memory byte-for-byte unchanged.
