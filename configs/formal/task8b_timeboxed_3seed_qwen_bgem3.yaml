@@ -47,7 +47,7 @@ experiment:
   formal_runtime_lock:
     decision_prompt_version: 2026-07-27-v9-chip-bb-unit-explicit
     decision_system_sha256: 7771cda4707e9bb89d4f72147c96ba1ec2cc2578366d1dabdef792c8265dc62b
-    experience_update_sha256: 0a72d6910c0ddf0385fe8c750df5383afbc161d59d3bacf264f093196aad33f1
+    experience_update_sha256: 69d12c2f76d72ce4bcb71f5cfa40ef8fb1955c14bae8def0bab15f5a2d32df8c
   timeboxed_protocol:
     seed_count: 3
     seeds: [2026100101, 2026100102, 2026100103]
