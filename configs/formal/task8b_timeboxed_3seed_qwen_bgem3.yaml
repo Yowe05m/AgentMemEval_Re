@@ -34,6 +34,13 @@ experiment:
   protocol_readiness: ready
   statistical_plan_status: frozen
   required_seed_pairs: 3
+  runtime_verification:
+    decision_service_smoke_passed: true
+    embedding_service_smoke_passed: true
+    uniform_hardware_verified: false
+    hardware_uniformity_policy: recorded_heterogeneous_timeboxed
+  formal_runtime_lock:
+    gpu_name_policy: informational_only
   train_hands: 270
   checkpoint_interval: 0
   checkpoint_set: [30, 90, 150, 270]
@@ -51,5 +58,6 @@ experiment:
     checkpoint_set: [30, 90, 150, 270]
     decision_model: qwen/qwen3.5-9b
     embedding_model: BAAI/bge-m3
+    hardware_uniformity_policy: recorded_heterogeneous_timeboxed
     evidence_scope: descriptive_n3_not_equivalence_or_significance
     frozen_before_run: true

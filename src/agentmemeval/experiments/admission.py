@@ -168,7 +168,17 @@ def assess_run_admission(config: dict[str, Any], cwd: Path) -> dict[str, Any]:
             blockers.append(
                 "experiment.required_seed_pairs must be frozen from the independent pilot"
             )
-        if verification.get("uniform_hardware_verified") is not True:
+        heterogeneous_timeboxed = (
+            str(experiment.get("protocol_variant", ""))
+            == "task8b_timeboxed_3seed_qwen_bgem3_v1"
+            and verification.get("uniform_hardware_verified") is False
+            and verification.get("hardware_uniformity_policy")
+            == "recorded_heterogeneous_timeboxed"
+        )
+        if (
+            verification.get("uniform_hardware_verified") is not True
+            and not heterogeneous_timeboxed
+        ):
             blockers.append(
                 "experiment.runtime_verification.uniform_hardware_verified must be true"
             )
@@ -391,8 +401,17 @@ def _runtime_lock_blockers(experiment: dict[str, Any], runtime: dict[str, Any]) 
             )
         elif observed.get("gpu_driver") in {None, ""}:
             blockers.append("runtime gpu_driver is required for informational recording")
+    gpu_name_policy = lock.get("gpu_name_policy")
+    if gpu_name_policy not in {None, "informational_only"}:
+        blockers.append(
+            "experiment.formal_runtime_lock.gpu_name_policy must be informational_only"
+        )
     for field in FORMAL_RUNTIME_LOCK_FIELDS:
         if field == "gpu_driver" and driver_policy is not None:
+            continue
+        if field == "gpu_name" and gpu_name_policy == "informational_only":
+            if observed.get("gpu_name") in {None, ""}:
+                blockers.append("runtime gpu_name is required for informational recording")
             continue
         actual = observed.get(field)
         expected = lock.get(field)

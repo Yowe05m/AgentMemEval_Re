@@ -46,6 +46,15 @@ def test_timeboxed_shards_preserve_order_and_documented_budgets(tmp_path: Path) 
 
 def test_timeboxed_configs_use_local_qwen_and_bgem3(tmp_path: Path) -> None:
     base = load_config(BASE)
+    assert base["experiment"]["runtime_verification"] == {
+        "decision_service_smoke_passed": True,
+        "embedding_service_smoke_passed": True,
+        "uniform_hardware_verified": False,
+        "hardware_uniformity_policy": "recorded_heterogeneous_timeboxed",
+    }
+    assert base["experiment"]["formal_runtime_lock"]["gpu_name_policy"] == (
+        "informational_only"
+    )
     isolation = build_task_config(
         base,
         task_id="isolation_expr",
