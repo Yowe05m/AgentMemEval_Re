@@ -23,6 +23,7 @@ provider:
 agent:
   embedding_backend: bgem3_hybrid_http
   embedding_model: BAAI/bge-m3
+  retrieval_weight_status: frozen
   embedding_base_url_env: BGEM3_BASE_URL
   embedding_api_key_env: BGEM3_API_KEY
   embedding_api_key_required: false
@@ -43,6 +44,10 @@ experiment:
   # after inheritance without retaining stale parent keys.
   checkpoint_test_hands_by_checkpoint: null
   heldout_table_set: [H01, H02, H03]
+  formal_runtime_lock:
+    decision_prompt_version: 2026-07-27-v9-chip-bb-unit-explicit
+    decision_system_sha256: 7771cda4707e9bb89d4f72147c96ba1ec2cc2578366d1dabdef792c8265dc62b
+    experience_update_sha256: 0a72d6910c0ddf0385fe8c750df5383afbc161d59d3bacf264f093196aad33f1
   timeboxed_protocol:
     seed_count: 3
     seeds: [2026100101, 2026100102, 2026100103]
