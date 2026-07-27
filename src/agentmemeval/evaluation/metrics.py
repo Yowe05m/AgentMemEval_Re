@@ -165,6 +165,7 @@ def _compute_per_agent(
     folded_to_bet: dict[str, int] = defaultdict(int)
     postflop_raise_hands: dict[str, set[str]] = defaultdict(set)
     intent_bluff_hands: dict[str, set[str]] = defaultdict(set)
+    intent_observed_raise_hands: dict[str, set[str]] = defaultdict(set)
     street_action_hands: dict[str, dict[str, set[str]]] = defaultdict(
         lambda: defaultdict(set)
     )
@@ -196,7 +197,14 @@ def _compute_per_agent(
             and bool(event.get("effective_raise", False))
         ):
             postflop_raise_hands[agent_id].add(hand_id)
-            if _has_bluff_intent(event.get("raw_decision", {}) or {}):
+            raw_decision = event.get("raw_decision", {}) or {}
+            if _has_explicit_intent(raw_decision) and not bool(
+                event.get("fallback_used", False)
+            ):
+                intent_observed_raise_hands[agent_id].add(hand_id)
+            if _has_bluff_intent(raw_decision) and not bool(
+                event.get("fallback_used", False)
+            ):
                 intent_bluff_hands[agent_id].add(hand_id)
 
     showdown_ranks_by_hand = {
@@ -209,8 +217,9 @@ def _compute_per_agent(
     }
     proxy_bluff = _compute_proxy_bluff_rates(postflop_raise_hands, showdown_ranks_by_hand)
     intent_bluff = {
-        agent_id: len(intent_bluff_hands.get(agent_id, set())) / len(hand_ids)
-        if hand_ids
+        agent_id: len(intent_bluff_hands.get(agent_id, set()))
+        / len(intent_observed_raise_hands.get(agent_id, set()))
+        if intent_observed_raise_hands.get(agent_id)
         else 0.0
         for agent_id, hand_ids in postflop_raise_hands.items()
     }
@@ -266,6 +275,18 @@ def _compute_per_agent(
             ),
             "proxy_bluff_rate": proxy_bluff.get(agent_id, 0.0),
             "intent_bluff_rate": intent_bluff.get(agent_id, 0.0),
+            "intent_postflop_raise_hand_count": len(
+                postflop_raise_hands.get(agent_id, set())
+            ),
+            "intent_observed_postflop_raise_hand_count": len(
+                intent_observed_raise_hands.get(agent_id, set())
+            ),
+            "intent_coverage_on_postflop_raise": (
+                len(intent_observed_raise_hands.get(agent_id, set()))
+                / len(postflop_raise_hands.get(agent_id, set()))
+                if postflop_raise_hands.get(agent_id)
+                else 1.0
+            ),
             "action_counts": counts,
             "hand_reward_sensitivity": {
                 "max_absolute_hand_reward": max_reward,
@@ -562,13 +583,18 @@ def _has_bluff_intent(raw_decision: object) -> bool:
     返回：是否包含诈唬关键词。
     副作用：无。
     异常：无。
-    设计说明：对应原版 intent-based bluff rate，离线 mock 用 reason_summary 替代自述 intent。
+    设计说明：对应原版 intent-based bluff rate；只读取显式 intent，绝不以行动理由代替。
     """
 
     if not isinstance(raw_decision, dict):
         return False
-    text = " ".join(
-        str(raw_decision.get(key, ""))
-        for key in ("intent", "reason", "reason_summary")
-    ).lower()
+    text = str(raw_decision.get("intent", "")).lower()
     return any(keyword.lower() in text for keyword in BLUFF_KEYWORDS)
+
+
+def _has_explicit_intent(raw_decision: object) -> bool:
+    """Return whether the action record contains a non-empty explicit intent."""
+
+    return isinstance(raw_decision, dict) and bool(
+        str(raw_decision.get("intent", "")).strip()
+    )

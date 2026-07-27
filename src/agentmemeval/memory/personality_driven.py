@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from agentmemeval.core.domain import (
     AgentObservation,
     DecisionEvent,
@@ -165,6 +167,34 @@ class PersonalityDrivenMemory:
         """
 
         self.wrapped.on_hand_finished(trajectory)
+
+    def bind_persistence(
+        self,
+        directory: str | Path,
+        *,
+        reference_root: str | Path,
+    ) -> None:
+        """Forward canonical experience persistence through the persona wrapper."""
+
+        binder = getattr(self.wrapped, "bind_persistence", None)
+        if callable(binder):
+            binder(directory, reference_root=reference_root)
+
+    def experience_reference(self) -> dict[str, object] | None:
+        """Forward a compact canonical-document reference when the wrapped memory has one."""
+
+        reference = getattr(self.wrapped, "experience_reference", None)
+        if not callable(reference):
+            return None
+        payload = reference()
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def set_frozen(self, frozen: bool) -> None:
+        """Forward the held-out read-only lifecycle to the wrapped mechanism."""
+
+        setter = getattr(self.wrapped, "set_frozen", None)
+        if callable(setter):
+            setter(bool(frozen))
 
     def snapshot(self) -> MemorySnapshot:
         """

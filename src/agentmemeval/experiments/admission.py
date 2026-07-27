@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from pathlib import Path
 from typing import Any
 
+from agentmemeval.config.loader import (
+    _effective_secondary_agent_configs,
+    _validate_embedding_retrieval_contract,
+)
 from agentmemeval.core.errors import ConfigError
+from agentmemeval.core.memory_mechanism import (
+    FACTUAL_MECHANISMS,
+    resolve_memory_mechanism,
+)
 from agentmemeval.evaluation.runtime_lock import (
     FORMAL_RUNTIME_LOCK_FIELDS,
     runtime_identity_from_metadata,
@@ -51,27 +62,44 @@ def assess_run_admission(config: dict[str, Any], cwd: Path) -> dict[str, Any]:
         "provider",
         blockers,
     )
-    uses_factual_memory = _uses_factual_memory(config)
-    if uses_factual_memory:
-        if str(agent.get("embedding_backend", "hash")) not in {
-            "openai_compatible",
-            "bgem3_hybrid_http",
-        }:
-            blockers.append(
-                "pilot/formal factual memory requires openai_compatible embedding "
-                "or bgem3_hybrid_http"
-            )
-        _require_identity(
-            agent,
-            (
-                "embedding_model",
-                "embedding_revision",
-                "embedding_weights_hash",
-                "embedding_service_startup_parameters",
-            ),
-            "agent",
+    effective_configs = _effective_agent_configs(config)
+    factual_configs = [
+        (section, section_config)
+        for section, section_config in effective_configs
+        if _resolved_memory_mechanism(section, section_config) in FACTUAL_MECHANISMS
+    ]
+    uses_factual_memory = bool(factual_configs)
+    embedding_blocker_start = len(blockers)
+    for section, section_config in factual_configs:
+        _append_embedding_contract_blockers(
+            section,
+            section_config,
             blockers,
+            cwd=cwd,
         )
+    embedding_identity_hashes = {
+        section: _embedding_semantic_config_hash(section_config)
+        for section, section_config in factual_configs
+    }
+    if factual_configs:
+        primary_embedding_identity_hash = _embedding_semantic_config_hash(agent)
+        mismatched_sections = sorted(
+            section
+            for section, identity_hash in embedding_identity_hashes.items()
+            if identity_hash != primary_embedding_identity_hash
+        )
+        if mismatched_sections:
+            blockers.append(
+                "effective factual embedding semantic identity must match agent: "
+                + ", ".join(mismatched_sections)
+            )
+        if len(set(embedding_identity_hashes.values())) != 1:
+            blockers.append(
+                "all effective factual agents must share one embedding semantic identity"
+            )
+    else:
+        primary_embedding_identity_hash = None
+    embedding_contract_blockers = blockers[embedding_blocker_start:]
 
     verification = dict(experiment.get("runtime_verification", {}))
     if verification.get("decision_service_smoke_passed") is not True:
@@ -86,8 +114,12 @@ def assess_run_admission(config: dict[str, Any], cwd: Path) -> dict[str, Any]:
         "decision_model_identity_complete": not any(
             item.startswith("provider.") for item in blockers
         ),
-        "embedding_identity_complete": not any(
-            item.startswith("agent.embedding_") for item in blockers
+        "embedding_identity_complete": not embedding_contract_blockers,
+        "embedding_identity_sections": [section for section, _config in factual_configs],
+        "embedding_identity_hash_by_section": embedding_identity_hashes,
+        "primary_embedding_identity_hash": primary_embedding_identity_hash,
+        "embedding_identity_fused": not any(
+            "embedding semantic identity" in item for item in embedding_contract_blockers
         ),
         "strategy_risk_gate_disabled": True,
         "memory_scope_per_agent_only": True,
@@ -104,8 +136,7 @@ def assess_run_admission(config: dict[str, Any], cwd: Path) -> dict[str, Any]:
         readiness = str(experiment.get("protocol_readiness", ""))
         if readiness != "ready":
             blockers.append(
-                "experiment.protocol_readiness must be ready, "
-                f"got {readiness or 'missing'}"
+                f"experiment.protocol_readiness must be ready, got {readiness or 'missing'}"
             )
         required_statuses = {
             "retrieval_threshold_status": agent.get("retrieval_threshold_status"),
@@ -115,16 +146,23 @@ def assess_run_admission(config: dict[str, Any], cwd: Path) -> dict[str, Any]:
         for field, value in required_statuses.items():
             if str(value) != "frozen":
                 blockers.append(f"{field} must be frozen for formal runs")
+        for section, section_config in factual_configs:
+            _append_formal_retrieval_threshold_blockers(
+                section,
+                section_config,
+                blockers,
+            )
+            _append_formal_retrieval_weight_blockers(
+                section,
+                section_config,
+                blockers,
+            )
         if not str(experiment.get("primary_estimand", "")).strip():
             blockers.append("experiment.primary_estimand is required for formal runs")
         if not str(experiment.get("primary_baseline_mechanism", "")).strip():
-            blockers.append(
-                "experiment.primary_baseline_mechanism is required for formal runs"
-            )
+            blockers.append("experiment.primary_baseline_mechanism is required for formal runs")
         if str(experiment.get("multiple_comparison_method", "")) != "holm":
-            blockers.append(
-                "experiment.multiple_comparison_method must be holm for formal runs"
-            )
+            blockers.append("experiment.multiple_comparison_method must be holm for formal runs")
         required_seed_pairs = experiment.get("required_seed_pairs")
         if required_seed_pairs is None or int(required_seed_pairs) < 2:
             blockers.append(
@@ -152,18 +190,176 @@ def assess_run_admission(config: dict[str, Any], cwd: Path) -> dict[str, Any]:
     return audit
 
 
+def _append_formal_retrieval_threshold_blockers(
+    section: str,
+    config: dict[str, Any],
+    blockers: list[str],
+) -> None:
+    """Require an independently frozen finite cutoff before paper admission."""
+
+    status = str(config.get("retrieval_threshold_status", "")).strip()
+    if status != "frozen":
+        blockers.append(
+            f"{section}.retrieval_threshold_status must be frozen for formal runs"
+        )
+    minimum = config.get("minimum_retrieval_score")
+    if minimum is None:
+        blockers.append(
+            f"{section}.minimum_retrieval_score must be provided by the frozen "
+            "retrieval-threshold approval before formal runs"
+        )
+        return
+    if (
+        isinstance(minimum, bool)
+        or not isinstance(minimum, (int, float))
+        or not math.isfinite(float(minimum))
+    ):
+        blockers.append(
+            f"{section}.minimum_retrieval_score must be a finite numeric frozen value "
+            "for formal runs"
+        )
+
+
+def _append_formal_retrieval_weight_blockers(
+    section: str,
+    config: dict[str, Any],
+    blockers: list[str],
+) -> None:
+    """Reject uncalibrated hybrid-weight heuristics from formal admission."""
+
+    semantic = config.get("semantic_weight", 0.65)
+    feature = config.get("feature_weight", 0.35)
+    if (
+        isinstance(semantic, bool)
+        or not isinstance(semantic, (int, float))
+        or not math.isfinite(float(semantic))
+        or isinstance(feature, bool)
+        or not isinstance(feature, (int, float))
+        or not math.isfinite(float(feature))
+    ):
+        blockers.append(f"{section} retrieval weights must be finite numeric values")
+        return
+    is_original_semantic_only_baseline = float(semantic) == 1.0 and float(feature) == 0.0
+    if (
+        not is_original_semantic_only_baseline
+        and str(config.get("retrieval_weight_status", "")).strip() != "frozen"
+    ):
+        blockers.append(
+            f"{section}.retrieval_weight_status must be frozen before hybrid retrieval "
+            "weights can enter formal runs"
+        )
+
+
 def _uses_factual_memory(config: dict[str, Any]) -> bool:
-    mechanisms = {
-        str(dict(config.get(section, {})).get("mechanism", ""))
-        for section in ("agent", "opponent_agent", "heldout_agent")
-    }
-    roster = dict(config.get("experiment", {})).get("agent_roster", [])
-    mechanisms.update(
-        str(item.get("mechanism", ""))
-        for item in roster
-        if isinstance(item, dict)
+    return any(
+        _resolved_memory_mechanism(section, section_config) in FACTUAL_MECHANISMS
+        for section, section_config in _effective_agent_configs(config)
     )
-    return bool(mechanisms & {"fact", "fact_expr_sync", "fact_expr_async"})
+
+
+def _resolved_memory_mechanism(
+    section: str,
+    config: dict[str, Any],
+) -> str:
+    try:
+        return resolve_memory_mechanism(config)
+    except ValueError as exc:
+        raise ConfigError(f"{section}: {exc}") from exc
+
+
+def _effective_agent_configs(
+    config: dict[str, Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    primary = config.get("agent", {})
+    configs = [("agent", dict(primary) if isinstance(primary, dict) else {})]
+    configs.extend(_effective_secondary_agent_configs(config))
+    return configs
+
+
+def _append_embedding_contract_blockers(
+    section: str,
+    config: dict[str, Any],
+    blockers: list[str],
+    *,
+    cwd: Path,
+) -> None:
+    """Seal every effective factual agent's complete semantic backend contract."""
+
+    backend = str(config.get("embedding_backend", "hash"))
+    if backend not in {"openai_compatible", "bgem3_hybrid_http"}:
+        blockers.append(
+            f"{section}: pilot/formal factual memory requires openai_compatible "
+            "embedding or bgem3_hybrid_http"
+        )
+        return
+    try:
+        _validate_embedding_retrieval_contract(section, config)
+    except ConfigError as exc:
+        blockers.append(str(exc))
+        return
+    common_fields = (
+        "embedding_model",
+        "embedding_revision",
+        "embedding_weights_hash",
+        "embedding_service_startup_parameters",
+    )
+    _require_identity(config, common_fields, section, blockers)
+    weights_hash = config.get("embedding_weights_hash")
+    if not _is_sha256(weights_hash):
+        blockers.append(f"{section}.embedding_weights_hash must be a SHA-256 hex digest")
+    if backend == "openai_compatible":
+        return
+    startup = config.get("embedding_service_startup_parameters")
+    if isinstance(startup, dict) and startup.get("server_source_sha256") is not None:
+        service_script = Path(str(startup.get("service_script", "")))
+        if not service_script.is_absolute():
+            service_script = cwd / service_script
+        if not service_script.is_file():
+            blockers.append(f"{section}.embedding service_script does not exist")
+        else:
+            actual_source_sha256 = hashlib.sha256(service_script.read_bytes()).hexdigest()
+            if actual_source_sha256 != str(startup["server_source_sha256"]).lower():
+                blockers.append(
+                    f"{section}.embedding server_source_sha256 does not match service_script"
+                )
+
+
+def _embedding_semantic_config_hash(config: dict[str, Any]) -> str:
+    """Hash semantic embedding identity while excluding branch-local cache paths."""
+
+    fields = (
+        "embedding_backend",
+        "embedding_model",
+        "embedding_revision",
+        "embedding_weights_hash",
+        "embedding_tokenizer_revision",
+        "embedding_query_instruction",
+        "embedding_query_policy",
+        "embedding_hybrid_weights",
+        "embedding_candidate_depth",
+        "embedding_colbert_rerank_depth",
+        "embedding_final_top_k_policy",
+        "embedding_cache_schema_version",
+        "embedding_base_url_env",
+        "embedding_output_dimensions",
+        "embedding_service_startup_parameters",
+    )
+    payload = {field: config.get(field) for field in fields}
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdefABCDEF" for character in value)
+    )
 
 
 def _require_identity(
@@ -178,9 +374,7 @@ def _require_identity(
             blockers.append(f"{prefix}.{field} is required")
 
 
-def _runtime_lock_blockers(
-    experiment: dict[str, Any], runtime: dict[str, Any]
-) -> list[str]:
+def _runtime_lock_blockers(experiment: dict[str, Any], runtime: dict[str, Any]) -> list[str]:
     lock = experiment.get("formal_runtime_lock")
     if not isinstance(lock, dict):
         return ["experiment.formal_runtime_lock is required"]

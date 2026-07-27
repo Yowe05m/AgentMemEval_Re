@@ -12,6 +12,8 @@ from agentmemeval.environment.decision_facts import build_decision_facts
 class CallRisk:
     stack_before: int
     call_cost: int
+    contestable_pot_before_call: int
+    contestable_pot_after_call: int
     stack_fraction: float
     required_equity: float
     is_all_in: bool
@@ -21,6 +23,8 @@ class CallRisk:
         return {
             "stack_before": self.stack_before,
             "call_cost": self.call_cost,
+            "contestable_pot_before_call": self.contestable_pot_before_call,
+            "contestable_pot_after_call": self.contestable_pot_after_call,
             "stack_fraction": self.stack_fraction,
             "required_equity": self.required_equity,
             "is_all_in": self.is_all_in,
@@ -36,6 +40,8 @@ def build_call_risk(observation: AgentObservation) -> CallRisk:
     return CallRisk(
         stack_before=int(call["stack_before"]),
         call_cost=int(call["call_cost"]),
+        contestable_pot_before_call=int(call["contestable_pot_before_call"]),
+        contestable_pot_after_call=int(call["contestable_pot_after_call"]),
         stack_fraction=float(call["stack_fraction"]),
         required_equity=float(call["required_equity"]),
         is_all_in=bool(call["is_all_in"]),

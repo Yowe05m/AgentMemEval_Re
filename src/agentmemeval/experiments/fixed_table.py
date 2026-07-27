@@ -17,7 +17,7 @@ from agentmemeval.agents.base import LLMDecisionAgent
 from agentmemeval.agents.llm_agent import build_agent
 from agentmemeval.analysis.plots import generate_audit_plots, plot_stack_curves
 from agentmemeval.config.loader import resolve_checkpoint_set, resolve_heldout_table_set
-from agentmemeval.core.domain import ExperimentResult
+from agentmemeval.core.domain import ExperimentResult, MemorySnapshot
 from agentmemeval.core.errors import ConfigError
 from agentmemeval.core.seeds import derive_seed
 from agentmemeval.evaluation.aggregation import (
@@ -256,6 +256,10 @@ class FixedTableScenario:
         hands = artifacts.hand_summaries.read_all()
         events = artifacts.events.read_all()
         memory_metrics = {agent_id: agent.memory_metrics() for agent_id, agent in agents.items()}
+        _merge_generalization_experience_injection_audits(
+            memory_metrics,
+            checkpoint_results,
+        )
         mechanism_counts: dict[str, int] = {}
         for agent_id in train_ids:
             mechanism = str(memory_metrics[agent_id].get("mechanism", "unknown"))
@@ -363,6 +367,16 @@ class FixedTableScenario:
                 checkpoint_set=planned_checkpoints,
                 agent_configs=agent_configs,
             ),
+            "generalization_experience_injection_audit": [
+                {
+                    "checkpoint_hand": item["checkpoint_hand"],
+                    "heldout_table_id": item["heldout_table_id"],
+                    "target_agent_id": item["target_agent_id"],
+                    **dict(item["experience_injection_audit"]),
+                }
+                for item in checkpoint_results
+                if isinstance(item.get("experience_injection_audit"), dict)
+            ],
         }
         protocol_audit_path = artifacts.write_json("protocol_audit.json", protocol_audit)
         checkpoint_summary = _summarize_checkpoint_results(checkpoint_results)
@@ -428,11 +442,7 @@ class FixedTableScenario:
         ]
         async_review_path = artifacts.write_json(
             "async_evidence_review_queue.json",
-            {
-                "classification_status": "pending_human_review",
-                "record_count": len(review_rows),
-                "records": review_rows,
-            },
+            _build_async_evidence_artifact(review_rows),
         )
         aggregate = aggregate_metrics([metrics])
         plot_path = plot_stack_curves(hands, artifacts.run_dir / "plots")
@@ -479,6 +489,48 @@ class FixedTableScenario:
         return result
 
 
+def _build_async_evidence_artifact(
+    review_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize Async evidence without imposing a human gate on paper semantics."""
+
+    status_counts: dict[str, int] = {}
+    human_review_required = False
+    for row in review_rows:
+        status = str(row.get("classification_status", "pending_human_review"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+        explicit_human_review = row.get("human_review_required")
+        human_review_required = human_review_required or (
+            explicit_human_review
+            if isinstance(explicit_human_review, bool)
+            else status == "pending_human_review"
+        )
+    if not review_rows:
+        classification_status = "not_requested"
+    elif human_review_required:
+        classification_status = "pending_human_review"
+    elif len(status_counts) == 1:
+        classification_status = next(iter(status_counts))
+    elif set(status_counts) <= {
+        "paper_faithful_provisional_applied",
+        "no_valid_stability_proposal",
+    }:
+        classification_status = "paper_faithful_mixed_outcomes"
+    else:
+        classification_status = "mixed_non_pending"
+    return {
+        "classification_status": classification_status,
+        "human_review_required": human_review_required,
+        "classification_status_counts": status_counts,
+        "pending_human_review_count": status_counts.get("pending_human_review", 0),
+        "paper_faithful_provisional_applied_count": status_counts.get(
+            "paper_faithful_provisional_applied", 0
+        ),
+        "record_count": len(review_rows),
+        "records": review_rows,
+    }
+
+
 def _build_agents(
     agent_ids: list[str],
     config: dict[str, Any],
@@ -501,6 +553,12 @@ def _build_agents(
 
     provider = config["provider"]
     model = str(provider.get("model", "mock-deterministic-v1"))
+    reviewer_provider = config.get("experience_reviewer_provider", {})
+    reviewer_model = (
+        str(reviewer_provider.get("model", ""))
+        if isinstance(reviewer_provider, dict)
+        else ""
+    )
     agent_cfg = dict(config.get("agent", {}))
     opponent_cfg = dict(config.get("opponent_agent", {"mechanism": "no_memory"}))
     if config.get("experiment", {}).get("all_agents_same_mechanism", False):
@@ -511,7 +569,18 @@ def _build_agents(
             agent_id,
             agent_cfg if agent_id == target_id else opponent_cfg,
         )
-        agents[agent_id] = build_agent(agent_id, cfg, context.llm_client, model)
+        agents[agent_id] = build_agent(
+            agent_id,
+            cfg,
+            context.llm_client,
+            model,
+            experience_reviewer_client=context.experience_reviewer_client,
+            experience_reviewer_model=reviewer_model,
+        )
+        agents[agent_id].bind_memory_persistence(
+            context.artifacts.agent_memory_directory(agent_id),
+            reference_root=context.artifacts.run_dir,
+        )
     return agents
 
 
@@ -628,6 +697,22 @@ def _checkpoint_and_generalize(
                 agents[target_id],
                 heldout_table_id,
             )
+            for heldout_agent_id, heldout_agent in heldout_agents.items():
+                heldout_agent.bind_memory_persistence(
+                    artifacts.agent_memory_directory(
+                        heldout_agent_id,
+                        namespace=(
+                            "g",
+                            f"c{checkpoint_hand}",
+                            f"t{sha256_json(target_id)[:8]}",
+                            heldout_table_id,
+                        ),
+                    ),
+                    reference_root=artifacts.run_dir,
+                )
+                heldout_agent.set_memory_frozen(not update_test)
+            target_memory_before_test = heldout_agents[target_id].memory_metrics()
+            target_snapshot_before_test = heldout_agents[target_id].snapshot_memory()
             test_stacks = {agent_id: starting_stack for agent_id in heldout_ids}
             test_rebuy_counts = {agent_id: 0 for agent_id in heldout_ids}
             reward = 0
@@ -674,6 +759,19 @@ def _checkpoint_and_generalize(
                             "heldout_table_id": heldout_table_id,
                         },
                     )
+            target_memory_after_test = heldout_agents[target_id].memory_metrics()
+            target_snapshot_after_test = heldout_agents[target_id].snapshot_memory()
+            frozen_memory_audit = _build_frozen_memory_audit(
+                target_snapshot_before_test,
+                target_snapshot_after_test,
+                update_memory_test=update_test,
+            )
+            experience_injection_audit = _build_generalization_experience_injection_audit(
+                target_memory_before_test,
+                target_memory_after_test,
+                update_memory_test=update_test,
+                frozen_memory_audit=frozen_memory_audit,
+            )
             train_hand_count = train_hand_count_by_target[target_id]
             train_chip_per_hand = train_chip_by_target[target_id] / max(1, train_hand_count)
             test_chip_per_hand = reward / max(1, test_hands)
@@ -702,9 +800,200 @@ def _checkpoint_and_generalize(
                     "generalization_gap_bb_per_100": train_bb_per_100 - test_bb_per_100,
                     "snapshot_path": snapshot_paths[target_id],
                     "rebuy_counts": test_rebuy_counts,
+                    "experience_injection_audit": experience_injection_audit,
+                    "frozen_memory_audit": frozen_memory_audit,
                 }
             )
     return snapshot_paths, results
+
+
+_EXPERIENCE_MECHANISMS = {"expr", "fact_expr_sync", "fact_expr_async"}
+
+
+def _build_generalization_experience_injection_audit(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    update_memory_test: bool,
+    frozen_memory_audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Audit whether a heldout clone consumed the frozen trained experience."""
+
+    mechanism = str(after.get("mechanism", before.get("mechanism", "unknown")))
+    if mechanism not in _EXPERIENCE_MECHANISMS:
+        return {
+            "schema_version": "generalization-experience-injection-v1",
+            "mechanism": mechanism,
+            "applicable": False,
+            "passed": True,
+            "status": "not_applicable",
+        }
+
+    before_version = int(before.get("experience_version", 0))
+    after_version = int(after.get("experience_version", 0))
+    before_revision_count = int(before.get("revision_count", 0))
+    after_revision_count = int(after.get("revision_count", 0))
+    before_context_count = int(before.get("experience_context_build_count", 0))
+    after_context_count = int(after.get("experience_context_build_count", 0))
+    injected_version = after.get("last_injected_experience_version")
+    context_build_delta = after_context_count - before_context_count
+    frozen_revision_state_unchanged = (
+        after_version == before_version
+        and after_revision_count == before_revision_count
+    )
+    injected_trained_version = (
+        context_build_delta > 0
+        and injected_version is not None
+        and int(injected_version) == before_version
+    )
+    document_valid = bool(after.get("experience_document_valid", False))
+    frozen_persistent_state_unchanged = bool(
+        (frozen_memory_audit or {}).get(
+            "persistent_state_unchanged",
+            True,
+        )
+    )
+    passed = (
+        not update_memory_test
+        and frozen_revision_state_unchanged
+        and frozen_persistent_state_unchanged
+        and injected_trained_version
+        and document_valid
+    )
+    if update_memory_test:
+        status = "not_frozen_update_memory_test_true"
+    elif not frozen_revision_state_unchanged:
+        status = "failed_frozen_memory_changed"
+    elif not frozen_persistent_state_unchanged:
+        status = "failed_frozen_persistent_state_changed"
+    elif not injected_trained_version:
+        status = "failed_trained_version_not_injected"
+    elif not document_valid:
+        status = "failed_invalid_experience_document"
+    else:
+        status = "passed"
+    return {
+        "schema_version": "generalization-experience-injection-v1",
+        "mechanism": mechanism,
+        "applicable": True,
+        "update_memory_test": update_memory_test,
+        "expected_experience_version": before_version,
+        "post_test_experience_version": after_version,
+        "last_injected_experience_version": injected_version,
+        "context_build_count_before": before_context_count,
+        "context_build_count_after": after_context_count,
+        "context_build_count_delta": context_build_delta,
+        "revision_count_before": before_revision_count,
+        "revision_count_after": after_revision_count,
+        "frozen_revision_state_unchanged": frozen_revision_state_unchanged,
+        "frozen_persistent_state_unchanged": frozen_persistent_state_unchanged,
+        "experience_document_valid": document_valid,
+        "injected_trained_version": injected_trained_version,
+        "passed": passed,
+        "status": status,
+    }
+
+
+def _build_frozen_memory_audit(
+    before: MemorySnapshot,
+    after: MemorySnapshot,
+    *,
+    update_memory_test: bool,
+) -> dict[str, Any]:
+    """Prove that held-out reads did not mutate learned memory state."""
+
+    before_payload = _persistent_memory_state(before)
+    after_payload = _persistent_memory_state(after)
+    before_sha256 = sha256_json(before_payload)
+    after_sha256 = sha256_json(after_payload)
+    unchanged = before_sha256 == after_sha256
+    return {
+        "schema_version": "generalization-frozen-memory-audit-v1",
+        "mechanism": after.mechanism,
+        "update_memory_test": update_memory_test,
+        "persistent_state_sha256_before": before_sha256,
+        "persistent_state_sha256_after": after_sha256,
+        "frozen_memory_snapshot_sha256_before": before_sha256,
+        "frozen_memory_snapshot_sha256_after": after_sha256,
+        "persistent_state_unchanged": unchanged,
+        "passed": (not update_memory_test and unchanged) or update_memory_test,
+        "status": (
+            "not_frozen_update_memory_test_true"
+            if update_memory_test
+            else "passed" if unchanged else "failed_frozen_persistent_state_changed"
+        ),
+    }
+
+
+def _persistent_memory_state(snapshot: MemorySnapshot) -> dict[str, Any]:
+    """Strip read-only telemetry while retaining every learned memory field."""
+
+    payload = copy.deepcopy(snapshot.payload)
+    mechanism = snapshot.mechanism
+    if mechanism == "fact":
+        for key in (
+            "retrieval_request_count",
+            "empty_retrieval_count",
+            "retrieval_below_threshold_count",
+            "retrieval_duplicate_excluded_count",
+            "retrieval_audit_log",
+            "embedding",
+        ):
+            payload.pop(key, None)
+    elif mechanism == "expr":
+        payload.pop("context_build_count", None)
+        payload.pop("last_injected_experience_version", None)
+    elif mechanism in {"fact_expr_sync", "fact_expr_async"}:
+        payload["fact"] = _persistent_memory_state(
+            MemorySnapshot("fact", snapshot.agent_id, snapshot.scope, payload.get("fact", {}))
+        )["payload"]
+        payload["expr"] = _persistent_memory_state(
+            MemorySnapshot("expr", snapshot.agent_id, snapshot.scope, payload.get("expr", {}))
+        )["payload"]
+    elif mechanism == "personality_driven":
+        wrapped_mechanism = str(payload.get("wrapped_mechanism", "no_memory"))
+        payload["wrapped_payload"] = _persistent_memory_state(
+            MemorySnapshot(
+                wrapped_mechanism,
+                snapshot.agent_id,
+                snapshot.scope,
+                payload.get("wrapped_payload", {}),
+            )
+        )["payload"]
+    return {"mechanism": mechanism, "payload": payload}
+
+
+def _merge_generalization_experience_injection_audits(
+    memory_metrics: dict[str, dict[str, Any]],
+    checkpoint_results: list[dict[str, Any]],
+) -> None:
+    """Merge real heldout-clone injections into the run-level Expr health signal."""
+
+    for agent_id, memory in memory_metrics.items():
+        if str(memory.get("mechanism", "")) not in _EXPERIENCE_MECHANISMS:
+            continue
+        source_current = bool(memory.get("experience_injection_current", False))
+        current_version = int(memory.get("experience_version", 0))
+        audits = [
+            dict(item["experience_injection_audit"])
+            for item in checkpoint_results
+            if str(item.get("target_agent_id")) == agent_id
+            and isinstance(item.get("experience_injection_audit"), dict)
+            and bool(item["experience_injection_audit"].get("applicable", False))
+            and int(
+                item["experience_injection_audit"].get(
+                    "expected_experience_version", -1
+                )
+            )
+            == current_version
+        ]
+        generalization_current = bool(audits) and all(
+            bool(item.get("passed", False)) for item in audits
+        )
+        memory["experience_injection_current_training_source"] = source_current
+        memory["experience_injection_current_generalization"] = generalization_current
+        memory["generalization_experience_injection_audits"] = audits
+        memory["experience_injection_current"] = source_current or generalization_current
 
 
 def _summarize_checkpoint_results(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -928,6 +1217,12 @@ def _build_heldout_agents(
 
     provider = config["provider"]
     model = str(provider.get("model", "mock-deterministic-v1"))
+    reviewer_provider = config.get("experience_reviewer_provider", {})
+    reviewer_model = (
+        str(reviewer_provider.get("model", ""))
+        if isinstance(reviewer_provider, dict)
+        else ""
+    )
     experiment = dict(config.get("experiment", {}))
     table_rosters = experiment.get("heldout_table_rosters")
     opponent_cfg = dict(
@@ -944,5 +1239,12 @@ def _build_heldout_agents(
     for agent_id in agent_ids:
         if agent_id == target_id:
             continue
-        agents[agent_id] = build_agent(agent_id, opponent_cfg, context.llm_client, model)
+        agents[agent_id] = build_agent(
+            agent_id,
+            opponent_cfg,
+            context.llm_client,
+            model,
+            experience_reviewer_client=context.experience_reviewer_client,
+            experience_reviewer_model=reviewer_model,
+        )
     return agents

@@ -151,6 +151,7 @@ class ActionDecision(Serializable):
         amount：raise 的加注到总额；其他动作通常为 None。
         confidence：提供者声明的置信度或启发式置信度。
         reason_summary：可公开保存的简短理由，不包含长思维链。
+        intent：模型自述的短期策略意图或希望传达的桌面形象；不是客观事实。
         raw_response：可选原始结构化片段，默认只保存安全摘要。
     返回：动作决策对象。
     副作用：无。
@@ -163,6 +164,7 @@ class ActionDecision(Serializable):
     confidence: float = 1.0
     reason_summary: str = ""
     raw_response: JsonDict = field(default_factory=dict)
+    intent: str = ""
 
 
 @dataclass(slots=True)
@@ -213,6 +215,8 @@ class AgentObservation(Serializable):
         action_history：已公开行动历史。
         legal_actions：当前合法动作集合。
         seed：本手派生 seed，便于追踪。
+        dealer_seat/small_blind_seat/big_blind_seat：本手公开位置锚点。
+        small_blind_amount/big_blind_amount：可选盲注筹码金额；旧观察可为空。
     返回：观察对象。
     副作用：无。
     异常：无。
@@ -233,6 +237,11 @@ class AgentObservation(Serializable):
     action_history: list[JsonDict]
     legal_actions: LegalActionSet
     seed: int
+    dealer_seat: int | None = None
+    small_blind_seat: int | None = None
+    big_blind_seat: int | None = None
+    small_blind_amount: int | None = None
+    big_blind_amount: int | None = None
 
 
 @dataclass(slots=True)
@@ -280,6 +289,8 @@ class HandTrajectory(Serializable):
         final_stack：本手结束后的筹码。
         showdown_visible_cards：摊牌后按规则可见的牌，不含未公开私牌。
         summary：结构化短摘要，用于检索和经验更新。
+        won_amount：本手从所有主池/边池实际赢回的毛额；旧快照未知时为 None。
+        final_community_cards：结算时已经公开的最终公共牌面。
     返回：轨迹对象。
     副作用：无。
     异常：无。
@@ -295,6 +306,8 @@ class HandTrajectory(Serializable):
     final_stack: int
     showdown_visible_cards: dict[AgentId, list[str]]
     summary: str
+    won_amount: int | None = None
+    final_community_cards: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -458,6 +471,7 @@ class HandResult(Serializable):
         winners：赢家摘要。
         showdown_visible_cards：按可见性规则公开的摊牌牌面。
         showdown_ranks：摊牌玩家的牌型名称，未摊牌手为空。
+        community_cards：结算时已经公开的公共牌面。
     返回：手牌结果。
     副作用：无。
     异常：无。
@@ -472,6 +486,7 @@ class HandResult(Serializable):
     winners: list[JsonDict]
     showdown_visible_cards: dict[AgentId, list[str]]
     showdown_ranks: dict[AgentId, str] = field(default_factory=dict)
+    community_cards: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

@@ -60,6 +60,17 @@ def run_resolved_config(config: dict[str, Any]) -> ExperimentResult:
     output_root = Path(str(experiment.get("output_root", "outputs")))
     artifacts = ArtifactManager(output_root, run_id, config)
     llm_client = build_llm_client(config["provider"])
-    context = ExperimentContext(config=config, artifacts=artifacts, llm_client=llm_client)
+    raw_reviewer_provider = config.get("experience_reviewer_provider")
+    experience_reviewer_client = (
+        build_llm_client(raw_reviewer_provider)
+        if isinstance(raw_reviewer_provider, dict)
+        else None
+    )
+    context = ExperimentContext(
+        config=config,
+        artifacts=artifacts,
+        llm_client=llm_client,
+        experience_reviewer_client=experience_reviewer_client,
+    )
     scenario = get_scenario(scenario_name)
     return scenario.run(context)

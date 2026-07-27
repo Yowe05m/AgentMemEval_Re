@@ -186,6 +186,12 @@ def _build_pool(
 
     provider = config["provider"]  # type: ignore[index]
     model = str(provider.get("model", "mock-deterministic-v1"))  # type: ignore[union-attr]
+    reviewer_provider = config.get("experience_reviewer_provider", {})  # type: ignore[union-attr]
+    reviewer_model = (
+        str(reviewer_provider.get("model", ""))
+        if isinstance(reviewer_provider, dict)
+        else ""
+    )
     agent_cfg = dict(config.get("agent", {}))  # type: ignore[union-attr]
     personas = list(config.get("personas", []) or [])  # type: ignore[union-attr]
     agents: dict[str, LLMDecisionAgent] = {}
@@ -193,5 +199,16 @@ def _build_pool(
         cfg = dict(agent_cfg)
         if personas:
             cfg["persona"] = personas[index % len(personas)]
-        agents[agent_id] = build_agent(agent_id, cfg, context.llm_client, model)
+        agents[agent_id] = build_agent(
+            agent_id,
+            cfg,
+            context.llm_client,
+            model,
+            experience_reviewer_client=context.experience_reviewer_client,
+            experience_reviewer_model=reviewer_model,
+        )
+        agents[agent_id].bind_memory_persistence(
+            context.artifacts.agent_memory_directory(agent_id),
+            reference_root=context.artifacts.run_dir,
+        )
     return agents

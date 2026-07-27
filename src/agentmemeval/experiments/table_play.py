@@ -8,10 +8,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from typing import Any
 
 from agentmemeval.agents.base import LLMDecisionAgent
+from agentmemeval.audit.decision_trace import build_and_persist_decision_trace
 from agentmemeval.core.domain import (
     ActionDecision,
     DecisionEvent,
@@ -19,9 +21,11 @@ from agentmemeval.core.domain import (
     HandTrajectory,
     TableSpec,
 )
+from agentmemeval.core.poker_position import public_position_label
 from agentmemeval.environment.action_risk import build_call_risk
 from agentmemeval.environment.decision_facts import build_decision_facts
 from agentmemeval.environment.holdem_adapter import HoldemEnvironment
+from agentmemeval.environment.raise_sizing import build_raise_sizing_plan
 from agentmemeval.storage.artifacts import ArtifactManager
 
 
@@ -86,6 +90,20 @@ def run_single_hand(
         call_risk = build_call_risk(observation)
         decision_facts = build_decision_facts(observation)
         action, memory_context, metadata = agents[current].decide(observation)
+        decision_index = len(decision_events[current])
+        experience_reference = agents[current].experience_reference()
+        decision_trace = build_and_persist_decision_trace(
+            run_root=artifacts.run_dir,
+            observation=observation,
+            memory_context=memory_context,
+            raise_sizing=build_raise_sizing_plan(
+                observation,
+                agents[current].raise_sizing_policy,
+            ),
+            decision_index=decision_index,
+            expected_prompt=metadata.get("prompt", {}),
+            experience_reference=experience_reference,
+        )
         raw_payload = metadata.get("raw_decision", action.to_dict())
         raw_decision = ActionDecision(**raw_payload) if isinstance(raw_payload, dict) else action
         step_result = env.step(current, action)
@@ -122,7 +140,13 @@ def run_single_hand(
                 "committed_action": action.to_dict(),
                 "rewrite_reason": metadata.get("guard_errors", []),
                 "risk_gate_applied": False,
-                "memory_context": memory_context.to_dict(),
+                "decision_index": decision_index,
+                "observation_sha256": decision_trace["observation"]["sha256"],
+                "decision_trace": decision_trace,
+                "memory_context": _compact_memory_context(
+                    memory_context,
+                    experience_reference,
+                ),
                 **(hand_metadata or {}),
             }
         )
@@ -154,6 +178,12 @@ def run_single_hand(
             final_stack=result.final_stacks.get(agent_id, stacks.get(agent_id, 0)),
             showdown_visible_cards=result.showdown_visible_cards,
             summary=_summarize_trajectory(agent_id, result, decision_events.get(agent_id, [])),
+            won_amount=sum(
+                int(payout.get("amount", 0) or 0)
+                for payout in result.winners
+                if str(payout.get("agent_id", "")) == agent_id
+            ),
+            final_community_cards=list(result.community_cards),
         )
         if update_memory:
             agents[agent_id].observe_hand_finished(trajectory)
@@ -183,6 +213,26 @@ def run_single_hand(
     return result
 
 
+def _compact_memory_context(
+    memory_context: object,
+    experience_reference: dict[str, object] | None,
+) -> dict[str, object]:
+    """Persist facts plus an immutable experience reference, never the full Markdown body."""
+
+    payload = memory_context.to_dict()
+    experience = getattr(memory_context, "experience", None)
+    if experience is None:
+        payload["experience"] = None
+        return payload
+    reference = dict(experience_reference or {})
+    reference.setdefault("version", int(experience.version))
+    reference.setdefault("sha256", hashlib.sha256(str(experience.body).encode("utf-8")).hexdigest())
+    reference.setdefault("chars", len(str(experience.body)))
+    reference.setdefault("path", None)
+    payload["experience"] = reference
+    return payload
+
+
 def _summarize_trajectory(
     agent_id: str,
     result: HandResult,
@@ -201,12 +251,52 @@ def _summarize_trajectory(
     """
 
     event_list = events or []
-    actions = ", ".join(
-        f"{event.observation.phase}:{event.committed_action.action_type}"
-        for event in event_list
-    ) or "无决策"
+    decision_lines: list[str] = []
+    for event in event_list:
+        observation = event.observation
+        self_state = next(
+            (player for player in observation.players if player.agent_id == agent_id),
+            None,
+        )
+        amount = (
+            f" to {event.committed_action.amount}"
+            if event.committed_action.amount is not None
+            else ""
+        )
+        fallback_used = bool(event.llm_metadata.get("fallback_used"))
+        intent = "" if fallback_used else event.decision.intent.strip()[:60]
+        intent_status = (
+            "invalidated_by_guard_fallback"
+            if fallback_used
+            else "model_self_report_not_ground_truth"
+        )
+        decision_lines.append(
+            "{phase}[position={position},hole={hole},board={board},pot={pot},"
+            "to_call={to_call},stack={stack},intent={intent!r},"
+            "intent_status={intent_status}]=>{action}{amount}".format(
+                phase=observation.phase,
+                position=public_position_label(observation),
+                hole=" ".join(observation.hole_cards) or "none",
+                board=" ".join(observation.community_cards) or "none",
+                pot=observation.pot,
+                to_call=observation.to_call,
+                stack=self_state.stack if self_state is not None else "unknown",
+                intent=intent,
+                intent_status=intent_status,
+                action=event.committed_action.action_type,
+                amount=amount,
+            )
+        )
+    decisions = " | ".join(decision_lines) or "无决策"
+    won_amount = sum(
+        int(payout.get("amount", 0) or 0)
+        for payout in result.winners
+        if str(payout.get("agent_id", "")) == agent_id
+    )
     return (
-        f"{agent_id} 在 {result.hand_id} 的动作为 {actions}；"
-        f"最终净收益 {result.rewards.get(agent_id, 0)}；"
-        f"摊牌牌型 {result.showdown_ranks.get(agent_id, '未摊牌')}。"
+        f"决策轨迹：{decisions}；"
+        f"从底池赢回={won_amount}，"
+        f"终局净收益={result.rewards.get(agent_id, 0):+d}，"
+        f"终局牌型={result.showdown_ranks.get(agent_id, '未摊牌')}，"
+        f"公开摊牌={bool(result.showdown_visible_cards)}。"
     )

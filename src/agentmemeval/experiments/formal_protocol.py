@@ -218,6 +218,7 @@ def _without_memory_snapshot(snapshot: MemorySnapshot) -> MemorySnapshot:
             payload[key] = empty
         payload["hand_counter"] = 0
         payload["eligible_hand_counter"] = 0
+        payload["eligible_hands_since_sweep"] = 0
     else:
         raise ConfigError(
             f"pending_review: 无法无歧义移除机制 {mechanism!r} 的整份记忆"
@@ -246,7 +247,7 @@ def _clear_fact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     payload["retrieval_below_threshold_count"] = 0
     payload["retrieval_duplicate_excluded_count"] = 0
     payload["retrieval_audit_log"] = []
-    payload["next_record_index"] = 0
+    payload["next_record_index"] = 1
     return payload
 
 
@@ -255,4 +256,6 @@ def _clear_expr_payload(payload: dict[str, Any]) -> dict[str, Any]:
     payload["history"] = []
     payload["revision_log"] = []
     payload["skipped_trajectory_hand_ids"] = []
+    payload["context_build_count"] = 0
+    payload["last_injected_experience_version"] = None
     return payload

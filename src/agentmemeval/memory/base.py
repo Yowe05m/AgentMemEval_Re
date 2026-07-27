@@ -47,6 +47,12 @@ class NullMemory:
 
         self.agent_id = agent_id
         self.scope: MemoryScope = scope
+        self.frozen = False
+
+    def set_frozen(self, frozen: bool) -> None:
+        """Accept the shared frozen lifecycle; NullMemory remains stateless."""
+
+        self.frozen = bool(frozen)
 
     def build_context(self, observation: AgentObservation) -> MemoryContext:
         """

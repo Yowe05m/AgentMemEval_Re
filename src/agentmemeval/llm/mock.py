@@ -109,24 +109,28 @@ class MockLLMClient:
                 amount=amount,
                 confidence=min(0.99, score),
                 reason_summary="mock 根据可见牌力和风险偏置选择最小加注",
+                intent="用主动价值线争取跟注",
             )
         if legal.rule_for("call") and (obs.to_call <= 2 or score >= 0.48):
             return ActionDecision(
                 "call",
                 confidence=max(0.35, score),
                 reason_summary="mock 认为补齐成本可接受",
+                intent="保持范围并继续观察",
             )
         if legal.rule_for("check"):
             return ActionDecision(
                 "check",
                 confidence=0.8,
                 reason_summary="mock 在无需补注时选择过牌",
+                intent="控制投入并保持范围",
             )
         if legal.rule_for("fold"):
             return ActionDecision(
                 "fold",
                 confidence=0.75,
                 reason_summary="mock 在牌力或价格不足时弃牌",
+                intent="放弃当前底池并保留筹码",
             )
         if raise_rule and raise_rule.min_amount is not None:
             return ActionDecision(
@@ -134,8 +138,14 @@ class MockLLMClient:
                 amount=raise_rule.min_amount,
                 confidence=0.2,
                 reason_summary="mock 仅剩 raise 时使用最小金额",
+                intent="完成唯一合法动作",
             )
-        return ActionDecision("fold", confidence=0.1, reason_summary="mock 无合法偏好时兜底")
+        return ActionDecision(
+            "fold",
+            confidence=0.1,
+            reason_summary="mock 无合法偏好时兜底",
+            intent="安全结束当前决策",
+        )
 
     def _generic_dict(self, request: LLMRequest) -> dict[str, object]:
         """
@@ -149,13 +159,109 @@ class MockLLMClient:
         """
 
         persona = request.memory_context.persona.get("name", "neutral")
+        if request.metadata.get("response_schema") == "experience_revision_v1":
+            fact_ids = [str(value) for value in request.metadata.get("fact_ids", [])]
+            response: dict[str, object] = {
+                "keep": False,
+                "new_md": (
+                    "# 我的经验\n\n"
+                    "## 起手牌\n"
+                    "- 当入池成本相对筹码较低且起手牌有高张、对子或同花连通性时，"
+                    "可继续；面对显著加注时收紧边缘牌。\n\n"
+                    "## 翻牌后\n"
+                    "- 当有成牌或明确听牌且对手压力有限时，可扩大底池；若无后门与"
+                    "阻断价值，则控制投入。\n\n"
+                    "## 转牌 / 河牌\n"
+                    "- 后两街应依据牌力、底池赔率和下注尺度复核继续条件，避免因前街"
+                    "投入而自动跟注。\n\n"
+                    "## 对手类型应对\n"
+                    "- 面对持续跟注型对手时减少纯诈唬；面对高频弃牌线时，可在牌面"
+                    "有利时使用小尺度施压。\n\n"
+                    "## 注码与位置\n"
+                    "- 当位置靠后且行动信息充分时可适度放宽；若位置不利或补齐成本"
+                    "过高，则提高继续阈值。"
+                ),
+                "calibration_note": "mock 只验证完整文档替换契约。",
+                "self_check": "mock 未引入具体身份或未知 fact ID。",
+                "supporting_fact_ids": fact_ids[:1],
+            }
+            if request.metadata.get("experience_fact_classification_fields"):
+                response.update(
+                    {
+                        "contradicting_fact_ids": [],
+                        "noise_fact_ids": [],
+                    }
+                )
+            return response
+        if request.metadata.get("response_schema") == "experience_revision_v2":
+            trajectory_ids = [
+                str(value) for value in request.metadata.get("trajectory_ids", [])
+            ]
+            fact_ids = [str(value) for value in request.metadata.get("fact_ids", [])]
+            if not trajectory_ids:
+                return {
+                    "operation": "keep",
+                    "patches": [],
+                    "fact_assessments": [
+                        {"fact_id": fact_id, "label": "irrelevant"}
+                        for fact_id in fact_ids
+                    ],
+                    "calibration_note": "mock 没有轨迹证据，保留旧文档。",
+                    "self_check": "未生成无证据规则。",
+                }
+            phase_to_section = {
+                "preflop": "起手牌",
+                "flop": "翻牌后",
+                "turn": "转牌 / 河牌",
+                "river": "转牌 / 河牌",
+            }
+            return {
+                "operation": "patch",
+                "patches": [
+                    {
+                        "section": phase_to_section.get(
+                            request.observation.phase, "注码与位置"
+                        ),
+                        "op": "add",
+                        "rule_id": "",
+                        "when": ["入池成本相对当前筹码较低且牌力有继续潜力"],
+                        "guidance": "结合位置与底池赔率选择跟注或小尺度加注",
+                        "invalidators": ["补齐成本显著上升或有效筹码过浅"],
+                        "basis": "observed_evidence",
+                        "status": "tentative",
+                        "supporting_trajectory_ids": [trajectory_ids[0]],
+                        "supporting_fact_ids": [],
+                    }
+                ],
+                "fact_assessments": [
+                    {"fact_id": fact_id, "label": "irrelevant"}
+                    for fact_id in fact_ids
+                ],
+                "calibration_note": "mock 仅生成一条待验证结构化规则。",
+                "self_check": "mock 未把未选择动作当成反事实证据。",
+            }
         return {
             "keep": False,
             "curated": f"mock 已按 {persona} 保留最相关的记忆摘要。",
-            "new_md": "## 当前经验\n- 观察位置、入池成本和摊牌反馈，优先保留可迁移规律。",
+            "new_md": (
+                "# 我的经验\n\n"
+                "## 起手牌\n"
+                "- 当入池成本相对筹码较低且起手牌有高张、对子或同花连通性时，可继续；"
+                "面对显著加注时收紧边缘牌。\n\n"
+                "## 翻牌后\n"
+                "- 有成牌或明确听牌且对手压力有限时再扩大底池；无后门与阻断价值时控制投入。\n\n"
+                "## 转牌 / 河牌\n"
+                "- 后两街依据牌力、底池赔率和下注尺度复核继续条件，不因前街投入自动跟注。\n\n"
+                "## 对手类型应对\n"
+                "- 面对持续跟注型对手减少纯诈唬；面对高频弃牌线可在牌面有利时使用小尺度施压。\n\n"
+                "## 注码与位置\n"
+                "- 位置靠后且行动信息充分时可适度放宽；位置不利或补齐成本过高时提高继续阈值。"
+            ),
             "supporting_fact_ids": [
                 fact.record_id for fact in request.memory_context.facts[:3]
             ],
+            "contradicting_fact_ids": [],
+            "noise_fact_ids": [],
             "calibration_note": "mock 离线更新，无真实模型自我反思。",
             "self_check": "mock 未发现事实冲突。",
         }

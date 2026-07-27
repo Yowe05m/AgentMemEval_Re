@@ -165,6 +165,7 @@ class ActionGuard:
             amount=amount,
             confidence=decision.confidence,
             reason_summary=decision.reason_summary,
+            intent=decision.intent,
             raw_response=dict(decision.raw_response),
         )
 
@@ -228,10 +229,23 @@ def coerce_decision(payload: object) -> ActionDecision:
         confidence = 0.0
     confidence = min(1.0, max(0.0, confidence))
     reason = payload.get("reason_summary") or payload.get("reason") or ""
+    intent = payload.get("intent") or payload.get("declared_intent") or ""
+    safe_raw_fields = {
+        "action_type",
+        "type",
+        "amount",
+        "confidence",
+        "reason_summary",
+        "reason",
+        "intent",
+        "declared_intent",
+        "provider_recovered_from_truncation",
+    }
     return ActionDecision(
         action_type=action_type,
         amount=amount,
         confidence=confidence,
         reason_summary=str(reason)[:300],
-        raw_response={key: value for key, value in payload.items() if key != "chain_of_thought"},
+        intent=str(intent)[:60],
+        raw_response={key: value for key, value in payload.items() if key in safe_raw_fields},
     )

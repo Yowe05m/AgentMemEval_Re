@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from pathlib import Path
 
 from agentmemeval.core.domain import (
     ActionDecision,
@@ -119,7 +120,12 @@ class LLMDecisionAgent:
             model=getattr(self.llm_client, "model", self.model),
             elapsed_ms=elapsed_ms,
             prompt_tokens=max(1, len(system_prompt.split()) + len(user_prompt.split())),
-            completion_tokens=max(1, len(raw_decision.reason_summary.split()) + 4),
+            completion_tokens=max(
+                1,
+                len(raw_decision.reason_summary.split())
+                + len(raw_decision.intent.split())
+                + 5,
+            ),
         )
         metadata = {
             "raw_decision": raw_decision.to_dict(),
@@ -188,6 +194,34 @@ class LLMDecisionAgent:
         """
 
         self.memory.restore(snapshot)
+
+    def bind_memory_persistence(
+        self,
+        directory: str | Path,
+        *,
+        reference_root: str | Path,
+    ) -> None:
+        """Bind file-backed memory artifacts when the selected mechanism supports them."""
+
+        binder = getattr(self.memory, "bind_persistence", None)
+        if callable(binder):
+            binder(Path(directory), reference_root=Path(reference_root))
+
+    def set_memory_frozen(self, frozen: bool) -> None:
+        """Switch a memory clone into or out of its read-only lifecycle."""
+
+        setter = getattr(self.memory, "set_frozen", None)
+        if callable(setter):
+            setter(bool(frozen))
+
+    def experience_reference(self) -> dict[str, object] | None:
+        """Return a compact pointer to the canonical experience document, if present."""
+
+        reference = getattr(self.memory, "experience_reference", None)
+        if not callable(reference):
+            return None
+        payload = reference()
+        return dict(payload) if isinstance(payload, dict) else None
 
     def memory_metrics(self) -> dict[str, object]:
         """

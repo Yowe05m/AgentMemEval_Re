@@ -1,0 +1,55 @@
+extends: task8b_expedited_base.yaml
+
+# Independent emergency matrix. It does not modify or replace the frozen six-seed
+# TASK8B contract. All decision and experience calls stay on the host-local Qwen
+# service; factual retrieval stays on the host-local BGE-M3 service.
+provider:
+  provider: openai_compatible
+  model: qwen/qwen3.5-9b
+  base_url_env: LOCAL_LLM_BASE_URL
+  api_key_env: LOCAL_LLM_API_KEY
+  api_key_required: false
+  temperature: 0.0
+  max_output_tokens: 512
+  experience_max_output_tokens: 512
+  experience_repair_max_output_tokens: 384
+  timeout_seconds: 120
+  max_retries: 1
+  rate_limit_policy: local_manual
+  structured_output_mode: json_schema
+  response_model_identity_policy: strict_exact
+  response_model_aliases: [qwen/qwen3.5-9b]
+
+agent:
+  embedding_backend: bgem3_hybrid_http
+  embedding_model: BAAI/bge-m3
+  embedding_base_url_env: BGEM3_BASE_URL
+  embedding_api_key_env: BGEM3_API_KEY
+  embedding_api_key_required: false
+  embedding_timeout_seconds: 120
+
+experiment:
+  run_mode: formal
+  protocol_variant: task8b_timeboxed_3seed_qwen_bgem3_v1
+  protocol_readiness: ready
+  statistical_plan_status: frozen
+  required_seed_pairs: 3
+  train_hands: 270
+  checkpoint_interval: 0
+  checkpoint_set: [30, 90, 150, 270]
+  checkpoint_test_hands: 60
+  # The parent has a mapping keyed by its 30/75/150/300 contract. Set it to
+  # null here so the worker can install the independent 30/90/150/270 mapping
+  # after inheritance without retaining stale parent keys.
+  checkpoint_test_hands_by_checkpoint: null
+  heldout_table_set: [H01, H02, H03]
+  timeboxed_protocol:
+    seed_count: 3
+    seeds: [2026100101, 2026100102, 2026100103]
+    shard_a_planned_hands: 2520
+    shard_b_planned_hands: 2550
+    checkpoint_set: [30, 90, 150, 270]
+    decision_model: qwen/qwen3.5-9b
+    embedding_model: BAAI/bge-m3
+    evidence_scope: descriptive_n3_not_equivalence_or_significance
+    frozen_before_run: true

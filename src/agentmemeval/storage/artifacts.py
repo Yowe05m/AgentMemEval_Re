@@ -21,7 +21,6 @@ from typing import Any
 from agentmemeval.config.loader import dump_yaml
 from agentmemeval.core.domain import ExperimentResult, MemorySnapshot, RunManifest
 from agentmemeval.prompts.decision import BASE_SYSTEM_PROMPT, PROMPT_TEMPLATE_VERSION
-from agentmemeval.prompts.experience_update import EXPERIENCE_UPDATE_PROMPT
 from agentmemeval.storage.jsonl_store import JsonlStore
 from agentmemeval.storage.snapshots import save_snapshot
 
@@ -146,6 +145,21 @@ class ArtifactManager:
         save_snapshot(path, snapshot)
         return str(path)
 
+    def agent_memory_directory(
+        self,
+        agent_id: str,
+        *,
+        namespace: tuple[str, ...] = (),
+    ) -> Path:
+        """Return an isolated, traversal-safe directory for one Agent's live memory files."""
+
+        components = ["agent_memory"]
+        components.extend(_safe_path_component(value) for value in namespace)
+        components.append(_safe_path_component(agent_id))
+        path = self.run_dir.joinpath(*components)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def write_json(self, relative_path: str, data: dict[str, Any]) -> str:
         """
         功能：写入 JSON 文件。
@@ -211,6 +225,18 @@ def make_run_id(scenario: str, seed: int) -> str:
     return f"{stamp}_{clean}_seed{seed}"
 
 
+def _safe_path_component(value: str) -> str:
+    """Create a readable unique path component without accepting traversal syntax."""
+
+    raw = str(value)
+    clean = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in raw).strip("._")
+    clean = clean[:80] or "agent"
+    if clean == raw:
+        return clean
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
+    return f"{clean}_{digest}"
+
+
 def get_code_version(cwd: Path) -> str:
     """
     功能：获取当前 Git commit。
@@ -239,9 +265,82 @@ def get_code_version(cwd: Path) -> str:
 def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any]:
     """Collect reproducibility metadata without persisting API keys or other secrets."""
 
+    from agentmemeval.memory.experiential import (
+        EXPERIENCE_DOCUMENT_CONTRACT_VERSION,
+        EXPERIENCE_FULL_DOCUMENT_PROMPT_VERSION,
+        EXPERIENCE_FULL_DOCUMENT_REVISION_SCHEMA_VERSION,
+        EXPERIENCE_LEGACY_FULL_DOCUMENT_PROMPT_VERSION,
+        EXPERIENCE_PAPER_DOCUMENT_CONTRACT_VERSION,
+        EXPERIENCE_PAPER_FULL_DOCUMENT_PROMPT_VERSION,
+        EXPERIENCE_PAPER_REVISION_SYSTEM_TEMPLATE,
+        EXPERIENCE_PATCH_PROMPT_VERSION,
+        EXPERIENCE_PATCH_REVISION_SCHEMA_VERSION,
+        EXPERIENCE_PATCH_REVISION_SYSTEM_TEMPLATE,
+        EXPERIENCE_REVISION_SYSTEM_TEMPLATE,
+        EXPERIENCE_TRANSFERABLE_DOCUMENT_CONTRACT_VERSION,
+        EXPERIENCE_TRANSFERABLE_REVISION_SYSTEM_TEMPLATE,
+    )
+    from agentmemeval.prompts.experience_update import (
+        EXPERIENCE_PAPER_UPDATE_PROMPT,
+        EXPERIENCE_PATCH_UPDATE_PROMPT,
+        EXPERIENCE_TRANSFERABLE_QUALITY_PROMPT,
+        EXPERIENCE_UPDATE_PROMPT,
+    )
+
     provider = dict(config.get("provider", {}))
     agent = dict(config.get("agent", {}))
     experiment = dict(config.get("experiment", {}))
+    experience_semantics_mode = str(
+        agent.get(
+            "experience_semantics_mode",
+            agent.get("memory_semantics_mode", "quality_filtered_v2"),
+        )
+    )
+    revision_contract = str(
+        agent.get(
+            "experience_revision_contract",
+            (
+                "full_document_v1"
+                if experience_semantics_mode == "paper_faithful_v1"
+                else "structured_patch_v2"
+            ),
+        )
+    )
+    full_document_revision = revision_contract == "full_document_v1"
+    document_contract = str(
+        agent.get(
+            "experience_document_contract",
+            EXPERIENCE_DOCUMENT_CONTRACT_VERSION,
+        )
+    )
+    if not full_document_revision:
+        active_experience_prompt = EXPERIENCE_PATCH_UPDATE_PROMPT
+        active_revision_prompt_version = EXPERIENCE_PATCH_PROMPT_VERSION
+        active_revision_system_template = EXPERIENCE_PATCH_REVISION_SYSTEM_TEMPLATE
+    elif document_contract == EXPERIENCE_PAPER_DOCUMENT_CONTRACT_VERSION:
+        active_experience_prompt = EXPERIENCE_PAPER_UPDATE_PROMPT
+        active_revision_prompt_version = EXPERIENCE_PAPER_FULL_DOCUMENT_PROMPT_VERSION
+        active_revision_system_template = EXPERIENCE_PAPER_REVISION_SYSTEM_TEMPLATE
+    elif document_contract == EXPERIENCE_TRANSFERABLE_DOCUMENT_CONTRACT_VERSION:
+        # This is the exact common update instruction assembled at runtime for
+        # transferable full-document revisions.  The quality prompt is not a
+        # generic advisory: it is always appended after the base instruction.
+        active_experience_prompt = (
+            f"{EXPERIENCE_UPDATE_PROMPT}\n\n{EXPERIENCE_TRANSFERABLE_QUALITY_PROMPT}"
+        )
+        active_revision_prompt_version = EXPERIENCE_FULL_DOCUMENT_PROMPT_VERSION
+        active_revision_system_template = EXPERIENCE_TRANSFERABLE_REVISION_SYSTEM_TEMPLATE
+    else:
+        # Preserve the original five-section full-document contract and its
+        # historical prompt identity for legacy configurations.
+        active_experience_prompt = EXPERIENCE_UPDATE_PROMPT
+        active_revision_prompt_version = EXPERIENCE_LEGACY_FULL_DOCUMENT_PROMPT_VERSION
+        active_revision_system_template = EXPERIENCE_REVISION_SYSTEM_TEMPLATE
+    active_revision_schema_version = (
+        EXPERIENCE_FULL_DOCUMENT_REVISION_SCHEMA_VERSION
+        if full_document_revision
+        else EXPERIENCE_PATCH_REVISION_SCHEMA_VERSION
+    )
     behavior_thresholds = experiment.get("behavior_thresholds")
     behavior_threshold_sha256 = (
         hashlib.sha256(
@@ -304,7 +403,9 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
                 "provider", "temperature", "max_output_tokens",
                 "experience_max_output_tokens",
                 "experience_repair_max_output_tokens", "timeout_seconds",
-                "max_retries", "structured_output_mode", "rate_limit_policy",
+                "max_retries", "structured_output_mode",
+                "experience_structured_output_mode", "thinking_mode",
+                "rate_limit_policy",
                 "service_startup_parameters", "served_model_name",
                 "runtime_probe_python",
             )
@@ -316,8 +417,44 @@ def collect_runtime_metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any
                 BASE_SYSTEM_PROMPT.encode("utf-8")
             ).hexdigest(),
             "experience_update_sha256": hashlib.sha256(
-                EXPERIENCE_UPDATE_PROMPT.encode("utf-8")
+                active_experience_prompt.encode("utf-8")
             ).hexdigest(),
+            "experience_revision_prompt_version": active_revision_prompt_version,
+            "experience_revision_schema_version": active_revision_schema_version,
+            "experience_document_contract_version": document_contract,
+            "experience_revision_system_template_sha256": hashlib.sha256(
+                active_revision_system_template.encode("utf-8")
+            ).hexdigest(),
+            "experience_revision_semantics": (
+                "keep_authoritative_fail_closed_no_truncation"
+            ),
+            "experience_dynamic_request_sha256_recorded": True,
+            "experience_dynamic_request_sha256_location": (
+                "memory_snapshot.revision_log[].prompt_sha256"
+            ),
+        },
+        "experience": {
+            "revision_strategy": agent.get(
+                "experience_revision_strategy", "deterministic"
+            ),
+            "window_size": int(agent.get("window_size", 8)),
+            "semantics_mode": experience_semantics_mode,
+            "revision_contract": revision_contract,
+            "document_contract": document_contract,
+            "failure_policy": agent.get(
+                "experience_failure_policy", "fail_closed_keep"
+            ),
+            "max_chars": int(agent.get("experience_max_chars", 2400)),
+            "prompt_token_budget": int(
+                agent.get("experience_prompt_token_budget", 32768)
+            ),
+            "update_period": int(agent.get("experience_update_period", 1)),
+            "max_output_tokens": int(
+                provider.get("experience_max_output_tokens", 3072)
+            ),
+            "repair_max_output_tokens": int(
+                provider.get("experience_repair_max_output_tokens", 2048)
+            ),
         },
         "packages": {
             name: _package_version(name) for name in ("torch", "vllm", "treys")

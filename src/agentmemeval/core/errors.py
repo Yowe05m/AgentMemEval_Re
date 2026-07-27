@@ -65,3 +65,16 @@ class ProviderError(AgentMemEvalError):
     异常：无。
     设计说明：Provider 错误与 Agent 逻辑解耦，便于替换真实或 mock 后端。
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostics: dict[str, object] | None = None,
+        retryable: bool = True,
+    ) -> None:
+        """Carry safe structured diagnostics without embedding them in error text."""
+
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics or {})
+        self.retryable = bool(retryable)

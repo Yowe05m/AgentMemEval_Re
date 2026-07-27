@@ -236,6 +236,17 @@ class HoldemEnvironment:
             action_history=list(self.action_history),
             legal_actions=self.legal_actions(agent_id),
             seed=self.seed,
+            dealer_seat=self.players[self.dealer_index].seat,
+            small_blind_seat=next(
+                (item.seat for item in self.players if item.agent_id == self.small_blind_agent_id),
+                None,
+            ),
+            big_blind_seat=next(
+                (item.seat for item in self.players if item.agent_id == self.big_blind_agent_id),
+                None,
+            ),
+            small_blind_amount=self.table_spec.small_blind,
+            big_blind_amount=self.table_spec.big_blind,
         )
 
     def legal_actions(self, agent_id: AgentId) -> LegalActionSet:
@@ -628,6 +639,7 @@ class HoldemEnvironment:
             winners=winners,
             showdown_visible_cards=showdown_visible_cards,
             showdown_ranks=showdown_ranks or {},
+            community_cards=list(self.community_cards),
         )
 
     def _skip_unable_actors(self) -> None:

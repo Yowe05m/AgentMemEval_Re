@@ -32,3 +32,4 @@ class ExperimentContext:
     config: dict[str, Any]
     artifacts: ArtifactManager
     llm_client: LLMClient
+    experience_reviewer_client: LLMClient | None = None

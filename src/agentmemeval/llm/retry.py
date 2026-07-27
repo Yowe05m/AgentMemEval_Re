@@ -36,6 +36,8 @@ def retry_call(fn: Callable[[], T], max_retries: int, delay_seconds: float = 0.2
             return fn(), attempt
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+            if getattr(exc, "retryable", True) is False:
+                raise
             if attempt >= max_retries:
                 break
             time.sleep(delay_seconds)
