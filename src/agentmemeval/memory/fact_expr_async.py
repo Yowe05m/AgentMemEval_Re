@@ -1025,15 +1025,38 @@ class FactExprAsyncMemory:
             max_experience_version=restored_expr.current.version,
         )
         if self.fact_state_path is not None:
-            _assert_regular_exact_file(
-                self.fact_state_path,
-                _canonical_fact_state_bytes(restored_fact_state),
-            )
+            restored_fact_state_bytes = _canonical_fact_state_bytes(restored_fact_state)
+            current_fact_state_bytes = self._canonical_fact_state_bytes()
+            _assert_regular_exact_file(self.fact_state_path, current_fact_state_bytes)
+            if current_fact_state_bytes:
+                _assert_regular_exact_file(
+                    self.fact_state_path,
+                    restored_fact_state_bytes,
+                )
+            elif restored_fact_state_bytes:
+                # A fresh formal run binds an empty state view before restoring
+                # its clone snapshot.  Materialize only that verified-empty
+                # destination; non-empty divergent state remains fail-closed.
+                _atomic_replace_exact_file(
+                    self.fact_state_path,
+                    restored_fact_state_bytes,
+                )
         if self.sweep_log_path is not None:
-            _assert_regular_exact_file(
-                self.sweep_log_path,
-                _canonical_sweep_log_bytes(restored_sweep_log),
-            )
+            restored_sweep_log_bytes = _canonical_sweep_log_bytes(restored_sweep_log)
+            current_sweep_log_bytes = _canonical_sweep_log_bytes(self.sweep_log)
+            _assert_regular_exact_file(self.sweep_log_path, current_sweep_log_bytes)
+            if current_sweep_log_bytes:
+                _assert_regular_exact_file(
+                    self.sweep_log_path,
+                    restored_sweep_log_bytes,
+                )
+            elif restored_sweep_log_bytes:
+                # Apply the same empty-only materialization rule to the
+                # append-only sweep prefix restored with the clone snapshot.
+                _atomic_replace_exact_file(
+                    self.sweep_log_path,
+                    restored_sweep_log_bytes,
+                )
 
         self.expr._atomic_write_experience(restored_expr.current.body)
         self.fact = restored_fact
