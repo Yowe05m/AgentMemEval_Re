@@ -3,12 +3,20 @@ from pathlib import Path
 from agentmemeval.config.loader import load_config
 from agentmemeval.experiments.task8b_timeboxed import (
     FORMAL_SEEDS,
+    _bgem3_health_candidates,
     build_task_config,
     render_worker_manifest,
     worker_plan,
 )
 
 BASE = Path("configs/formal/task8b_timeboxed_3seed_qwen_bgem3.yaml")
+
+
+def test_bgem3_health_probe_supports_scoring_route_base() -> None:
+    assert _bgem3_health_candidates("http://127.0.0.1:8001/v1/bgem3") == [
+        "http://127.0.0.1:8001/v1/bgem3/health",
+        "http://127.0.0.1:8001/health",
+    ]
 
 
 def test_timeboxed_shards_preserve_order_and_documented_budgets(tmp_path: Path) -> None:

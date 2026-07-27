@@ -495,9 +495,7 @@ def _probe_services(config: dict[str, Any]) -> dict[str, Any]:
     )
     if "qwen" not in json.dumps(models, ensure_ascii=False).lower():
         raise ConfigError("本地 decision /models 未报告 Qwen")
-    bgem3_candidates = [f"{embedding_base.rstrip('/')}/health"]
-    if embedding_base.rstrip("/").endswith("/v1"):
-        bgem3_candidates.append(f"{embedding_base.rstrip('/')[:-3]}/health")
+    bgem3_candidates = _bgem3_health_candidates(embedding_base)
     health = _probe_candidates(
         bgem3_candidates,
         timeout=float(agent.get("embedding_timeout_seconds", 120)),
@@ -512,6 +510,16 @@ def _probe_services(config: dict[str, Any]) -> dict[str, Any]:
         "embedding_health": health,
         "checked_at_utc": _utc_now(),
     }
+
+
+def _bgem3_health_candidates(base_url: str) -> list[str]:
+    base = base_url.rstrip("/")
+    candidates = [f"{base}/health"]
+    for suffix in ("/v1/bgem3", "/v1"):
+        if base.endswith(suffix):
+            candidates.append(f"{base[: -len(suffix)]}/health")
+            break
+    return list(dict.fromkeys(candidates))
 
 
 def _probe_candidates(urls: list[str], *, timeout: float) -> Any:
