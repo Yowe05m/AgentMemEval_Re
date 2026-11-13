@@ -120,7 +120,8 @@ def _issue(case, prior):
         validated.append(intent)
 
     result = SimpleNamespace(intent_id=intent, prior_terminal_receipt_sha256="a" * 64,
-                             eligibility_receipt_sha256="b" * 64, validate=validate)
+                             eligibility_receipt_sha256="b" * 64, validate=validate,
+                             classification="unstarted_scheduler_deadline")
     case.issued[intent] = result
     return validated
 
@@ -129,6 +130,16 @@ def _check(case, contract):
     # Production invokes the gate while holding this same lifecycle lock.
     with case.store.lock():
         case.executor._validate_e0_retry(_worker(contract))
+
+
+def test_executed_resource_terminal_never_grants_unstarted_retry_eligibility(lineage):
+    prior = _contract(lineage)
+    _record(lineage, prior)
+    _issue(lineage, prior)
+    issued = lineage.issued[canonical_intent_id(prior)]
+    issued.classification = "resource_terminal_observed"
+    with pytest.raises(SubmissionDisabled, match="does not grant retry"):
+        _check(lineage, _contract(lineage, attempt=2, prior=prior))
 
 
 def _new_source(case, contract):

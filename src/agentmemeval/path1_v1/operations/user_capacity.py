@@ -379,9 +379,12 @@ def validate_user_association_capacity(
         raise SubmissionDisabled("invalid E0 terminal resolution scope")
     if resolutions:
         from agentmemeval.path1_v1.operations.e0_reconcile import E0TerminalResolution
+        from agentmemeval.path1_v1.operations.resource_terminal import ResourceTerminalResolution
 
-        if store is None or any(type(value) is not E0TerminalResolution
-                                for value in resolutions.values()):
+        if store is None or any(
+            type(value) not in {E0TerminalResolution, ResourceTerminalResolution}
+            for value in resolutions.values()
+        ):
             raise SubmissionDisabled("typed durable E0 terminal resolutions required")
         for intent, resolution in resolutions.items():
             if resolution.intent_id != intent:
@@ -433,11 +436,12 @@ def validate_user_association_capacity(
         if len(represented) > 1:
             raise SubmissionDisabled("one durable intent matches multiple scheduler allocations")
         if intent in resolutions:
+            expected_state = getattr(resolutions[intent], "scheduler_state", "DEADLINE")
             if cleanup_failed or any(
-                job.state != "DEADLINE" or job.job_id != resolutions[intent].job_id
+                job.state != expected_state or job.job_id != resolutions[intent].job_id
                 for job in represented
             ):
-                raise SubmissionDisabled("scheduler/cleanup contradicts sealed unstarted E0")
+                raise SubmissionDisabled("scheduler/cleanup contradicts sealed E0 terminal")
             continue
         if (
             not represented

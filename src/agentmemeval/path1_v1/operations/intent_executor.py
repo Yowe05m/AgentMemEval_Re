@@ -563,19 +563,19 @@ class DurableIntentExecutor:
                 claims = [claim for claim in snapshot.claims if claim.intent_id == intent]
                 if (
                     len(claims) != 1
-                    or claims[0].status not in {"started", "failed"}
+                    or claims[0].status not in {"started", "failed", "completed"}
                     or claims[0].metadata
                     != {"purpose": "slurm_job_container", "request_sha256": request.request_sha256}
                     or claims[0].run_directory != str(self._path(request.spec.work_dir).resolve())
                 ):
                     raise StoreIntegrityError("attempted submission has no matching consumed claim")
-                if claims[0].status == "failed":
+                if claims[0].status in {"failed", "completed"}:
                     from agentmemeval.path1_v1.operations.e0_reconcile import (
                         validate_e0_terminal_receipt,
                     )
 
                     # A scheduler row alone cannot close a consumed claim. Only
-                    # the independently sealed, unstarted E0 path is accepted.
+                    # independently sealed E0 terminal paths are accepted.
                     validate_e0_terminal_receipt(record, claims[0], store=self.store)
                 digest(record["manifest_sha256"])
                 manifest_path = expected_dir / "invocation.json"
@@ -813,6 +813,8 @@ class DurableIntentExecutor:
         if contract["job"]["attempt"] == 1:
             return
         resolution = resolve_e0_terminal_intent(self.store, retry["prior_intent_id"])
+        if getattr(resolution, "classification", None) != "unstarted_scheduler_deadline":
+            raise SubmissionDisabled("executed resource terminal does not grant retry eligibility")
         if retry != {
             "prior_intent_id": resolution.intent_id,
             "prior_terminal_receipt_sha256": resolution.prior_terminal_receipt_sha256,
@@ -871,7 +873,7 @@ class DurableIntentExecutor:
 
             snapshot = self.store.read_registry()
             for claim in snapshot.claims:
-                if claim.status == "failed" and claim.intent_id in ledger["intents"]:
+                if claim.status in {"failed", "completed"} and claim.intent_id in ledger["intents"]:
                     resolved_e0[claim.intent_id] = validate_e0_terminal_receipt(
                         ledger["intents"][claim.intent_id], claim, store=self.store
                     )
@@ -883,9 +885,18 @@ class DurableIntentExecutor:
             )
 
             if type(observed) is UserAssociationSnapshot:
-                return validate_user_association_capacity(
+                result = validate_user_association_capacity(
                     observed, request, ledger, stage_cap, self.clock(), validated_phase,
                     resolved_e0=resolved_e0, store=self.store)
+                # Raw archive/source verification can be slow. Capacity must
+                # still be fresh after that I/O, immediately before return.
+                finished_at = utc(self.clock())
+                if not (
+                    utc(observed.observed_at) <= utc(observed.completed_at) <= finished_at
+                    and 0 <= (finished_at - utc(observed.observed_at)).total_seconds() <= 30
+                ):
+                    raise SubmissionDisabled("capacity verification outlived snapshot freshness")
+                return result
         if (
             not isinstance(observed, AccountSnapshot)
             or observed.capacity is None
@@ -917,9 +928,10 @@ class DurableIntentExecutor:
             represented = [job for job in jobs if job.matches(previous)]
             if intent in resolved_e0:
                 resolved_e0[intent].validate(record, store=self.store)
-                if any(job.state != "DEADLINE" or job.job_id != resolved_e0[intent].job_id
+                expected_state = getattr(resolved_e0[intent], "scheduler_state", "DEADLINE")
+                if any(job.state != expected_state or job.job_id != resolved_e0[intent].job_id
                        for job in represented):
-                    raise SubmissionDisabled("scheduler contradicts sealed unstarted E0")
+                    raise SubmissionDisabled("scheduler contradicts sealed E0 terminal")
                 continue
             if not represented or (validated_phase == "E0" and not any(
                 job.active for job in represented
@@ -931,6 +943,12 @@ class DurableIntentExecutor:
         available = min(stage_cap - own, min(observed.capacity.max_submit_jobs, 8) - total - 2)
         if available < 1:
             raise SubmissionDisabled("fresh account/stage capacity has no admission slot")
+        finished_at = utc(self.clock())
+        if not 0 <= (finished_at - utc(observed.observed_at)).total_seconds() <= 30:
+            raise SubmissionDisabled("capacity verification outlived snapshot freshness")
+        observed.capacity.validate(
+            cluster=self.cluster, account=self.account, now=finished_at, max_age=30
+        )
         return {
             "snapshot_sha256": observed.evidence_sha256,
             "limit_evidence_sha256": observed.capacity.evidence_sha256,

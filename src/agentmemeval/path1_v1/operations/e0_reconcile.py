@@ -246,7 +246,8 @@ def _baseline(path: Path, expected_sha256: str) -> list[dict]:
 
 
 def _bound_inputs(
-    store: CampaignStore, descriptor_path: Path, expected_sha: str, record: dict, claim: RunClaim
+    store: CampaignStore, descriptor_path: Path, expected_sha: str, record: dict, claim: RunClaim,
+    *, require_empty_output: bool = True,
 ) -> dict:
     descriptor_path = _path(descriptor_path)
     _require(_sha(descriptor_path) == digest(expected_sha), "original descriptor changed")
@@ -359,10 +360,11 @@ def _bound_inputs(
         == {"purpose": "slurm_job_container", "request_sha256": request.request_sha256},
         "durable accepted intent/claim differs",
     )
-    _require(
-        list(_path(request.spec.work_dir).iterdir()) == [],
-        "a never-started job cannot contain worker or Slurm output",
-    )
+    if require_empty_output:
+        _require(
+            list(_path(request.spec.work_dir).iterdir()) == [],
+            "a never-started job cannot contain worker or Slurm output",
+        )
     manifest_path = invocation / "invocation.json"
     manifest = _json(manifest_path)
     ready, go, result = (
@@ -750,6 +752,11 @@ def validate_e0_terminal_receipt(
     record: dict, claim: RunClaim, *, store: CampaignStore
 ) -> E0TerminalResolution:
     """Re-read authoritative SQLite plus original/sealed bytes; no fresh Slurm RPC is needed."""
+    if (type(claim.terminal_receipt) is dict
+            and claim.terminal_receipt.get("kind") == "path1_e0_resource_terminal_v1"):
+        from agentmemeval.path1_v1.operations.resource_terminal import validate_resource_terminal
+
+        return validate_resource_terminal(record, claim, store=store)
     snapshot, current_record, current_claim = _stored(store, claim.intent_id)
     _require(
         record == current_record and claim == current_claim and claim.status == "failed",
