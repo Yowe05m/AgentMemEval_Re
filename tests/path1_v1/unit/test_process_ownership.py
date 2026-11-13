@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
 import signal
 import weakref
-from dataclasses import replace
+from contextlib import nullcontext
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -332,3 +335,113 @@ def test_failed_spawn_only_cleans_waitable_direct_child_and_records_unknown(
     assert receipt.direct_child_killed is (not lost_child)
     assert bool(module._UNVERIFIED_CHILDREN) is lost_child
     assert ((77, 9) in events) is (not lost_child)
+
+
+def managed_sink_fixture(monkeypatch, mode, *, verified=True):
+    events = []
+    handlers = {}
+    monkeypatch.setattr(module, "_linux", lambda: None)
+    monkeypatch.setattr(module.signal, "SIGHUP", 1, raising=False)
+    monkeypatch.setattr(module.signal, "getsignal", lambda sig: handlers.get(sig, "old"))
+    monkeypatch.setattr(
+        module.signal, "signal", lambda sig, value: handlers.__setitem__(sig, value)
+    )
+    binding = module.ProcessBinding("c", "i", None, "a" * 64, "model_service", "s")
+    identity = module.ProcessIdentity("host", "boot", 1000, 77, "22", 77, 77, (), None, None)
+    receipt = module.CleanupReceipt(binding, identity, 0, True, False, verified, verified, (), ())
+    failure = module.SpawnFailureReceipt(binding, 77, True, True, False, ("identity failed",))
+    closed = False
+
+    def close(**_):
+        nonlocal closed
+        if not closed:
+            events.append("cleanup")
+            closed = True
+        return receipt
+
+    owner = SimpleNamespace(close=close)
+
+    def spawn(*_, **__):
+        events.append("spawn")
+        if mode == "spawn_failure":
+            events.append("cleanup")
+            raise module.SpawnOwnershipError(failure)
+        if mode == "creation_term":
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+        return owner
+
+    monkeypatch.setattr(module.OwnedProcess, "spawn", spawn)
+    return owner, (failure if mode == "spawn_failure" else receipt), events, handlers
+
+
+@pytest.mark.parametrize(
+    "mode", ["normal", "preclosed", "body_term", "creation_term", "spawn_failure", "body_error"]
+)
+@pytest.mark.parametrize("sink_fails", [False, True])
+def test_managed_persists_exact_receipt_once_after_cleanup(monkeypatch, tmp_path, mode, sink_fails):
+    owner, receipt, events, handlers = managed_sink_fixture(monkeypatch, mode)
+    path = tmp_path / "cleanup.json"
+    if sink_fails:
+        path.write_bytes(b"existing receipt must not be overwritten")
+    calls = []
+
+    def sink(actual_owner, actual_receipt):
+        assert events[-1] == "cleanup"
+        assert actual_receipt is receipt
+        assert actual_owner is (None if mode == "spawn_failure" else owner)
+        calls.append(actual_receipt)
+        with path.open("x", encoding="utf-8") as stream:
+            json.dump(asdict(actual_receipt), stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    original = {
+        "body_term": module.ProcessInterrupted,
+        "creation_term": module.ProcessInterrupted,
+        "spawn_failure": module.SpawnOwnershipError,
+        "body_error": ValueError,
+    }.get(mode)
+    expected = module.ReceiptSinkError if sink_fails else original
+    with pytest.raises(expected) if expected else nullcontext() as raised:
+        with module.OwnedProcess.managed(["/python"], receipt_sink=sink, term_grace_seconds=0):
+            assert mode not in {"creation_term", "spawn_failure"}
+            if mode == "preclosed":
+                owner.close()
+            if mode == "body_term":
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+            if mode == "body_error":
+                raise ValueError("body failure")
+    assert calls == [receipt] and events.count("cleanup") == 1
+    assert all(handler == "old" for handler in handlers.values())
+    if sink_fails:
+        error = raised.value
+        assert error.receipt is receipt and error.receipt_persisted is False
+        assert error.sink_error_type == "FileExistsError"
+        assert error.original_failure_type == (original.__name__ if original else None)
+        assert error.interrupted_signal == (signal.SIGTERM if "term" in mode else None)
+        assert error.cleanup_owner is (None if mode == "spawn_failure" else owner)
+        assert isinstance(error.__cause__, FileExistsError)
+        assert path.read_bytes() == b"existing receipt must not be overwritten"
+    else:
+        assert json.loads(path.read_text(encoding="utf-8")) == json.loads(
+            json.dumps(asdict(receipt))
+        )
+
+
+def test_unverified_cleanup_is_persisted_without_promoting_verified(monkeypatch, tmp_path):
+    _, receipt, _, _ = managed_sink_fixture(monkeypatch, "normal", verified=False)
+    observed = []
+    with module.OwnedProcess.managed(
+        ["/python"], receipt_sink=lambda _, value: observed.append(value)
+    ):
+        pass
+    assert observed == [receipt]
+    assert not observed[0].group_cleanup_verified
+
+
+def test_invalid_sink_is_rejected_before_creation(monkeypatch):
+    monkeypatch.setattr(module, "_linux", lambda: None)
+    monkeypatch.setattr(module.OwnedProcess, "spawn", lambda *_, **__: pytest.fail("created child"))
+    with pytest.raises(ValueError, match="sink must be callable"):
+        with module.OwnedProcess.managed(["/python"], receipt_sink="invalid"):
+            pass

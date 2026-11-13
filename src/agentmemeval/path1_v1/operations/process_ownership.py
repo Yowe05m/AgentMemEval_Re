@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,6 +103,25 @@ class SpawnOwnershipError(OwnershipError):
     def __init__(self, receipt: SpawnFailureReceipt):
         self.receipt = receipt
         super().__init__("new child ownership failed; group cleanup remains unverified")
+
+
+class ReceiptSinkError(OwnershipError):
+    """Cleanup ran, but its receipt was not durably acknowledged by the sink.
+
+    The attached live objects are diagnostic capabilities, never a serializable
+    permission to kill/retry. A verified group exit does not imply persistence.
+    """
+
+    def __init__(self, receipt, cleanup_owner, sink_error, original_failure):
+        self.receipt = receipt
+        self.cleanup_owner = cleanup_owner
+        self.sink_error_type = type(sink_error).__name__
+        self.original_failure_type = (
+            type(original_failure).__name__ if original_failure is not None else None
+        )
+        self.interrupted_signal = getattr(original_failure, "signum", None)
+        self.receipt_persisted = False
+        super().__init__("process cleanup receipt sink failed; persistence is unverified")
 
 
 @dataclass(frozen=True)
@@ -335,16 +354,30 @@ class OwnedProcess:
 
     @classmethod
     @contextmanager
-    def managed(cls, argv, *, term_grace_seconds: float = 120, **kwargs):
+    def managed(
+        cls,
+        argv,
+        *,
+        term_grace_seconds: float = 120,
+        receipt_sink: Callable[[OwnedProcess | None, CleanupReceipt | SpawnFailureReceipt], None]
+        | None = None,
+        **kwargs,
+    ):
         """Guard ordinary interrupts before creation, and always close before restoring handlers.
 
         During Popen/identity establishment signals are deferred, not blocked in
         the OS (children must not inherit blocked TERM). Only after an owner is
         assigned may the handler raise. SIGKILL and foreign reapers are excluded.
+        A sink is invoked exactly once after cleanup, even before the first yield
+        or after finish() already closed the owner. Production callers must use a
+        durable sink; its successful return is the persistence acknowledgement.
+        Sink failure cannot interrupt cleanup, and cannot be treated as closure.
         """
         _linux()
         if threading.current_thread() is not threading.main_thread():
             raise OwnershipError("managed creation must run on the main thread")
+        if receipt_sink is not None and not callable(receipt_sink):
+            raise ValueError("receipt sink must be callable")
         if (
             type(term_grace_seconds) not in (int, float)
             or not math.isfinite(term_grace_seconds)
@@ -357,6 +390,7 @@ class OwnedProcess:
         pending = []
         armed = False
         owner = None
+        receipt = None
 
         def interrupted(signum, _frame):
             if armed:
@@ -366,16 +400,28 @@ class OwnedProcess:
         try:
             for sig in previous:
                 signal.signal(sig, interrupted)
-            owner = cls.spawn(argv, **kwargs)
+            try:
+                owner = cls.spawn(argv, **kwargs)
+            except SpawnOwnershipError as exc:
+                receipt = exc.receipt
+                raise
             armed = True
             if pending:
                 raise ProcessInterrupted(pending[0])
             yield owner
         finally:
             armed = False
+            original_failure = sys.exc_info()[1]
             try:
                 if owner is not None:
-                    owner.close(term_grace_seconds=term_grace_seconds)
+                    receipt = owner.close(term_grace_seconds=term_grace_seconds)
+                if receipt is not None and receipt_sink is not None:
+                    try:
+                        receipt_sink(owner, receipt)
+                    except BaseException as sink_error:
+                        raise ReceiptSinkError(
+                            receipt, owner, sink_error, original_failure
+                        ) from sink_error
             finally:
                 for sig, handler in previous.items():
                     signal.signal(sig, handler)

@@ -18,12 +18,14 @@
     "operations/intent_executor.py": {
       "baseline_git_bytes_sha256": "6ac00f61f5bd8bbba422c7c62b5fde9336835a28a3fb483b019ef6ac441f0040",
       "baseline_normalized_ast_sha256": "4db6ae3d6ff622b02d47ec942499daed0a778b44eacafa4d500e7a1148a74695",
-      "current_worktree_bytes_sha256": "e35e6aa7c44fd3ec98484f8f094585f0517d7c49953255bf7232b2e7bad901c3",
-      "normalized_ast_sha256": "70c176b5374f3030ba3a559f849457d708448c2bccefe88139c8663acc0c9240",
-      "reason": "Owned Linux helper lifecycle retains leader anchor until descendant cleanup; unknown prevents reissue.",
+      "current_worktree_bytes_sha256": "a4f35d453748277fd5bff5b9c6f40515a64fb86e74b30c00bc40764bcbe09952",
+      "normalized_ast_sha256": "f15c093e50a014f4338977626e9241c1b9b525c375d2513142920b96a980e323",
+      "reason": "Owned Linux helper lifecycle and JSON-safe cleanup receipts; dedicated E0 fixed launcher, live preflight and E0-only user-association capacity; preserve research admission and unknown no-reissue.",
       "regression_tests": [
         "tests/path1_v1/unit/test_intent_executor.py",
-        "tests/path1_v1/integration/test_intent_executor_faults.py"
+        "tests/path1_v1/integration/test_intent_executor_faults.py",
+        "tests/path1_v1/unit/test_e0_executor.py",
+        "tests/path1_v1/unit/test_user_capacity.py"
       ]
     },
     "operations/submission_process.py": {

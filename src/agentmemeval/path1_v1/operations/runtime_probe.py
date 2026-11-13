@@ -44,6 +44,7 @@ from agentmemeval.path1_v1.operations.contracts import (
     content_digest,
     validate_campaign_contract,
 )
+from agentmemeval.path1_v1.operations.submission_process import write_exclusive_json
 from agentmemeval.path1_v1.operations.worker import (
     RuntimeAdmissionRequired,
     ValidatedWorkerRequest,
@@ -72,24 +73,35 @@ class ValidatedProbeRequest:
     output_directory: Path
 
 
-def validate_probe_request(request_path: Path | str) -> ValidatedProbeRequest:
+def validate_probe_request(request_path: Path | str, *, _collecting_resource: bool = False
+                           ) -> ValidatedProbeRequest:
     """Independent E0 topology; never borrows a research claim or seed inventory."""
     raw = _absolute(str(request_path)).read_bytes()
     request = _strict_json(raw)
-    _object(request, {"schema_version", "kind", "request_sha256", "intent_id",
+    keys = {"schema_version", "kind", "request_sha256", "intent_id",
                       "contract_path", "contract_sha256", "repository_root",
-                      "model_manifest_path", "model_root", "output_root"}, "E0 probe request")
-    _require(type(request["schema_version"]) is int and request["schema_version"] == 1
+                      "model_manifest_path", "model_root", "output_root"}
+    version = request.get("schema_version")
+    _object(request, keys | ({"launch"} if version == 2 else set()), "E0 probe request")
+    _require(type(version) is int and version in (1, 2)
              and request["kind"] == "path1_e0_probe_request", "invalid E0 request schema")
     _require(content_digest({k: v for k, v in request.items() if k != "request_sha256"})
              == request["request_sha256"], "E0 request digest mismatch")
     contract = validate_campaign_contract(_bound_json(request["contract_path"],
                                                        request["contract_sha256"]))
-    _require(contract["phase"] == "E0" and contract["job"]["kind"] == "service_probe",
-             "probe requires a dedicated E0 service_probe contract")
+    kind = contract["job"]["kind"]
+    _require(contract["phase"] == "E0" and kind in {"resource_probe", "service_probe"}
+             and (version == 2 or kind == "service_probe"),
+             "probe requires a dedicated E0 service_probe or v2 resource_probe contract")
     repository = _absolute(request["repository_root"])
-    model_root = _absolute(request["model_root"])
-    manifest = _absolute(request["model_manifest_path"])
+    _require((request["model_root"] is None) == (request["model_manifest_path"] is None),
+             "model root and manifest must be supplied together")
+    _require(kind != "service_probe" or request["model_root"] is not None,
+             "service probe requires actual model files")
+    model_root = _absolute(request["model_root"]) if request["model_root"] else None
+    manifest = _absolute(request["model_manifest_path"]) if request["model_manifest_path"] else None
+    if version == 2:
+        validate_probe_launch(request["launch"], kind)
     identity = contract["runtime_identity"]
     observed = build_runtime_identity(repository,
         core_paths=[x["path"] for x in identity["core_files"]],
@@ -107,11 +119,56 @@ def validate_probe_request(request_path: Path | str) -> ValidatedProbeRequest:
     root = _absolute(request["output_root"])
     output = root.joinpath(*contract["job"]["output_relpath"].split("/"), "e0_probe")
     _absolute(str(output), exists=False)
-    _require(not output.exists(), "E0 output already exists")
+    if _collecting_resource:
+        _require(kind == "resource_probe" and output.is_dir(), "resource parent output missing")
+        launch = _strict_json((output / "resource_launch.json").read_bytes())
+        _require(launch.get("request_sha256") == request["request_sha256"],
+                 "resource collector is not bound to its launcher")
+    else:
+        _require(not output.exists(), "E0 output already exists")
     _require(all(output != path and not output.is_relative_to(path)
-                 for path in (repository, model_root)), "E0 output overlaps source/model")
+                 for path in (repository, model_root) if path is not None),
+             "E0 output overlaps source/model")
     _require(_absolute(str(request_path)).read_bytes() == raw, "E0 request changed while reading")
     return ValidatedProbeRequest(request, contract, intent, request["request_sha256"], output)
+
+
+def validate_probe_launch(launch: dict, kind: str) -> None:
+    """v2 fixed execution identity; no arbitrary flags, commands or environment."""
+    _object(launch, {"python_executable", "python_sha256", "service_python",
+                     "service_python_sha256", "service_port", "command_seconds",
+                     "cleanup_seconds", "startup_seconds", "python_identity",
+                     "service_python_identity"}, "E0 launch")
+    from agentmemeval.path1_v1.operations.interpreters import verify_python_interpreter
+
+    expected = launch["python_identity"]
+    _require(type(expected) is dict and type(expected.get("prefix")) is str,
+             "probe interpreter proof missing")
+    observed = verify_python_interpreter(Path(launch["python_executable"]),
+                    launch["python_sha256"], expected_prefix=expected["prefix"])
+    _require(content_digest(observed) == content_digest(expected),
+             "probe interpreter environment identity changed")
+    for field in ("command_seconds", "cleanup_seconds", "startup_seconds"):
+        _require(type(launch[field]) is int, "probe durations must be integers")
+    if kind == "resource_probe":
+        _require(tuple(launch[x] for x in ("command_seconds", "cleanup_seconds",
+                                          "startup_seconds")) == (90, 30, 0)
+                 and all(launch[x] is None for x in ("service_python", "service_python_sha256",
+                                                     "service_port", "service_python_identity")),
+                 "resource probe is exactly 90 seconds plus 30 cleanup without service")
+    else:
+        _require(kind == "service_probe" and launch["command_seconds"] == 6600
+                 and launch["cleanup_seconds"] == 600 and launch["startup_seconds"] == 1200,
+                 "service probe is exactly 2 hours with 20 minute startup and 600 reserve")
+        expected = launch["service_python_identity"]
+        _require(type(expected) is dict and type(expected.get("prefix")) is str,
+                 "service interpreter proof missing")
+        observed = verify_python_interpreter(Path(launch["service_python"]),
+                     launch["service_python_sha256"], expected_prefix=expected["prefix"])
+        _require(content_digest(observed) == content_digest(expected),
+                 "service interpreter environment identity changed")
+        _require(type(launch["service_port"]) is int and 1024 <= launch["service_port"] <= 65535,
+                 "invalid dedicated service port")
 
 
 def _require(condition: bool, message: str) -> None:
@@ -175,7 +232,7 @@ def observe_model(request: ValidatedProbeRequest) -> tuple[dict, list[dict]]:
     return identity, after
 
 
-def observe_host() -> dict:
+def observe_host(*, cleanup_seconds: int = 600) -> dict:
     _require(sys.platform == "linux" and hasattr(os, "geteuid"),
              "live E0 producer requires a Linux allocation")
     job = os.environ.get("SLURM_JOB_ID", "")
@@ -196,7 +253,7 @@ def observe_host() -> dict:
         end = datetime.fromisoformat(fields["EndTime"]).astimezone(UTC)
     except (KeyError, ValueError) as exc:
         raise RuntimeProbeError("actual Slurm deadline is missing/unsupported") from exc
-    _require(end > datetime.now(UTC) + timedelta(seconds=600),
+    _require(end > datetime.now(UTC) + timedelta(seconds=cleanup_seconds),
              "allocation has no reserved cleanup interval")
     return {"hostname": socket.gethostname(), "boot_id": boot, "euid": os.geteuid(),
             "pid": os.getpid(), "job_id": job, "cgroup": cgroup,
@@ -587,6 +644,11 @@ def run_service_probe(request_path: Path, output_directory: Path,
                       service_python: Path, port: int) -> dict:
     """The explicit CLI's real service lifecycle; never starts a research unit."""
     request = validate_probe_request(request_path)
+    _require(request.contract["job"]["kind"] == "service_probe", "not a service probe")
+    if request.request["schema_version"] == 2:
+        launch = request.request["launch"]
+        _require(str(service_python) == launch["service_python"]
+                 and port == launch["service_port"], "service CLI differs from bound launch")
     host = observe_host()  # Refuse login nodes/Windows before creating a service.
     _require(datetime.fromisoformat(host["allocation_end_utc"]) > datetime.now(UTC)
              + timedelta(seconds=1800), "insufficient service startup and cleanup interval")
@@ -598,13 +660,12 @@ def run_service_probe(request_path: Path, output_directory: Path,
     from agentmemeval.path1_v1.operations.process_ownership import (
         OwnedProcess,
         ProcessBinding,
-        SpawnOwnershipError,
     )
 
     _verify_loaded_source(request)  # Before model service creation, then again before probes.
     output.mkdir(parents=True, exist_ok=False)
     model = request.request["model_root"]
-    argv = [str(executable), "-m", "vllm.entrypoints.openai.api_server", "--model", model,
+    argv = [str(executable), "-B", "-m", "vllm.entrypoints.openai.api_server", "--model", model,
             "--tokenizer", model, "--dtype", "bfloat16", "--tensor-parallel-size", "1",
             "--max-model-len", "65536", "--max-num-seqs", "1", "--no-enable-prefix-caching",
             "--served-model-name", request.contract["source_contract"]["provider"]
@@ -624,12 +685,15 @@ def run_service_probe(request_path: Path, output_directory: Path,
     with (output / "service_stdout.log").open("xb") as stdout, (
         output / "service_stderr.log"
     ).open("xb") as stderr:
-        owner = None
+        def persist_cleanup(owner, receipt):
+            name = "service_cleanup.json" if owner is not None else "service_spawn_failure.json"
+            write_exclusive_json(output / name, asdict(receipt))
+
         try:
             with OwnedProcess.managed(
                 argv, binding=binding, cwd=Path(request.request["repository_root"]), env=env,
                 stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
-                term_grace_seconds=120,
+                term_grace_seconds=120, receipt_sink=persist_cleanup,
             ) as owner:
                 start_deadline = time.monotonic() + 1200
                 while True:
@@ -648,14 +712,10 @@ def run_service_probe(request_path: Path, output_directory: Path,
                              "service startup exceeded 20 minutes")
                     time.sleep(1)
                 return collect_e0_probe(request, owner, endpoint, output / "observations")
-        except SpawnOwnershipError as exc:
-            _new_json(output / "service_spawn_failure.json", asdict(exc.receipt))
+        except BaseException as exc:
+            _new_json(output / "service_failure.json", {"failure_type": type(exc).__name__,
+                      "runtime_admission": False, "request_sha256": request.request_sha256})
             raise
-        finally:
-            if owner is not None:
-                # managed() already closed; repeat access returns its exact receipt.
-                cleanup = owner.close(term_grace_seconds=120)
-                _new_json(output / "service_cleanup.json", asdict(cleanup))
 
 
 def main(argv: list[str] | None = None) -> int:

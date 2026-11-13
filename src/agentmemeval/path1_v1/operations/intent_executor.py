@@ -15,10 +15,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib.machinery
+import json
 import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -38,7 +40,7 @@ from agentmemeval.path1_v1.operations.process_ownership import (
     OwnedProcess,
     OwnershipError,
     ProcessBinding,
-    SpawnOwnershipError,
+    ReceiptSinkError,
 )
 from agentmemeval.path1_v1.operations.slurm import (
     AccountSnapshot,
@@ -266,11 +268,25 @@ def render_worker_script(
         + shlex.quote(str(repository_root / "src"))
         + "\nexec "
         + shlex.quote(str(python_executable))
-        + " -s -m agentmemeval.path1_v1.operations.worker --request "
+        + " -B -s -m agentmemeval.path1_v1.operations.worker --request "
         + shlex.quote(str(worker_request_path))
         + "\n"
     )
     return text.encode("utf-8")
+
+
+def render_probe_script(
+    *, python_executable: Path, repository_root: Path, probe_request_path: Path
+) -> bytes:
+    """Separate exact E0 topology: request v2 carries every execution parameter."""
+    for path in (python_executable, repository_root, probe_request_path):
+        if not path.is_absolute() or any(c in str(path) for c in "\x00\r\n"):
+            raise ExecutorError("probe launcher paths must be absolute and single-line")
+    return ("#!/bin/sh\nset -eu\nexport PYTHONPATH="
+            + shlex.quote(str(repository_root / "src")) + "\nexec "
+            + shlex.quote(str(python_executable))
+            + " -B -s -m agentmemeval.path1_v1.operations.probe_launcher --request "
+            + shlex.quote(str(probe_request_path)) + "\n").encode("utf-8")
 
 
 @dataclass(frozen=True)
@@ -278,6 +294,11 @@ class LaunchFiles:
     worker_request_path: Path
     python_executable: Path
     python_sha256: str
+
+
+@dataclass(frozen=True)
+class ProbeLaunchFiles:
+    probe_request_path: Path
 
 
 @dataclass(frozen=True)
@@ -312,6 +333,101 @@ class SubmissionAdmission:
             raise SubmissionDisabled("pre-submit admission is stale")
 
 
+class E0PreSubmitVerifier:
+    """Produce E0 launch admission from current files, disk and a real site query.
+
+    This does not allocate a GPU, establish backend execution or replace the
+    executor's independent account-wide capacity reader. Every observation is
+    persisted exclusively; no external verified JSON is consumed.
+    """
+
+    def __init__(self, evidence_root: Path, *, partition_command: VerifiedCommand,
+                 min_free_bytes: int = 1024 ** 3, fixture_mode: bool = False,
+                 clock: Callable[[], datetime] = lambda: datetime.now(UTC)):
+        if not evidence_root.is_absolute() or not evidence_root.is_dir():
+            raise ExecutorError("E0 preflight evidence root must be an existing absolute directory")
+        if type(min_free_bytes) is not int or min_free_bytes <= 0:
+            raise ExecutorError("positive explicit disk budget required")
+        self.root, self.command = evidence_root, partition_command
+        self.min_free_bytes, self.fixture_mode, self.clock = min_free_bytes, fixture_mode, clock
+
+    def __call__(self, request: SubmissionRequest, probe: Any) -> SubmissionAdmission:
+        from agentmemeval.path1_v1.operations.runtime_probe import (
+            ValidatedProbeRequest,
+            validate_probe_launch,
+        )
+
+        if type(probe) is not ValidatedProbeRequest or probe.request["schema_version"] != 2:
+            raise SubmissionDisabled("E0 preflight cannot admit research or legacy requests")
+        if (probe.intent_id != request.intent_id
+                or probe.contract["campaign_id"] != request.campaign_id):
+            raise SubmissionDisabled("E0 preflight intent mismatch")
+        validate_probe_launch(probe.request["launch"], probe.contract["job"]["kind"])
+        pins = self.command.validate(fixture_mode=self.fixture_mode)
+        if not self.fixture_mode and Path(self.command.argv_prefix[0]).name != "scontrol":
+            raise SubmissionDisabled("E0 preflight requires pinned scontrol")
+        argv = (*self.command.argv_prefix, f"--clusters={request.spec.cluster}", "show",
+                "partition", request.spec.partition, "--oneliner")
+        observed_at = utc(self.clock())
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                                env=clean_environment(), timeout=20, check=False)
+        raw = result.stdout.decode("utf-8", errors="strict")
+        pairs = re.findall(r"(?:^|\s)([A-Za-z][A-Za-z0-9_]*)=(\S+)", raw)
+        fields = dict(pairs)
+        if (result.returncode != 0 or result.stderr.strip()
+                or len(fields) != len(pairs)
+                or fields.get("PartitionName") != request.spec.partition
+                or fields.get("State") != "UP"):
+            raise SubmissionDisabled("actual partition is unavailable or ambiguous")
+        limit = fields.get("MaxTime", "")
+        match = re.fullmatch(r"(?:(\d+)-)?(\d+):(\d{2}):(\d{2})", limit)
+        if limit == "UNLIMITED":
+            seconds = 86400 * 365
+        elif match and int(match[3]) < 60 and int(match[4]) < 60:
+            seconds = (int(match[1] or 0) * 86400 + int(match[2]) * 3600
+                       + int(match[3]) * 60 + int(match[4]))
+        else:
+            raise SubmissionDisabled("partition walltime could not be read")
+        if seconds < request.spec.walltime_seconds:
+            raise SubmissionDisabled("partition cannot accommodate the frozen probe walltime")
+        output_root = Path(probe.request["output_root"])
+        if (probe.output_directory.exists() or not output_root.is_dir()
+                or not os.access(output_root, os.W_OK | os.X_OK)):
+            raise SubmissionDisabled("E0 output is not exclusively available/writable")
+        disk = shutil.disk_usage(output_root)
+        if disk.free < self.min_free_bytes:
+            raise SubmissionDisabled("E0 output has insufficient declared disk reserve")
+        filesystem_record = output_root / ("e0_preflight_" + uuid4().hex + ".json")
+        health = {"request_sha256": request.request_sha256,
+                  "probe_request_sha256": probe.request_sha256,
+                  "purpose": "E0 exclusive output filesystem roundtrip", "runtime_admission": False}
+        write_exclusive_json(filesystem_record, health)
+        if read_json(filesystem_record) != health:
+            raise SubmissionDisabled("E0 output filesystem roundtrip differs")
+        evidence = {"schema_version": 1, "kind": "path1_e0_presubmit_observation",
+                    "request_sha256": request.request_sha256,
+                    "probe_request_sha256": probe.request_sha256,
+                    "runtime_identity_sha256": content_digest(probe.contract["runtime_identity"]),
+                    "contract_sha256": probe.request["contract_sha256"],
+                    "observed_at": observed_at.isoformat(), "argv": list(argv),
+                    "command_files": pins, "partition_stdout": raw,
+                    "disk": {"root": str(output_root), "total": disk.total,
+                             "free": disk.free, "minimum_free_bytes": self.min_free_bytes},
+                    "filesystem_probe": {"path": str(filesystem_record),
+                                         "sha256": file_sha256(filesystem_record)},
+                    "launch": probe.request["launch"], "stage_cap": 1,
+                    "runtime_admission": False}
+        # The write/fsync is also an actual evidence-filesystem health check.
+        destination = self.root / (uuid4().hex + ".json")
+        write_exclusive_json(destination, evidence)
+        if read_json(destination) != evidence:
+            raise SubmissionDisabled("E0 preflight durable readback differs")
+        admission = SubmissionAdmission(request.request_sha256, probe.request_sha256,
+                        probe.request["contract_sha256"], file_sha256(destination), 1, observed_at)
+        admission.validate(request, probe, self.clock())
+        return admission
+
+
 class DurableIntentExecutor:
     def __init__(
         self,
@@ -320,9 +436,9 @@ class DurableIntentExecutor:
         cluster: str,
         account: str,
         command: VerifiedCommand,
-        launch_files: Callable[[SubmissionRequest], LaunchFiles],
+        launch_files: Callable[[SubmissionRequest], LaunchFiles | ProbeLaunchFiles],
         pre_submit_verifier: Callable[[SubmissionRequest, Any], SubmissionAdmission] | None = None,
-        account_reader: Callable[[], AccountSnapshot] | None = None,
+        account_reader: Callable[[], Any] | None = None,
         fixture_mode: bool = False,
         fixture_paths: Mapping[str, Path] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -414,6 +530,10 @@ class DurableIntentExecutor:
                     raise StoreIntegrityError("durable invocation bytes changed")
             if type(record["submitter_finished"]) is not bool:
                 raise StoreIntegrityError("invalid submitter completion evidence")
+            if record.get("probe_request_path") is not None:
+                path = _file(Path(record["probe_request_path"]))
+                if file_sha256(path) != record.get("probe_request_file_sha256"):
+                    raise StoreIntegrityError("durable E0 request bytes changed")
         return value
 
     @staticmethod
@@ -445,6 +565,10 @@ class DurableIntentExecutor:
         if request.spec.script_args:
             raise ExecutorError("worker launcher takes no extra script arguments")
         files = self.launch_files(request)
+        if type(files) is ProbeLaunchFiles:
+            return self._validate_probe_launch(request, files, effective_user)
+        if type(files) is not LaunchFiles:
+            raise ExecutorError("launcher must explicitly select research or E0 topology")
         python = _file(files.python_executable)
         digest(files.python_sha256)
         if file_sha256(python) != files.python_sha256:
@@ -534,6 +658,55 @@ class DurableIntentExecutor:
             )
         return worker, files, script, pinned, effective_user
 
+    def _validate_probe_launch(self, request, files, effective_user):
+        from agentmemeval.path1_v1.operations.runtime_probe import validate_probe_request
+
+        path = _file(files.probe_request_path)
+        probe = validate_probe_request(path)
+        if probe.request["schema_version"] != 2:
+            raise ExecutorError("automatic E0 submission requires request v2")
+        kind = probe.contract["job"]["kind"]
+        expected_walltime = {"resource_probe": 120, "service_probe": 7200}[kind]
+        if (probe.intent_id != request.intent_id
+                or probe.contract["campaign_id"] != request.campaign_id
+                or request.spec.walltime_seconds != expected_walltime):
+            raise ExecutorError("E0 intent/campaign/fixed walltime differs")
+        launch = probe.request["launch"]
+        repository = Path(probe.request["repository_root"])
+        identity = probe.contract["runtime_identity"]
+        source_records = identity["core_files"] + identity["operations_files"]
+        required = {"src/agentmemeval/path1_v1/operations/" + name + ".py"
+                    for name in ("worker", "runtime_probe", "probe_launcher", "resource_probe",
+                                 "intent_executor", "process_ownership", "submission_process")}
+        if not required <= {row["path"] for row in source_records}:
+            raise ExecutorError("E0 execution module closure is incomplete")
+        if not self.fixture_mode:
+            verify_loaded_package(repository, source_records)
+        job_dir = probe.output_directory.parent
+        if self._path(request.spec.work_dir).resolve() != job_dir.resolve():
+            raise ExecutorError("Slurm working directory is not the E0 container")
+        script_path = _file(self._path(request.spec.script_path))
+        script = script_path.read_bytes()
+        if (script != render_probe_script(python_executable=Path(launch["python_executable"]),
+                repository_root=repository, probe_request_path=path)
+                or file_sha256(script_path) != request.spec.script_sha256):
+            raise ExecutorError("E0 launcher bytes/topology differ from the fixed template")
+        pinned = [{"path": str(repository / item["path"]), "sha256": item["sha256"]}
+                  for item in source_records + [identity["config"], identity["dependency_lock"]]]
+        pinned += [{"path": str(path), "sha256": file_sha256(path)},
+                   {"path": str(script_path), "sha256": request.spec.script_sha256},
+                   {"path": probe.request["contract_path"],
+                    "sha256": probe.request["contract_sha256"]}]
+        pinned += [{"path": row["path"], "sha256": row["sha256"]}
+                   for row in launch["python_identity"]["files"]]
+        if kind == "service_probe":
+            pinned += [{"path": row["path"], "sha256": row["sha256"]}
+                       for row in launch["service_python_identity"]["files"]]
+        if probe.request["model_manifest_path"] is not None:
+            pinned.append({"path": probe.request["model_manifest_path"],
+                           "sha256": identity["model"]["manifest_sha256"]})
+        return probe, files, script, pinned, effective_user
+
     def _admit(self, request: SubmissionRequest, worker: Any) -> SubmissionAdmission:
         if self.pre_submit_verifier is None:
             raise SubmissionDisabled("no trusted pre-submit admission verifier is installed")
@@ -543,10 +716,20 @@ class DurableIntentExecutor:
         admission.validate(request, worker, self.clock())
         return admission
 
-    def _capacity(self, request: SubmissionRequest, ledger: dict, stage_cap: int) -> dict:
+    def _capacity(self, request: SubmissionRequest, ledger: dict, stage_cap: int,
+                  *, validated_phase: str | None = None) -> dict:
         if self.account_reader is None:
             raise SubmissionDisabled("no live account capacity reader is installed")
         observed = self.account_reader()
+        if not isinstance(observed, AccountSnapshot):
+            from agentmemeval.path1_v1.operations.user_capacity import (
+                UserAssociationSnapshot,
+                validate_user_association_capacity,
+            )
+
+            if type(observed) is UserAssociationSnapshot:
+                return validate_user_association_capacity(
+                    observed, request, ledger, stage_cap, self.clock(), validated_phase)
         if (
             not isinstance(observed, AccountSnapshot)
             or observed.capacity is None
@@ -614,6 +797,9 @@ class DurableIntentExecutor:
         return match[1], file_sha256(path)
 
     def _receipt(self, request: SubmissionRequest, record: dict) -> IntentReceipt:
+        if record.get("cleanup_persistence_failed") is True:
+            return IntentReceipt(request.request_sha256, "unknown", content_digest(record),
+                                 None, False, None).validate(request)
         job_id, result_sha = (
             self._result(request, record) if record.get("invocation_dir") else (None, None)
         )
@@ -683,7 +869,8 @@ class DurableIntentExecutor:
             command_files = self.command.validate(fixture_mode=self.fixture_mode)
             worker, _files, script, pinned, effective_user = self._validate_launch(request)
             admission = self._admit(request, worker)
-            capacity = self._capacity(request, ledger, admission.stage_cap)
+            capacity = self._capacity(request, ledger, admission.stage_cap,
+                                      validated_phase=worker.contract["phase"])
             job_dir = self._path(request.spec.work_dir).resolve()
             invocation_dir = self.store.directory / "i" / request.intent_id[:16]
             record = {
@@ -704,6 +891,9 @@ class DurableIntentExecutor:
                 "admission_sha256": admission.evidence_sha256,
                 "capacity": capacity,
             }
+            if type(_files) is ProbeLaunchFiles:
+                record.update(probe_request_path=str(_files.probe_request_path),
+                              probe_request_file_sha256=file_sha256(_files.probe_request_path))
             ledger["intents"][request.intent_id] = record
             snapshot = self._commit(snapshot, ledger, "reserve remote submission intent")
             claim = self.store.claim_run(
@@ -732,9 +922,18 @@ class DurableIntentExecutor:
             # Windows venv python.exe is a redirector with an extra PID. The
             # stdlib-only handshake runs the actual base interpreter directly so
             # the Popen handle and kernel identity refer to the same submitter.
-            helper_python = _file(Path(getattr(sys, "_base_executable", sys.executable)))
+            # This helper is stdlib-only: canonicalize its base ELF explicitly.
+            # Worker/service argv retain their verified venv entry and prefix.
+            helper_python = _file(
+                Path(getattr(sys, "_base_executable", sys.executable)).resolve(strict=True))
             # Remove the original script filename; sbatch consumes pinned stdin bytes.
             argv = (*self.command.argv_prefix, *request.sbatch_argv()[1:-1])
+            if (worker.contract["phase"] == "E0"
+                    and worker.contract["job"]["kind"] == "resource_probe"):
+                # sbatch has no --immediate option on the deployed Slurm.
+                # 120s walltime + a 10s planned start opportunity: scheduling
+                # feasibility deadline, not a precise queue-deletion timer.
+                argv = (*argv, "--deadline=now+130seconds")
             manifest = {
                 "schema_version": 1,
                 "nonce": uuid4().hex,
@@ -762,12 +961,17 @@ class DurableIntentExecutor:
             snapshot = self._commit(snapshot, ledger, "persist unknown before starting submitter")
             helper_argv = [str(helper_python), "-I", str(helper), str(manifest_path), manifest_sha]
             owner = None
+            def persist_cleanup(cleanup_owner, cleanup_receipt):
+                name = "local_cleanup.json" if cleanup_owner is not None else "spawn_failure.json"
+                write_exclusive_json(invocation_dir / name, asdict(cleanup_receipt))
+
             if sys.platform.startswith("linux"):
                 guard = OwnedProcess.managed(
                     helper_argv,
                     cwd=invocation_dir,
                     env=clean_environment(),
                     term_grace_seconds=self.transport_term_grace_seconds,
+                    receipt_sink=persist_cleanup,
                     binding=ProcessBinding(
                         request.campaign_id,
                         request.intent_id,
@@ -827,7 +1031,8 @@ class DurableIntentExecutor:
                         raise ExecutorError("launch changed during submitter handshake")
                     current_admission = self._admit(request, current_worker)
                     record["capacity"] = self._capacity(
-                        request, ledger, current_admission.stage_cap
+                        request, ledger, current_admission.stage_cap,
+                        validated_phase=current_worker.contract["phase"],
                     )
                     record["admission_sha256"] = current_admission.evidence_sha256
                     snapshot = self._commit(snapshot, ledger, "persist fresh pre-exec gates")
@@ -839,29 +1044,33 @@ class DurableIntentExecutor:
                             deadline_monotonic=deadline,
                             term_grace_seconds=self.transport_term_grace_seconds,
                         )
-                        record["local_cleanup"] = asdict(cleanup)
+                        # Dataclass tuple fields are not CampaignStore JSON
+                        # values. This serializes diagnostics only; the typed
+                        # owner-issued receipt remains the cleanup authority.
+                        record["local_cleanup"] = json.loads(
+                            json.dumps(asdict(cleanup), allow_nan=False))
                         record["submitter_finished"] = cleanup.leader_reaped
                     else:
                         process.wait(timeout=max(0.01, deadline - time.monotonic()))
                         record["submitter_finished"] = True
-                    job_id, result_sha = self._result(request, record)
-                    if job_id:
-                        record.update(status="accepted", job_id=job_id, result_sha256=result_sha)
-                    snapshot = self._commit(
-                        snapshot, ledger, "persist completed submitter evidence"
-                    )
-                    return self._receipt(request, record)
+                # managed must persist cleanup successfully before acceptance is
+                # committed. A scheduler result alone cannot close local transport.
+                job_id, result_sha = self._result(request, record)
+                if job_id:
+                    record.update(status="accepted", job_id=job_id, result_sha256=result_sha)
+                snapshot = self._commit(snapshot, ledger, "persist completed submitter evidence")
+                return self._receipt(request, record)
             except (subprocess.TimeoutExpired, OSError, ExecutorError, OwnershipError) as exc:
-                if isinstance(exc, SpawnOwnershipError):
-                    write_exclusive_json(invocation_dir / "spawn_failure.json", asdict(exc.receipt))
+                if isinstance(exc, ReceiptSinkError):
+                    record.update(status="submit_unknown", job_id=None, result_sha256=None,
+                                  submitter_finished=False, cleanup_persistence_failed=True,
+                                  cleanup_sink_failure_type=exc.sink_error_type)
+                    snapshot = self._commit(
+                        snapshot, ledger, "retain unknown after cleanup sink failure")
                 # Unknown remains durable. Do not convert transport/process failure
                 # into not_submitted or a retry; do not cancel any allocation.
                 return self._receipt(request, record)
             finally:
-                if owner is not None:
-                    cleanup = owner.close(term_grace_seconds=self.transport_term_grace_seconds)
-                    # This durable diagnostic grants no future kill authority.
-                    write_exclusive_json(invocation_dir / "local_cleanup.json", asdict(cleanup))
-                elif process is not None and process.poll() is None:
+                if owner is None and process is not None and process.poll() is None:
                     process.kill()  # Only this exact internal handshake child.
                     process.wait(timeout=5)

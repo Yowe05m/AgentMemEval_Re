@@ -341,6 +341,8 @@ def test_service_owner_is_closed_when_probe_fails_before_research(tmp_path, monk
     from agentmemeval.path1_v1.operations.process_ownership import CleanupReceipt, OwnedProcess
 
     request, owner, _ = offline_collector(tmp_path, monkeypatch)
+    request.contract["job"] = {"kind": "service_probe"}
+    request.request["schema_version"] = 1
     observed = owner.verify_live()
     closed = []
     owner.interrupt_guard = lambda: nullcontext()
@@ -360,7 +362,8 @@ def test_service_owner_is_closed_when_probe_fails_before_research(tmp_path, monk
         try:
             yield owner
         finally:
-            owner.close(term_grace_seconds=kwargs["term_grace_seconds"])
+            receipt = owner.close(term_grace_seconds=kwargs["term_grace_seconds"])
+            kwargs["receipt_sink"](owner, receipt)
 
     monkeypatch.setattr(OwnedProcess, "managed", managed)
     monkeypatch.setattr(probe, "validate_probe_request", lambda _: request)
@@ -395,6 +398,39 @@ def test_probe_rejects_http_when_only_cleanup_time_remains(tmp_path, monkeypatch
         probe.collect_e0_probe(request, owner, "http://127.0.0.1:8000/v1",
                                request.output_directory / "observations")
     assert not calls
+
+
+def test_service_creation_interrupt_sink_persists_before_owner_is_yielded(tmp_path, monkeypatch):
+    from agentmemeval.path1_v1.operations.process_ownership import (
+        CleanupReceipt,
+        OwnedProcess,
+        ProcessInterrupted,
+    )
+
+    request, owner, _ = offline_collector(tmp_path, monkeypatch)
+    request.contract["job"] = {"kind": "service_probe"}
+    request.request["schema_version"] = 1
+    observed = owner.verify_live()
+    cleanup = CleanupReceipt(observed.binding, observed.identity, -15, True, False,
+                             True, True, (), ())
+
+    @contextmanager
+    def interrupted(*_, **kwargs):
+        kwargs["receipt_sink"](owner, cleanup)
+        raise ProcessInterrupted(15)
+        yield  # The lifecycle never obtains owner; only the sink has it.
+
+    monkeypatch.setattr(OwnedProcess, "managed", interrupted)
+    monkeypatch.setattr(probe, "validate_probe_request", lambda _: request)
+    executable = tmp_path / "offline_python"
+    executable.write_bytes(b"not executed")
+    with pytest.raises(ProcessInterrupted):
+        probe.run_service_probe(tmp_path / "unused", request.output_directory, executable, 8000)
+    saved = json.loads((request.output_directory / "service_cleanup.json").read_text())
+    assert saved["group_cleanup_verified"] and saved["returncode"] == -15
+    failure = json.loads((request.output_directory / "service_failure.json").read_text())
+    assert failure["failure_type"] == "ProcessInterrupted"
+    assert failure["runtime_admission"] is False
 
 
 def test_process_scheduler_state_can_change_without_changing_identity(tmp_path, monkeypatch):

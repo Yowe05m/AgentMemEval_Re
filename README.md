@@ -624,6 +624,24 @@ Slurm allocation 内启动自身模型服务，记录主机、模型文件、本
 tokenizer/loader 与分配 GPU 的证据必须补齐后才能实现 E1 的可信 RuntimeVerifier。
 当前没有从 JSON `verified` 字段授予运行权限的接口。
 
+资源探针使用独立的准备、提交和查询入口：
+
+```text
+python -B -s -m agentmemeval.path1_v1.operations.e0_resource_cli prepare --repository <规范Git目录> --run-root <全新运行目录> --campaign-id <campaign> --config configs/path1_v1/e0_resource_scze856.json
+python -B -s -m agentmemeval.path1_v1.operations.e0_resource_cli submit --run-root <同一运行目录> --descriptor-sha256 <已登记描述文件SHA256>
+python -B -s -m agentmemeval.path1_v1.operations.e0_resource_cli lookup --run-root <同一运行目录> --descriptor-sha256 <同一SHA256>
+```
+
+先在 campaign 记录中登记 prepare 返回的 intent、请求和描述文件 SHA，再显式提交。
+准备阶段不调用调度器；同一意图由持久执行器防止重复 sbatch。资源探针固定为 1 GPU、
+120 秒 walltime（90 秒采集和 30 秒清理），仅该探针带 `--deadline=now+130seconds`。
+现场 sbatch 不支持 `--immediate`；截止时间留出约 10 秒计划启动机会，但调度器处理粒度
+不保证恰在第 10 秒删除等待作业，必须继续读取真实状态。
+虚拟环境的 Python 入口、真实前缀及其目标文件均被核验，不把入口解析成另一环境的 Python。
+站点配置绑定实际命令哈希；环境 JSON 是实际包版本观察锁，不是 wheel 内容或 GPU 加载证明。
+E0 可使用有效用户的唯一未分区关联额度，读取其全部作业并扣除未知提交、保留 2 个名额。
+此额度不宣称全账户可见或 GPU 可分配，E1/E2/E3 的原准入要求保持。
+
 `operations.closure` 联合 worker 终态、scheduler allocation/step、服务退出证据，
 检查至少 10 秒静默和完整归档/恢复哈希；`closure_service` 提供持久化服务生产者与读取器。
 其现场接线和跨主机恢复尚待验收，技术闭合不授予统计主表资格。
