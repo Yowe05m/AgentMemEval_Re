@@ -1,0 +1,1 @@
+Repair the incomplete, malformed, or schema-invalid action JSON below. Preserve action fields that are already explicit. If the summary is truncated, rewrite it as one very short sentence.

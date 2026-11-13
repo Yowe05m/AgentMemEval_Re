@@ -34,6 +34,9 @@ agentmemeval = "agentmemeval.cli.main:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"agentmemeval.path1_v1" = ["assets/*.json", "assets/formal_english/*.txt", "assets/formal_english/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

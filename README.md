@@ -562,3 +562,33 @@ agentmemeval formal-status --root <workers-root>
 `mock/not-for-paper/model-substituted`。Formal candidate 要等 canonical SHA、Prompt、Qwen、
 BGE-M3、schedule、统计计划和用户授权冻结后才能进入真实黄金短测；入口不会连接 AutoDL、
 租用实例或启动外部服务。
+
+## Path1 v1 独立协议库
+
+`agentmemeval.path1_v1` 保存冻结来源
+`06416317cca98105cb155941ffb76e3cdc29eeae` 的 Path1 行为，运行环境为
+Python `>=3.11,<3.13`。原有 main 模块、CLI 和 Python 3.10 支持保持各自契约。
+此命名空间仅支持 Expr/NoMemory 控制器、6×50 手形成与冻结内容保留/移除评价的库 API，
+并包含证据复算、终态策略及本地调度状态机。尚未提供真实 worker/远端执行器入口；
+测试通过、Slurm 终态或导入成功都不授予论文实验准入。
+
+入口为 `agentmemeval.path1_v1.experiments.path1` 的 `Path1Design`、
+`run_formation`、`run_evaluation_pair`，独立复算入口为
+`agentmemeval.path1_v1.analysis.path1_evidence.audit_evaluation_pair`。
+版本内的资源可通过
+`importlib.resources.files("agentmemeval.path1_v1").joinpath("assets")` 读取；
+英文文本文件是提示词披露与一致性证据，实际输入仍由版本内 Python renderer 生成。
+
+使用已有开发环境运行离线验证（先创建外部临时父目录）：
+
+```powershell
+python -m pytest tests/path1_v1 --import-mode=importlib --basetemp <外部临时目录的新子目录> -q
+python -m ruff check src/agentmemeval/path1_v1 tests/path1_v1
+```
+
+测试包含冻结来源的 AST/资源哈希，以及三个小适配的同 fixture 差分结果：
+Expr/Null factory、Path1 使用的 ArtifactManager 方法和固定英文 profile。
+真实 engine 的发牌、收益、动作/更新/修复请求亦与来源比较；fixture 固定时钟与 UUID，
+所有时间字段保留比较，仅文件管理器的返回路径和目录冲突消息使用相对测试根目录。
+该版本刻意独立保留控制器、记忆和扑克环境，后续 main 修复不会
+自动改变它。维护时须显式移植所需修复、更新来源记录，并重跑双实现差分与各自回归。

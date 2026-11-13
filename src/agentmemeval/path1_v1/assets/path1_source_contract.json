@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "kind": "path1_source_contract",
+  "plan_version": "20261113_v1",
+  "protocol": "path1_deployable_memory_package_value",
+  "execution_admission": "not_granted_by_contract_validation",
+  "model": {
+    "name": "Qwen/Qwen3.5-9B",
+    "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "tokenizer_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "runtime_verification": "required_separately"
+  },
+  "table": {
+    "table_size": 8,
+    "small_blind": 1,
+    "big_blind": 2,
+    "starting_stack": 1000,
+    "max_raises_per_street": 4,
+    "lifecycle": "continuous_rebuy",
+    "rebuy": "after_hand_if_stack_lte_zero_to_starting_stack"
+  },
+  "formation": {
+    "hands": 300,
+    "episodes": 6,
+    "episode_hands": 50,
+    "snapshot_hands": [30, 90, 150, 300],
+    "primary_snapshot": "after_hand_300_scheduled_update_terminal_before_episode_reset",
+    "persistent_hero_memory_carried": true,
+    "trajectory_window_cleared_between_episodes": true,
+    "application_state_reset_between_episodes": true,
+    "selection_uses_payoff": false
+  },
+  "evaluation": {
+    "episode_hands": 50,
+    "arms": ["retained", "removed"],
+    "same_controller": true,
+    "updater_enabled": false,
+    "seat_strata": 8,
+    "cross_artifact_streams": "independent",
+    "pairing": "within_artifact_episode_exogenous_deals_initial_state",
+    "primary_outcome": "net_BB_per_100_difference_equal_artifact_weight",
+    "claim": "joint_deployable_package_retention_effect_not_pure_semantic_causality"
+  },
+  "controller": {
+    "hero": {
+      "mechanism": "expr",
+      "memory_scope": "per_agent",
+      "raise_sizing_policy": "local_discrete",
+      "strategy_risk_gate": "disabled",
+      "window_size": 30,
+      "experience_revision_strategy": "llm",
+      "experience_semantics_mode": "quality_filtered_v2",
+      "experience_revision_contract": "structured_patch_v2",
+      "experience_document_contract": "five_section_actionable_v1",
+      "experience_failure_policy": "fail_closed_keep",
+      "experience_max_chars": 2400,
+      "experience_prompt_token_budget": 65536,
+      "experience_revision_prompt_window_size": 2,
+      "experience_update_period": 1,
+      "experience_semantic_review_mode": "disabled"
+    },
+    "opponent": {
+      "mechanism": "no_memory",
+      "memory_scope": "per_agent",
+      "raise_sizing_policy": "local_discrete",
+      "strategy_risk_gate": "disabled"
+    },
+    "opponent_count": 7,
+    "opponent_model": "same_as_hero",
+    "prompt_source": "versioned_native_historical_english_templates",
+    "terminal_policy": {
+      "contract_status": "required_behavior_not_runtime_attestation",
+      "eligibility_keep_legal_reject": "continue_preserve_valid_memory",
+      "revision_initial_requests": 1,
+      "revision_max_contract_repairs": 1,
+      "revision_exhaustion": "fail_closed_keep_continue_with_evidence",
+      "action_guard": "frozen_existing_legal_mapping",
+      "action_max_contract_repairs": 1,
+      "action_exhaustion": "terminate_unit_stop_version_no_complete_case_primary_mean",
+      "state_related_failure": "terminate_unit_stop_version_no_automatic_retry",
+      "unknown_failure": "no_automatic_retry",
+      "proven_external_failure_max_retries": 2,
+      "all_attempts_retained": true
+    }
+  },
+  "provider": {
+    "provider": "openai_compatible",
+    "served_model_name": "qwen/qwen3.5-9b",
+    "structured_output_mode": "json_schema",
+    "json_schema_unsupported_keywords": ["uniqueItems"],
+    "temperature": 0.0,
+    "experience_temperature": 1.0,
+    "timeout_seconds": 600,
+    "max_output_tokens": 256,
+    "repair_max_output_tokens": 256,
+    "experience_max_output_tokens": 8192,
+    "experience_repair_max_output_tokens": 4096,
+    "context_limit": 65536,
+    "transport_retry_policy": "requires_terminal_policy_mapping_before_execution",
+    "sampler_seed_backend_support": "must_verify"
+  },
+  "service": {
+    "dtype": "bfloat16",
+    "tensor_parallel_size": 1,
+    "max_model_len": 65536,
+    "max_num_seqs": 1,
+    "enable_prefix_caching": false,
+    "quantization": null,
+    "enable_thinking": false
+  },
+  "pilot": {
+    "initial_formations": 16,
+    "nuisance_checkpoints": [16, 24, 32],
+    "execution_batches": [8, 8],
+    "episodes_per_artifact_per_arm": 16,
+    "formal_reuse": false
+  },
+  "formal": {
+    "minimum_formations": 40,
+    "formation_rounding_multiple": 8,
+    "episode_grid": [8, 16, 32, 64, 128, 256],
+    "meaningful_effect_BB100": 5.0,
+    "target_95CI_half_width_BB100": 2.5,
+    "power_target": 0.9,
+    "power_null": "mu_equals_zero_two_sided",
+    "effect_based_optional_stopping": false
+  },
+  "technical": {
+    "formation_episodes": 2,
+    "formation_episode_hands": 6,
+    "evaluation_pairs": 2,
+    "evaluation_episode_hands": 4,
+    "not_for_paper": true
+  }
+}

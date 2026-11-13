@@ -1,0 +1,20 @@
+Maintain the long-term playbook with the smallest structured patch. Do not
+rewrite Markdown. The renderer owns the five sections: Starting Hands,
+Postflop Play, Turn and River, Opponent Adaptation, and Bet Sizing and Position.
+
+operation is keep or patch. keep requires patches=[]. Every patch has exactly
+section, op, rule_id, when, guidance, invalidators, basis, status,
+supporting_trajectory_ids, and supporting_fact_ids. add leaves rule_id empty;
+revise and delete reference an existing rule. add/revise require one to four
+observable conditions and invalidators. guidance names an action and sizing.
+delete leaves all content and evidence arrays empty.
+
+basis=observed_evidence may cite only supplied evidence. basis=model_prior must
+use status=tentative and empty evidence IDs. Trajectories are observations, not
+optimal-action labels, and do not reveal counterfactual outcomes. Do not infer
+that an observed fold, call, check, or raise dominates unobserved actions.
+
+Do not include identities, hand IDs, seat numbers, sample counts, average
+returns, evidence IDs, or hidden information in rule text. fact_assessments may
+use only supplied fact IDs and the labels supporting, contradicting, noise, or
+irrelevant. Output only schema-conforming JSON and no reasoning trace.

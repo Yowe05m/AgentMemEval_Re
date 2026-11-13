@@ -1,0 +1,63 @@
+{
+  "assets": [
+    {
+      "asset": "decision__base_system_prompt.txt",
+      "byte_count": 1600,
+      "language": "en",
+      "origin": "agentmemeval.prompts.decision.BASE_SYSTEM_PROMPT",
+      "sha256_utf8": "f0de3d7a2a18be70166f0323036f97ed2f6558fc86886c77a923905bd360afef"
+    },
+    {
+      "asset": "decision__prompt_template_version.txt",
+      "byte_count": 22,
+      "language": "en",
+      "origin": "agentmemeval.prompts.decision.PROMPT_TEMPLATE_VERSION",
+      "sha256_utf8": "62d16389002dd8db1f604cb612f4ae081dc3ad0cb115eeccb9adf081534ef430"
+    },
+    {
+      "asset": "experience_update__experience_patch_update_prompt.txt",
+      "byte_count": 1277,
+      "language": "en",
+      "origin": "agentmemeval.prompts.experience_update.EXPERIENCE_PATCH_UPDATE_PROMPT",
+      "sha256_utf8": "23dd1dcbf1042d42972444339de68f8d12a2f662604a542ce21740d2002309e2"
+    },
+    {
+      "asset": "experiential__experience_patch_revision_system_prompt_2400.txt",
+      "byte_count": 772,
+      "language": "en",
+      "origin": "rendered experience revision system prompt",
+      "sha256_utf8": "0d28586136de42f8be79e79d45892c5a2bdd565b16ae992afa101789e2d2042b"
+    },
+    {
+      "asset": "experiential__experience_patch_revision_system_template.txt",
+      "byte_count": 779,
+      "language": "en",
+      "origin": "agentmemeval.memory.experiential.EXPERIENCE_PATCH_REVISION_SYSTEM_TEMPLATE",
+      "sha256_utf8": "efa058ef7488d6c8c818ba1b29d87f65e3d8743f126ae5356036ae0330449391"
+    },
+    {
+      "asset": "experiential__initial_experience.txt",
+      "byte_count": 164,
+      "language": "en",
+      "origin": "agentmemeval.memory.experiential.INITIAL_EXPERIENCE",
+      "sha256_utf8": "cfe15e826814f22ad804bd7a7a3045fbbabbc157711aa65139769adc5915c0ca"
+    },
+    {
+      "asset": "provider__action_semantic_repair_system_prompt.txt",
+      "byte_count": 293,
+      "language": "en",
+      "origin": "agentmemeval.llm.providers.openai_compatible action repair system prompt",
+      "sha256_utf8": "de0d0f8a17d834dd42b559249a4d6f41e8cf91d26a68183caf8383a3c6ced142"
+    },
+    {
+      "asset": "provider__action_semantic_repair_user_prefix.txt",
+      "byte_count": 189,
+      "language": "en",
+      "origin": "agentmemeval.llm.providers.openai_compatible action repair user prefix",
+      "sha256_utf8": "b7f455094441701728264851e781e247b7d37a7437ff70d9c21542b2c6632ee7"
+    }
+  ],
+  "profile": "reviewer_english",
+  "runtime_input": true,
+  "schema_version": "agentmemeval-english-prompt-manifest-v1"
+}
