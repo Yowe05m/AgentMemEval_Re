@@ -160,10 +160,15 @@ def validate_probe_request(request_path: Path | str, *, _collecting_resource: bo
 
 def validate_probe_launch(launch: dict, kind: str) -> None:
     """v2 fixed execution identity; no arbitrary flags, commands or environment."""
+    optional = {"language_model_only"} if (kind == "service_probe" and type(launch) is dict
+                                          and "language_model_only" in launch) else set()
     _object(launch, {"python_executable", "python_sha256", "service_python",
                      "service_python_sha256", "service_port", "command_seconds",
                      "cleanup_seconds", "startup_seconds", "python_identity",
-                     "service_python_identity"}, "E0 launch")
+                     "service_python_identity"} | optional, "E0 launch")
+    if optional:
+        _require(type(launch["language_model_only"]) is bool,
+                 "language_model_only must be an explicit boolean")
     from agentmemeval.path1_v1.operations.interpreters import verify_python_interpreter
 
     expected = launch["python_identity"]
@@ -369,6 +374,15 @@ def _verify_loaded_source(request: ValidatedProbeRequest) -> None:
                           identity["core_files"] + identity["operations_files"])
 
 
+def requested_language_model_only(request) -> bool:
+    """Legacy requests retain their original multimodal startup policy."""
+    launch = request.request.get("launch", {}) if request.request.get("schema_version") == 2 else {}
+    _require(type(launch) is dict, "service launch must be an object")
+    value = launch.get("language_model_only", False)
+    _require(type(value) is bool, "language_model_only must be an explicit boolean")
+    return value
+
+
 def check_service_arguments(argv: list[str] | tuple[str, ...], request) -> dict:
     """Check explicit startup arguments; effective backend state stays pending."""
     flags = {}
@@ -395,11 +409,20 @@ def check_service_arguments(argv: list[str] | tuple[str, ...], request) -> dict:
     _require(flags.get("--no-enable-prefix-caching") is True
              and "--enable-prefix-caching" not in flags and "--quantization" not in flags,
              "cache/quantization startup policy mismatch")
+    language_model_only = requested_language_model_only(request)
+    _require("--no-language-model-only" not in flags and
+             ((flags.get("--language-model-only") is True) if language_model_only
+              else "--language-model-only" not in flags),
+             "language-model-only startup policy differs from bound request")
     model = str(_absolute(request.request["model_root"]))
     _require(flags.get("--model") == model or ("serve" in argv and
              list(argv[argv.index("serve") + 1:argv.index("serve") + 2]) == [model]),
              "service did not select the actual bound model path")
-    return {"explicit_flags": flags, "effective_backend_settings_verified": False}
+    result = {"explicit_flags": flags, "effective_backend_settings_verified": False}
+    if language_model_only:
+        result.update(language_model_only=True, requested_modality_limit=0,
+                      effective_multimodal_state_verified=False)
+    return result
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -714,9 +737,10 @@ def run_service_probe(request_path: Path, output_directory: Path,
     argv = [str(executable), "-B", "-m", "vllm.entrypoints.openai.api_server", "--model", model,
             "--tokenizer", model, "--dtype", "bfloat16", "--tensor-parallel-size", "1",
             "--max-model-len", "65536", "--max-num-seqs", "1", "--no-enable-prefix-caching",
+            *(["--language-model-only"] if requested_language_model_only(request) else []),
             "--served-model-name", request.contract["source_contract"]["provider"]
             ["served_model_name"], "--host", "127.0.0.1", "--port", str(port)]
-    check_service_arguments(argv, request)
+    arguments = check_service_arguments(argv, request)
     binding = ProcessBinding(campaign_id=request.contract["campaign_id"],
                              intent_id=request.intent_id, job_id=host["job_id"],
                              source_sha256=content_digest(request.contract["runtime_identity"]),
@@ -725,9 +749,12 @@ def run_service_probe(request_path: Path, output_directory: Path,
     env = dict(os.environ, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
     env.pop("PYTHONPATH", None)
     endpoint = f"http://127.0.0.1:{port}/v1"
-    _new_json(output / "launch.json", {"argv": argv, "binding": asdict(binding),
+    launch_record = {"argv": argv, "binding": asdict(binding),
               "python_resolved": str(executable.resolve()),
-              "python_sha256": _hash_file(executable.resolve())})
+              "python_sha256": _hash_file(executable.resolve())}
+    if requested_language_model_only(request):
+        launch_record["requested_service_policy"] = arguments
+    _new_json(output / "launch.json", launch_record)
     with (output / "service_stdout.log").open("xb") as stdout, (
         output / "service_stderr.log"
     ).open("xb") as stderr:

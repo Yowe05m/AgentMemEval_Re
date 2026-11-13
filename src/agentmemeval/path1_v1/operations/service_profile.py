@@ -15,7 +15,6 @@ def validate_service_profile(config: dict) -> None:
         "kind": "path1_e0_service_site_config",
         "phase": "E0",
         "job_kind": "service_probe",
-        "resource_profile_version": 1,
         "walltime_seconds": 7200,
         "command_seconds": 6600,
         "cleanup_seconds": 600,
@@ -31,7 +30,14 @@ def validate_service_profile(config: dict) -> None:
         type(config.get(key)) is not type(value) or config.get(key) != value
         for key, value in expected.items()
     ):
-        raise SubmissionDisabled("service E0 profile differs from version 1")
+        raise SubmissionDisabled("service E0 profile differs from frozen settings")
+    version = config.get("resource_profile_version")
+    if type(version) is not int or version not in (1, 2):
+        raise SubmissionDisabled("unsupported service E0 profile version")
+    if version == 1 and "language_model_only" in config:
+        raise SubmissionDisabled("legacy service profile cannot change its multimodal policy")
+    if version == 2 and config.get("language_model_only") is not True:
+        raise SubmissionDisabled("service profile version 2 requires language_model_only=true")
     if any(
         key in config
         for key in (
@@ -68,6 +74,7 @@ def planned_service_argv(config: dict, source: dict) -> list[str]:
         "--max-num-seqs",
         "1",
         "--no-enable-prefix-caching",
+        *(["--language-model-only"] if config.get("language_model_only", False) else []),
         "--served-model-name",
         source["provider"]["served_model_name"],
         "--host",
@@ -91,6 +98,11 @@ def validate_service_submission(request, probe, config: dict) -> dict:
     ):
         raise SubmissionDisabled("service submitted resources differ from frozen profile")
     launch = probe.request["launch"]
+    if (("language_model_only" in launch) != ("language_model_only" in config)
+            or ("language_model_only" in launch and
+                (type(launch["language_model_only"]) is not bool
+                 or launch["language_model_only"] != config["language_model_only"]))):
+        raise SubmissionDisabled("service launch differs from its text-only profile")
     for key in (
         "python_executable",
         "python_sha256",
@@ -123,8 +135,8 @@ def validate_service_submission(request, probe, config: dict) -> dict:
         key: getattr(request.spec, key)
         for key in ("cpus_per_task", "memory_mib", "gpus", "walltime_seconds")
     }
-    return {
-        "profile_version": 1,
+    result = {
+        "profile_version": config["resource_profile_version"],
         "requested_resources": resources,
         "queue_policy": config["queue_policy"],
         "qos_policy": config["qos_policy"],
@@ -133,6 +145,10 @@ def validate_service_submission(request, probe, config: dict) -> dict:
         "allocation_verified": False,
         "runtime_admission": False,
     }
+    if config["resource_profile_version"] == 2:
+        result.update(language_model_only=True, requested_modality_limit=0,
+                      effective_multimodal_state_verified=False)
+    return result
 
 
 def read_service_config(probe) -> dict:

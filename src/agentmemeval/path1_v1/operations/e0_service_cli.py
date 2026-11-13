@@ -91,6 +91,8 @@ def _config(raw: bytes) -> dict:
         "model_manifest_sha256",
         "commands",
     }
+    if config["resource_profile_version"] == 2:
+        keys.add("language_model_only")
     _require(set(config) == keys, "service config keys differ")
     for key in ("cluster", "account", "user", "partition"):
         identifier(config[key])
@@ -119,6 +121,8 @@ def prepare(repository: Path, run_root: Path, campaign_id: str, config_relative:
     config_path = _config_path(repository, config_relative)
     raw = config_path.read_bytes()
     config = _config(raw)
+    _require(config["resource_profile_version"] == 2 and config["language_model_only"] is True,
+             "new service preparation requires text-only profile version 2")
     lock_path = _config_path(repository, config["dependency_lock"])
     lock_raw = lock_path.read_bytes()
     verify_environment(lock_path)
@@ -246,6 +250,7 @@ def prepare(repository: Path, run_root: Path, campaign_id: str, config_relative:
         )
     }
     launch.update(python_identity=python_identity, service_python_identity=service_identity)
+    launch["language_model_only"] = config["language_model_only"]
     probe = {
         "schema_version": 2,
         "kind": "path1_e0_probe_request",

@@ -33,7 +33,8 @@ def fixture(tmp_path, monkeypatch):
         schema_version=1,
         kind="path1_e0_service_site_config",
         job_kind="service_probe",
-        resource_profile_version=1,
+        resource_profile_version=2,
+        language_model_only=True,
         walltime_seconds=7200,
         command_seconds=6600,
         cleanup_seconds=600,
@@ -52,7 +53,7 @@ def fixture(tmp_path, monkeypatch):
     )
     path.write_bytes(canonical_json(config))
     _git(repo, "add", ".")
-    _git(repo, "commit", "-qm", "version 1 service fixture configuration")
+    _git(repo, "commit", "-qm", "version 2 text-only service fixture configuration")
     return repo, path, config
 
 
@@ -74,6 +75,10 @@ def test_prepare_real_git_model_and_inspect_without_scheduler_or_model(tmp_path,
     assert result["runtime_admission"] is False and result["scientific_admission"] is False
     assert result["service_profile"]["allocation_verified"] is False
     assert "--no-enable-prefix-caching" in result["service_profile"]["service_argv"]
+    assert result["service_profile"]["service_argv"].count("--language-model-only") == 1
+    assert result["service_profile"]["profile_version"] == 2
+    assert result["service_profile"]["language_model_only"] is True
+    assert result["service_profile"]["effective_multimodal_state_verified"] is False
     assert (root / "inputs/site_config.json").read_bytes() == path.read_bytes()
     assert (root / "inputs/model_manifest.json").read_bytes() == (
         tmp_path / "model_manifest.json"
@@ -82,6 +87,7 @@ def test_prepare_real_git_model_and_inspect_without_scheduler_or_model(tmp_path,
     assert probe.contract["cohort"]["formation_count"] == 0
     assert probe.contract["cohort"]["seed_inventory_sha256"] is None
     assert probe.request["launch"]["startup_seconds"] == 1200
+    assert probe.request["launch"]["language_model_only"] is True
     assert not probe.output_directory.exists()
     before = {
         p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()
@@ -202,7 +208,10 @@ def test_actual_partition_limits_reject_service_request(tmp_path, limits):
     assert not list((tmp_path / "preflight").glob("*.json"))
 
 
-def test_planned_argv_matches_real_launcher_before_any_process_creation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("profile_version", [1, 2])
+def test_planned_argv_matches_real_launcher_before_any_process_creation(
+    tmp_path, monkeypatch, profile_version
+):
     from agentmemeval.path1_v1.operations import runtime_probe
     from agentmemeval.path1_v1.operations.process_ownership import OwnedProcess
     from path1_v1.unit.test_runtime_probe import offline_collector
@@ -220,6 +229,13 @@ def test_planned_argv_matches_real_launcher_before_any_process_creation(tmp_path
     config.update(
         service_python=str(executable), model_root=request.request["model_root"], service_port=8000
     )
+    if profile_version == 1:
+        config["resource_profile_version"] = 1
+        del config["language_model_only"]
+    else:
+        request.request["schema_version"] = 2
+        request.request["launch"] = {"service_python": str(executable), "service_port": 8000,
+                                     "language_model_only": True}
     actual = []
 
     def capture(argv, **kwargs):
@@ -233,4 +249,10 @@ def test_planned_argv_matches_real_launcher_before_any_process_creation(tmp_path
             tmp_path / "unused", request.output_directory, executable, 8000
         )
     assert actual == [planned_service_argv(config, request.contract["source_contract"])]
+    launch = json.loads((request.output_directory / "launch.json").read_text(encoding="utf-8"))
+    if profile_version == 2:
+        assert launch["requested_service_policy"]["language_model_only"] is True
+        assert launch["requested_service_policy"]["effective_multimodal_state_verified"] is False
+    else:
+        assert "requested_service_policy" not in launch
     assert not (tmp_path / "payload").exists()
