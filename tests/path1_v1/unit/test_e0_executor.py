@@ -38,7 +38,8 @@ def seal_request(fixture):
 
 
 def make_e0_fixture(
-    root, kind="resource_probe", mode="normal", scope=("cluster", "account", "owner")
+    root, kind="resource_probe", mode="normal", scope=("cluster", "account", "owner"),
+    queue_policy=(3600, 3720),
 ):
     from path1_v1.unit.test_intent_executor import FAKE_SBATCH
     from path1_v1.unit.test_operations_contracts import _git
@@ -62,6 +63,13 @@ def make_e0_fixture(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("# E0 identity fixture; not executed\n", encoding="utf-8")
         operation_paths.append(relative)
+    if kind == "resource_probe":
+        (repo / data["build_kwargs"]["config_path"]).write_text(json.dumps({
+            "kind": "path1_e0_resource_site_config", "phase": "E0", "job_kind": "resource_probe",
+            "walltime_seconds": 120, "command_seconds": 90, "cleanup_seconds": 30,
+            "gpus": 1, "stage_cap": 1, "queue_start_window_seconds": queue_policy[0],
+            "scheduler_deadline_offset_seconds": queue_policy[1],
+        }), encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "complete E0 fixture closure")
     kwargs = dict(data["build_kwargs"])
@@ -174,7 +182,7 @@ def test_real_git_model_preflight_helper_submission_chain_and_reentry(tmp_path, 
     assert receipt.status == "accepted" and receipt.job_id == "551"
     raw = (tmp_path / "external_effect.json").read_bytes()
     effect = json.loads(raw)
-    assert ("--deadline=now+130seconds" in effect["argv"]) == (kind == "resource_probe")
+    assert ("--deadline=now+3720seconds" in effect["argv"]) == (kind == "resource_probe")
     assert not any(arg.startswith("--immediate") for arg in effect["argv"])
     if kind == "service_probe":
         assert not any(arg.startswith("--deadline") for arg in effect["argv"])
@@ -357,3 +365,25 @@ def test_user_association_capacity_never_admits_research_or_missing_phase(
     with pytest.raises(SubmissionDisabled, match="only for validated E0"):
         fixture.executor._capacity(fixture.request, case["ledger"], 1, validated_phase=phase)
     assert not (tmp_path / "external_effect.json").exists()
+
+
+@pytest.mark.parametrize("queue_policy", [(10, 130), (3600, 130), (10, 3720), (3601, 3721),
+                                         (3600.0, 3720), (True, 3720)])
+def test_current_resource_submission_rejects_old_or_unbound_queue_policy(tmp_path, queue_policy):
+    fixture = make_e0_fixture(tmp_path, queue_policy=queue_policy)
+    with pytest.raises(executor.ExecutorError, match="queue policy"):
+        fixture.executor.submit_once(fixture.request, timeout_seconds=30)
+    assert not (tmp_path / "external_effect.json").exists()
+
+
+def test_legacy_queue_policy_is_only_an_explicit_read_path():
+    policy = {"kind": "path1_e0_resource_site_config", "phase": "E0",
+              "job_kind": "resource_probe", "walltime_seconds": 120,
+              "command_seconds": 90, "cleanup_seconds": 30, "gpus": 1, "stage_cap": 1,
+              "queue_start_window_seconds": 10, "scheduler_deadline_offset_seconds": 130}
+    assert executor.resource_queue_policy(policy, allow_legacy=True) == (10, 130)
+    with pytest.raises(executor.ExecutorError, match="queue policy"):
+        executor.resource_queue_policy(policy)
+    policy["gpus"] = True
+    with pytest.raises(executor.ExecutorError, match="protocol"):
+        executor.resource_queue_policy(policy, allow_legacy=True)

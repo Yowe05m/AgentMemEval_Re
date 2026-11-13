@@ -205,6 +205,8 @@ def build_runtime_identity(
     dependency_lock_path: str,
     model_manifest_path: Path | str | None = None,
     model_root: Path | str | None = None,
+    model_verification: Any = None,
+    model_binding_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Read actual source/config/model bytes without importing or running them.
 
@@ -256,7 +258,16 @@ def build_runtime_identity(
         ).decode().strip() != head_blobs[path]
     )
     manifest_path = Path(model_manifest_path) if model_manifest_path is not None else None
-    model = _model_identity(manifest_path, Path(model_root) if model_root is not None else None)
+    if model_verification is None:
+        _require(model_binding_sha256 is None, "model binding requires live verification")
+        model = _model_identity(manifest_path, Path(model_root) if model_root is not None else None)
+    else:
+        from agentmemeval.path1_v1.operations.model_verification import reuse_model_files
+
+        _require(manifest_path is not None and model_root is not None,
+                 "live model verification requires actual model paths")
+        model = reuse_model_files(model_verification, manifest_path, model_root,
+                                  binding_sha256=model_binding_sha256)
     clean = not status_before
     identity: dict[str, Any] = {
         "schema_version": 1, "kind": "path1_runtime_identity",
@@ -285,6 +296,9 @@ def build_runtime_identity(
     if manifest_path is not None:
         _require(hashlib.sha256(manifest_path.read_bytes()).hexdigest()
                  == model["manifest_sha256"], "model manifest changed while collecting identity")
+    if model_verification is not None:
+        reuse_model_files(model_verification, manifest_path, model_root,
+                          binding_sha256=model_binding_sha256, expected_identity=model)
     identity["identity_sha256"] = content_digest(identity)
     return identity
 

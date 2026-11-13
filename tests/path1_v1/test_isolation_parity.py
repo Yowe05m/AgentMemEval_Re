@@ -67,6 +67,7 @@ def test_mechanical_modules_preserve_complete_ast_and_import_only_their_version(
     assert set(evolution["modules"]) == {
         "operations/worker.py", "operations/intent_executor.py",
         "operations/submission_process.py", "storage/snapshot_archive.py",
+        "operations/contracts.py",
     }
     root = files(PREFIX)
     for name, record in expected["modules"].items():
@@ -87,6 +88,19 @@ def test_mechanical_modules_preserve_complete_ast_and_import_only_their_version(
                 assert change["reason"] and change["regression_tests"], name
                 assert all((Path(__file__).parents[2] / test).is_file()
                            for test in change["regression_tests"]), name
+                if name == "operations/contracts.py":
+                    # The execution identity builder may reuse a verified
+                    # in-process model capability. Every other contract rule,
+                    # hashing algorithm and scientific boundary stays frozen.
+                    assert change["allowed_top_level_changes"] == ["build_runtime_identity"]
+                    preserved = ast.parse(root.joinpath(name).read_text(encoding="utf-8"))
+                    preserved.body = [node for node in preserved.body
+                                      if getattr(node, "name", None) != "build_runtime_identity"]
+                    unchanged = stable_ast_dump(OriginalNamespace(
+                        expected.get("routing_literal_inverse")).visit(preserved))
+                    assert hashlib.sha256(unchanged.encode()).hexdigest() == (
+                        change["baseline_unchanged_top_level_ast_sha256"]
+                    )
                 expected_ast = change["normalized_ast_sha256"]
             else:
                 expected_ast = record["ast_sha256"]

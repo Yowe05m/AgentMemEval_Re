@@ -366,7 +366,7 @@ def test_service_owner_is_closed_when_probe_fails_before_research(tmp_path, monk
             kwargs["receipt_sink"](owner, receipt)
 
     monkeypatch.setattr(OwnedProcess, "managed", managed)
-    monkeypatch.setattr(probe, "validate_probe_request", lambda _: request)
+    monkeypatch.setattr(probe, "validate_probe_request", lambda _, **kwargs: request)
     monkeypatch.setattr(probe, "build_opener", lambda *_: SimpleNamespace(open=lambda *_, **__: (
         nullcontext(SimpleNamespace(code=200)))))
 
@@ -421,7 +421,7 @@ def test_service_creation_interrupt_sink_persists_before_owner_is_yielded(tmp_pa
         yield  # The lifecycle never obtains owner; only the sink has it.
 
     monkeypatch.setattr(OwnedProcess, "managed", interrupted)
-    monkeypatch.setattr(probe, "validate_probe_request", lambda _: request)
+    monkeypatch.setattr(probe, "validate_probe_request", lambda _, **kwargs: request)
     executable = tmp_path / "offline_python"
     executable.write_bytes(b"not executed")
     with pytest.raises(ProcessInterrupted):

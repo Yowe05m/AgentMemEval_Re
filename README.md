@@ -627,20 +627,31 @@ tokenizer/loader 与分配 GPU 的证据必须补齐后才能实现 E1 的可信
 资源探针使用独立的准备、提交和查询入口：
 
 ```text
-python -B -s -m agentmemeval.path1_v1.operations.e0_resource_cli prepare --repository <规范Git目录> --run-root <全新运行目录> --campaign-id <campaign> --config configs/path1_v1/e0_resource_scze856.json
+python -B -s -m agentmemeval.path1_v1.operations.e0_resource_cli prepare --repository <规范Git目录> --run-root <全新运行目录> --campaign-id <campaign> --config configs/path1_v1/e0_resource_scze856.json --attempt 1
 python -B -s -m agentmemeval.path1_v1.operations.e0_resource_cli submit --run-root <同一运行目录> --descriptor-sha256 <已登记描述文件SHA256>
 python -B -s -m agentmemeval.path1_v1.operations.e0_resource_cli lookup --run-root <同一运行目录> --descriptor-sha256 <同一SHA256>
 ```
 
 先在 campaign 记录中登记 prepare 返回的 intent、请求和描述文件 SHA，再显式提交。
 准备阶段不调用调度器；同一意图由持久执行器防止重复 sbatch。资源探针固定为 1 GPU、
-120 秒 walltime（90 秒采集和 30 秒清理），仅该探针带 `--deadline=now+130seconds`。
-现场 sbatch 不支持 `--immediate`；截止时间留出约 10 秒计划启动机会，但调度器处理粒度
-不保证恰在第 10 秒删除等待作业，必须继续读取真实状态。
+120 秒 walltime（90 秒采集和 30 秒清理），仅该探针带 `--deadline=now+3720seconds`，
+提供 3600 秒计划启动机会。现场 sbatch 不支持 `--immediate`；调度器处理粒度不保证
+精确在窗口边界删除等待作业，必须继续读取真实状态。历史 10 秒/130 秒描述文件保留只读查询，
+不能再次提交。新描述文件同时保存站点配置原字节；修改配置不能重绑已有意图。
 虚拟环境的 Python 入口、真实前缀及其目标文件均被核验，不把入口解析成另一环境的 Python。
 站点配置绑定实际命令哈希；环境 JSON 是实际包版本观察锁，不是 wheel 内容或 GPU 加载证明。
 E0 可使用有效用户的唯一未分区关联额度，读取其全部作业并扣除未知提交、保留 2 个名额。
 此额度不宣称全账户可见或 GPU 可分配，E1/E2/E3 的原准入要求保持。
+
+未启动即 DEADLINE 的 E0 作业由 `operations.e0_reconcile` 对账：原提交身份、账本和
+原始工件、持久 accounting、无分配/step、静默与回收证据须同时成立。产品按正式状态迁移
+追加失败终态和审计；不伪造 worker 清理记录，也不将本地归档声明当作占位释放依据。
+再次尝试必须保留原意图，使用递增 attempt、新目录和绑定前一可信终态的 retry evidence。
+执行器在提交前和放行前再次核对重试来源，未封口的占位继续计入；同一意图永不重提。
+
+服务 E0 在每个新进程首次完整核对模型内容。同一进程内可复用绑定请求的短期验证能力，
+每次复用仍核对完整文件清单、文件身份和 manifest 内容；进程变化、过期或文件变化均拒绝。
+该能力不能从 JSON 回执恢复，不能跨 allocation 代替首次内容校验，也不证明模型已在 GPU 加载。
 
 `operations.closure` 联合 worker 终态、scheduler allocation/step、服务退出证据，
 检查至少 10 秒静默和完整归档/恢复哈希；`closure_service` 提供持久化服务生产者与读取器。

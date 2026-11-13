@@ -26,7 +26,6 @@ from agentmemeval.path1_v1.operations.contracts import content_digest
 from agentmemeval.path1_v1.operations.slurm import (
     ACTIVE_STATES,
     READ_ENV,
-    TERMINAL_STATES,
     CommandResult,
     CommandTransport,
     JobRecord,
@@ -339,6 +338,9 @@ def validate_user_association_capacity(
     stage_cap: int,
     now: datetime,
     validated_phase: str,
+    *,
+    resolved_e0: dict | None = None,
+    store=None,
 ) -> dict:
     """Validate E0 capacity while the caller holds the account-scope ledger lock."""
     if validated_phase != "E0":
@@ -372,6 +374,19 @@ def validate_user_association_capacity(
     ):
         raise SubmissionDisabled("capacity requires the matching account-scope ledger")
     association_id, limit, jobs = _parsed(snapshot)
+    resolutions = {} if resolved_e0 is None else resolved_e0
+    if type(resolutions) is not dict or any(key not in ledger["intents"] for key in resolutions):
+        raise SubmissionDisabled("invalid E0 terminal resolution scope")
+    if resolutions:
+        from agentmemeval.path1_v1.operations.e0_reconcile import E0TerminalResolution
+
+        if store is None or any(type(value) is not E0TerminalResolution
+                                for value in resolutions.values()):
+            raise SubmissionDisabled("typed durable E0 terminal resolutions required")
+        for intent, resolution in resolutions.items():
+            if resolution.intent_id != intent:
+                raise SubmissionDisabled("E0 terminal resolution intent differs")
+            resolution.validate(ledger["intents"][intent], store=store)
     if any(job.matches(request) for job in jobs):
         raise SubmissionDisabled("this intent already exists in scheduler observations")
     active = {job.key: job for job in jobs if job.state in ACTIVE_STATES}
@@ -417,11 +432,20 @@ def validate_user_association_capacity(
         ]
         if len(represented) > 1:
             raise SubmissionDisabled("one durable intent matches multiple scheduler allocations")
+        if intent in resolutions:
+            if cleanup_failed or any(
+                job.state != "DEADLINE" or job.job_id != resolutions[intent].job_id
+                for job in represented
+            ):
+                raise SubmissionDisabled("scheduler/cleanup contradicts sealed unstarted E0")
+            continue
         if (
             not represented
-            or represented[0].state not in ACTIVE_STATES | TERMINAL_STATES
-            or (cleanup_failed and represented[0].state in TERMINAL_STATES)
+            or represented[0].state not in ACTIVE_STATES
         ):
+            # Terminal accounting proves scheduler status, not completion of
+            # the durable submission/cleanup protocol. Keep the reservation
+            # until the bound E0 reconciliation above verifies its release.
             unknown_user += 1
             unknown_campaign += previous.campaign_id == request.campaign_id
     total, own = len(active) + unknown_user, len(campaign) + unknown_campaign

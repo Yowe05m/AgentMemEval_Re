@@ -285,14 +285,14 @@ def test_unknown_reservations_include_other_campaigns_and_claimed(case):
 
 
 @pytest.mark.parametrize(
-    "state", ["RUNNING", "PENDING", "COMPLETED", "FAILED", "CANCELLED by 4781"]
+    "state", ["RUNNING", "PENDING", "COMPLETED", "FAILED", "DEADLINE", "CANCELLED by 4781"]
 )
-def test_matching_active_or_explicit_terminal_removes_unknown_double_count(case, state):
+def test_active_counted_once_but_unsealed_terminal_keeps_reservation(case, state):
     old = make_request(2)
     case["ledger"]["intents"][old.intent_id] = reservation(old, job_id="123")
     row = scheduler_row(old, state=state, source="sacct")
     result = validate(case, snapshot=raw(case, accounting=row), stage_cap=2)
-    assert result["account_occupancy"] == int(state in {"RUNNING", "PENDING"})
+    assert result["account_occupancy"] == 1
 
 
 @pytest.mark.parametrize(
@@ -376,6 +376,46 @@ def test_cleanup_persistence_failure_keeps_slot_after_scheduler_terminal(case, s
     assert validate(case, snapshot=snap, stage_cap=2)["account_occupancy"] == 1
     with pytest.raises(SlurmError, match="no admission"):
         validate(case, snapshot=snap)
+
+
+def test_terminal_accounting_alone_cannot_release_stage_one(case):
+    old = make_request(2)
+    case["ledger"]["intents"][old.intent_id] = reservation(old, status="accepted", job_id="123")
+    snap = raw(case, accounting=scheduler_row(old, state="DEADLINE", source="sacct"))
+    with pytest.raises(SlurmError, match="no admission"):
+        validate(case, snapshot=snap)
+
+
+def test_json_terminal_resolution_cannot_release_a_reservation(case):
+    old = make_request(2)
+    case["ledger"]["intents"][old.intent_id] = reservation(old, status="accepted", job_id="123")
+    with pytest.raises(SlurmError, match="typed durable"):
+        capacity.validate_user_association_capacity(
+            case["snapshot"], case["request"], case["ledger"], 1, NOW, "E0",
+            resolved_e0={old.intent_id: {"verified": True, "intent_id": old.intent_id}},
+            store=object(),
+        )
+
+
+def test_manually_constructed_typed_resolution_cannot_release_a_reservation(case):
+    from agentmemeval.path1_v1.operations.e0_reconcile import (
+        E0ReconciliationError,
+        E0TerminalResolution,
+    )
+
+    old = make_request(2)
+    case["ledger"]["intents"][old.intent_id] = reservation(old, status="accepted", job_id="123")
+    forged = E0TerminalResolution(
+        intent_id=old.intent_id, job_id="123", campaign_id=old.campaign_id,
+        submission_request_sha256=old.request_sha256, descriptor_sha256="a" * 64,
+        prior_terminal_receipt_sha256="b" * 64, eligibility_receipt_sha256="c" * 64,
+        evidence_file_sha256="d" * 64, original_code_sha="e" * 40, verifier_code_sha="f" * 40,
+    )
+    with pytest.raises(E0ReconciliationError, match="not issued"):
+        capacity.validate_user_association_capacity(
+            case["snapshot"], case["request"], case["ledger"], 1, NOW, "E0",
+            resolved_e0={old.intent_id: forged}, store=object(),
+        )
 
 
 @pytest.mark.parametrize(

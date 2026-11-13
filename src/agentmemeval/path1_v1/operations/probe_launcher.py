@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request", type=Path, required=True)
     args = parser.parse_args(argv)
-    request = validate_probe_request(args.request)
+    request = validate_probe_request(args.request, model_max_age_seconds=6600.0)
     _require(request.request["schema_version"] == 2, "fixed launcher requires E0 request v2")
     launch = request.request["launch"]
     actual = Path(sys.executable)
@@ -42,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
             request.output_directory,
             Path(launch["service_python"]),
             launch["service_port"],
+            model_verification=request.model_verification,
         )
     else:
         raise RuntimeProbeError("fixed E0 launcher cannot execute research")

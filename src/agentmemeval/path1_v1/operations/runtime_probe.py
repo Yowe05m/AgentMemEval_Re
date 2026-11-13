@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,12 @@ from agentmemeval.path1_v1.operations.contracts import (
     canonical_json,
     content_digest,
     validate_campaign_contract,
+)
+from agentmemeval.path1_v1.operations.model_verification import (
+    VerifiedModelFiles,
+    model_verification_diagnostic,
+    reuse_model_files,
+    verify_model_files,
 )
 from agentmemeval.path1_v1.operations.submission_process import write_exclusive_json
 from agentmemeval.path1_v1.operations.worker import (
@@ -71,9 +78,13 @@ class ValidatedProbeRequest:
     intent_id: str
     request_sha256: str
     output_directory: Path
+    model_verification: VerifiedModelFiles | None = dataclass_field(
+        default=None, compare=False, repr=False)
 
 
-def validate_probe_request(request_path: Path | str, *, _collecting_resource: bool = False
+def validate_probe_request(request_path: Path | str, *, _collecting_resource: bool = False,
+                           model_verification: VerifiedModelFiles | None = None,
+                           model_max_age_seconds: float = 120.0,
                            ) -> ValidatedProbeRequest:
     """Independent E0 topology; never borrows a research claim or seed inventory."""
     raw = _absolute(str(request_path)).read_bytes()
@@ -103,12 +114,25 @@ def validate_probe_request(request_path: Path | str, *, _collecting_resource: bo
     if version == 2:
         validate_probe_launch(request["launch"], kind)
     identity = contract["runtime_identity"]
+    if model_root is not None:
+        if model_verification is None:
+            model_verification = verify_model_files(
+                manifest, model_root, expected_identity=identity["model"],
+                binding_sha256=request["request_sha256"], max_age_seconds=model_max_age_seconds)
+        else:
+            reuse_model_files(model_verification, manifest, model_root,
+                              binding_sha256=request["request_sha256"],
+                              expected_identity=identity["model"])
+    else:
+        _require(model_verification is None, "resource probe cannot borrow model verification")
     observed = build_runtime_identity(repository,
         core_paths=[x["path"] for x in identity["core_files"]],
         operations_paths=[x["path"] for x in identity["operations_files"]],
         config_path=identity["config"]["path"],
         dependency_lock_path=identity["dependency_lock"]["path"],
-        model_manifest_path=manifest, model_root=model_root)
+        model_manifest_path=manifest, model_root=model_root,
+        model_verification=model_verification,
+        model_binding_sha256=request["request_sha256"] if model_verification else None)
     _require(observed == identity, "E0 source/model identity changed")
     _require(not observed["dirty"] and observed["content_matches_head"]
              and not observed["untracked_declared_paths"]
@@ -130,7 +154,8 @@ def validate_probe_request(request_path: Path | str, *, _collecting_resource: bo
                  for path in (repository, model_root) if path is not None),
              "E0 output overlaps source/model")
     _require(_absolute(str(request_path)).read_bytes() == raw, "E0 request changed while reading")
-    return ValidatedProbeRequest(request, contract, intent, request["request_sha256"], output)
+    return ValidatedProbeRequest(request, contract, intent, request["request_sha256"], output,
+                                 model_verification)
 
 
 def validate_probe_launch(launch: dict, kind: str) -> None:
@@ -218,7 +243,12 @@ def observe_model(request: ValidatedProbeRequest) -> tuple[dict, list[dict]]:
     root = _absolute(request.request["model_root"])
     manifest = _absolute(request.request["model_manifest_path"])
     before = _metadata(root)
-    identity = _model_identity(manifest, root)
+    if getattr(request, "model_verification", None) is None:
+        identity = _model_identity(manifest, root)
+    else:
+        identity = reuse_model_files(request.model_verification, manifest, root,
+                                     binding_sha256=request.request_sha256,
+                                     expected_identity=request.contract["runtime_identity"]["model"])
     _require(identity == request.contract["runtime_identity"]["model"],
              "actual model files differ from the contract")
     paths = {record["path"] for record in before}
@@ -230,6 +260,13 @@ def observe_model(request: ValidatedProbeRequest) -> tuple[dict, list[dict]]:
     after = _metadata(root)
     _require(before == after, "model files changed during hashing")
     return identity, after
+
+
+def _check_model_verification(request: ValidatedProbeRequest) -> None:
+    if request.model_verification is not None:
+        reuse_model_files(request.model_verification, request.request["model_manifest_path"],
+                          request.request["model_root"], binding_sha256=request.request_sha256,
+                          expected_identity=request.contract["runtime_identity"]["model"])
 
 
 def observe_host(*, cleanup_seconds: int = 600) -> dict:
@@ -537,6 +574,9 @@ def collect_e0_probe(request: ValidatedProbeRequest, owner, base_url: str,
         _new_json(output / "dependencies.json", observe_dependencies())
         model, metadata = observe_model(request)
         _new_json(output / "model_files.json", {"identity": model, "metadata": metadata})
+        if request.model_verification is not None:
+            _new_json(output / "model_verification.json",
+                      model_verification_diagnostic(request.model_verification))
         _verify_loaded_source(request)
         tokenizer = _load_tokenizer(Path(request.request["model_root"]))
         template = tokenizer.get_chat_template()
@@ -579,6 +619,7 @@ def collect_e0_probe(request: ValidatedProbeRequest, owner, base_url: str,
              action_schema, 256, 0.0, True),
         ]
         for index, (name, messages, schema, budget, temperature, over) in enumerate(cases):
+            _check_model_verification(request)
             _require(datetime.fromisoformat(host["allocation_end_utc"]) > datetime.now(UTC)
                      + timedelta(seconds=1200), "insufficient request and cleanup interval")
             _require(_same_service(_service(owner, request, host), service),
@@ -594,6 +635,7 @@ def collect_e0_probe(request: ValidatedProbeRequest, owner, base_url: str,
             _new_json(output / (name + "_request.json"), payload)
             observed = http_exchange(endpoint, payload)
             _new_json(output / (name + "_response.json"), observed)
+            _check_model_verification(request)
             result = verify_http_observation(payload, observed, len(ids), over_limit=over)
             if name == "patch":
                 _require(result["content"]["operation"] == "patch"
@@ -609,6 +651,7 @@ def collect_e0_probe(request: ValidatedProbeRequest, owner, base_url: str,
             evidence["observations"].append(result)
         _require(metadata == _metadata(Path(request.request["model_root"])),
                  "model files changed during E0")
+        _check_model_verification(request)
         evidence["status"] = "observations_complete_backend_execution_pending"
     except BaseException as exc:
         evidence.update(status="incomplete", failure_type=type(exc).__name__)
@@ -641,9 +684,11 @@ class StrictRuntimeVerifier:
 
 
 def run_service_probe(request_path: Path, output_directory: Path,
-                      service_python: Path, port: int) -> dict:
+                      service_python: Path, port: int, *,
+                      model_verification: VerifiedModelFiles | None = None) -> dict:
     """The explicit CLI's real service lifecycle; never starts a research unit."""
-    request = validate_probe_request(request_path)
+    request = validate_probe_request(request_path, model_verification=model_verification,
+                                     model_max_age_seconds=6600.0)
     _require(request.contract["job"]["kind"] == "service_probe", "not a service probe")
     if request.request["schema_version"] == 2:
         launch = request.request["launch"]
@@ -663,6 +708,7 @@ def run_service_probe(request_path: Path, output_directory: Path,
     )
 
     _verify_loaded_source(request)  # Before model service creation, then again before probes.
+    _check_model_verification(request)
     output.mkdir(parents=True, exist_ok=False)
     model = request.request["model_root"]
     argv = [str(executable), "-B", "-m", "vllm.entrypoints.openai.api_server", "--model", model,
@@ -690,6 +736,7 @@ def run_service_probe(request_path: Path, output_directory: Path,
             write_exclusive_json(output / name, asdict(receipt))
 
         try:
+            _check_model_verification(request)
             with OwnedProcess.managed(
                 argv, binding=binding, cwd=Path(request.request["repository_root"]), env=env,
                 stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,

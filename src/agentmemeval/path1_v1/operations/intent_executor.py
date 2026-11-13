@@ -301,6 +301,30 @@ class ProbeLaunchFiles:
     probe_request_path: Path
 
 
+RESOURCE_QUEUE_START_SECONDS = 3600
+RESOURCE_DEADLINE_OFFSET_SECONDS = RESOURCE_QUEUE_START_SECONDS + 120
+
+
+def resource_queue_policy(config: dict, *, allow_legacy: bool = False) -> tuple[int, int]:
+    """Current submit policy; the former 10/130 policy is read-only history."""
+    expected = {"kind": "path1_e0_resource_site_config", "phase": "E0",
+                "job_kind": "resource_probe", "walltime_seconds": 120,
+                "command_seconds": 90, "cleanup_seconds": 30, "gpus": 1, "stage_cap": 1}
+    if type(config) is not dict or any(
+        type(config.get(key)) is not type(value) or config.get(key) != value
+        for key, value in expected.items()
+    ):
+        raise ExecutorError("resource probe parameters differ from the fixed E0 protocol")
+    pair = (config.get("queue_start_window_seconds"),
+            config.get("scheduler_deadline_offset_seconds"))
+    allowed = {(RESOURCE_QUEUE_START_SECONDS, RESOURCE_DEADLINE_OFFSET_SECONDS)}
+    if allow_legacy:
+        allowed.add((10, 130))
+    if any(type(value) is not int for value in pair) or pair not in allowed:
+        raise ExecutorError("resource queue policy is not admissible for this operation")
+    return pair
+
+
 @dataclass(frozen=True)
 class SubmissionAdmission:
     """Verified pre-allocation evidence, NEVER a proof about an unallocated GPU."""
@@ -518,12 +542,20 @@ class DurableIntentExecutor:
                 claims = [claim for claim in snapshot.claims if claim.intent_id == intent]
                 if (
                     len(claims) != 1
-                    or claims[0].status != "started"
+                    or claims[0].status not in {"started", "failed"}
                     or claims[0].metadata
                     != {"purpose": "slurm_job_container", "request_sha256": request.request_sha256}
                     or claims[0].run_directory != str(self._path(request.spec.work_dir).resolve())
                 ):
                     raise StoreIntegrityError("attempted submission has no matching consumed claim")
+                if claims[0].status == "failed":
+                    from agentmemeval.path1_v1.operations.e0_reconcile import (
+                        validate_e0_terminal_receipt,
+                    )
+
+                    # A scheduler row alone cannot close a consumed claim. Only
+                    # the independently sealed, unstarted E0 path is accepted.
+                    validate_e0_terminal_receipt(record, claims[0], store=self.store)
                 digest(record["manifest_sha256"])
                 manifest_path = expected_dir / "invocation.json"
                 if file_sha256(_file(manifest_path)) != record["manifest_sha256"]:
@@ -554,7 +586,7 @@ class DurableIntentExecutor:
         )
 
     def _validate_launch(
-        self, request: SubmissionRequest
+        self, request: SubmissionRequest, *, e0_model_verification=None
     ) -> tuple[Any, LaunchFiles, bytes, list[dict], dict | None]:
         # Lazy import avoids making package import an execution/admission action.
         from agentmemeval.path1_v1.operations.worker import validate_worker_request
@@ -566,7 +598,9 @@ class DurableIntentExecutor:
             raise ExecutorError("worker launcher takes no extra script arguments")
         files = self.launch_files(request)
         if type(files) is ProbeLaunchFiles:
-            return self._validate_probe_launch(request, files, effective_user)
+            return self._validate_probe_launch(
+                request, files, effective_user, model_verification=e0_model_verification
+            )
         if type(files) is not LaunchFiles:
             raise ExecutorError("launcher must explicitly select research or E0 topology")
         python = _file(files.python_executable)
@@ -658,11 +692,14 @@ class DurableIntentExecutor:
             )
         return worker, files, script, pinned, effective_user
 
-    def _validate_probe_launch(self, request, files, effective_user):
-        from agentmemeval.path1_v1.operations.runtime_probe import validate_probe_request
+    def _validate_probe_launch(self, request, files, effective_user, *, model_verification=None):
+        from agentmemeval.path1_v1.operations.runtime_probe import (
+            _strict_json,
+            validate_probe_request,
+        )
 
         path = _file(files.probe_request_path)
-        probe = validate_probe_request(path)
+        probe = validate_probe_request(path, model_verification=model_verification)
         if probe.request["schema_version"] != 2:
             raise ExecutorError("automatic E0 submission requires request v2")
         kind = probe.contract["job"]["kind"]
@@ -674,6 +711,9 @@ class DurableIntentExecutor:
         launch = probe.request["launch"]
         repository = Path(probe.request["repository_root"])
         identity = probe.contract["runtime_identity"]
+        if kind == "resource_probe":
+            resource_queue_policy(_strict_json(
+                _file(repository / identity["config"]["path"]).read_bytes()))
         source_records = identity["core_files"] + identity["operations_files"]
         required = {"src/agentmemeval/path1_v1/operations/" + name + ".py"
                     for name in ("worker", "runtime_probe", "probe_launcher", "resource_probe",
@@ -708,6 +748,7 @@ class DurableIntentExecutor:
         return probe, files, script, pinned, effective_user
 
     def _admit(self, request: SubmissionRequest, worker: Any) -> SubmissionAdmission:
+        self._validate_e0_retry(worker)
         if self.pre_submit_verifier is None:
             raise SubmissionDisabled("no trusted pre-submit admission verifier is installed")
         admission = self.pre_submit_verifier(request, worker)
@@ -716,10 +757,92 @@ class DurableIntentExecutor:
         admission.validate(request, worker, self.clock())
         return admission
 
+    def _validate_e0_retry(self, worker: Any) -> None:
+        contract = worker.contract
+        if contract["phase"] != "E0":
+            return
+        from agentmemeval.path1_v1.operations.contracts import canonical_intent_id
+        from agentmemeval.path1_v1.operations.e0_reconcile import resolve_e0_terminal_intent
+
+        ledger = self._ledger(self.store.read_registry())
+        retry = contract["job"]["retry_evidence"]
+        for intent, record in ledger["intents"].items():
+            if intent == worker.intent_id or record.get("probe_request_path") is None:
+                continue
+            stored = self._stored_probe_contract(record)
+            if (stored["campaign_id"] != contract["campaign_id"]
+                    or stored["job"]["kind"] != contract["job"]["kind"]):
+                continue
+            old_retry = stored["job"]["retry_evidence"]
+            if (stored["job"]["attempt"] == contract["job"]["attempt"]
+                    or (retry is not None and old_retry is not None
+                        and retry["prior_intent_id"] == old_retry["prior_intent_id"])):
+                raise SubmissionDisabled("E0 attempt or prior terminal already has another intent")
+        if contract["job"]["attempt"] == 1:
+            return
+        resolution = resolve_e0_terminal_intent(self.store, retry["prior_intent_id"])
+        if retry != {
+            "prior_intent_id": resolution.intent_id,
+            "prior_terminal_receipt_sha256": resolution.prior_terminal_receipt_sha256,
+            "eligibility_receipt_sha256": resolution.eligibility_receipt_sha256,
+            "scope": "complete_unit",
+            "seed_changed": False,
+        }:
+            raise SubmissionDisabled("E0 retry evidence differs from durable terminal seal")
+        previous = ledger["intents"][resolution.intent_id]
+        resolution.validate(previous, store=self.store)
+        prior = self._stored_probe_contract(previous)
+        if (canonical_intent_id(prior) != resolution.intent_id
+                or prior["campaign_id"] != contract["campaign_id"]
+                or prior["phase"] != "E0"
+                or prior["job"]["kind"] != "resource_probe"
+                or contract["job"]["kind"] != "resource_probe"
+                or prior["job"]["attempt"] + 1 != contract["job"]["attempt"]
+                or prior["seed_namespace"] != contract["seed_namespace"]):
+            raise SubmissionDisabled("E0 retry lineage/campaign/attempt differs")
+
+    @staticmethod
+    def _stored_probe_contract(previous: dict) -> dict:
+        from agentmemeval.path1_v1.operations.contracts import (
+            canonical_intent_id,
+            validate_campaign_contract,
+        )
+
+        probe_path = _file(Path(previous["probe_request_path"]))
+        if file_sha256(probe_path) != previous["probe_request_file_sha256"]:
+            raise StoreIntegrityError("prior E0 probe bytes changed")
+        probe = read_json(probe_path)
+        if (probe["intent_id"] != previous["intent_id"]
+                or probe["request_sha256"] != previous["worker_request_sha256"]
+                or probe["request_sha256"] != content_digest({
+                    key: value for key, value in probe.items() if key != "request_sha256"
+                })):
+            raise StoreIntegrityError("stored E0 probe request identity changed")
+        contract_path = _file(Path(probe["contract_path"]))
+        if file_sha256(contract_path) != probe["contract_sha256"]:
+            raise StoreIntegrityError("prior E0 contract bytes changed")
+        prior = validate_campaign_contract(read_json(contract_path))
+        if (canonical_intent_id(prior) != previous["intent_id"] or prior["phase"] != "E0"
+                or prior["campaign_id"] != previous["campaign_id"]):
+            raise StoreIntegrityError("stored E0 probe contract identity changed")
+        return prior
+
     def _capacity(self, request: SubmissionRequest, ledger: dict, stage_cap: int,
                   *, validated_phase: str | None = None) -> dict:
         if self.account_reader is None:
             raise SubmissionDisabled("no live account capacity reader is installed")
+        resolved_e0 = {}
+        if validated_phase == "E0":
+            from agentmemeval.path1_v1.operations.e0_reconcile import (
+                validate_e0_terminal_receipt,
+            )
+
+            snapshot = self.store.read_registry()
+            for claim in snapshot.claims:
+                if claim.status == "failed" and claim.intent_id in ledger["intents"]:
+                    resolved_e0[claim.intent_id] = validate_e0_terminal_receipt(
+                        ledger["intents"][claim.intent_id], claim, store=self.store
+                    )
         observed = self.account_reader()
         if not isinstance(observed, AccountSnapshot):
             from agentmemeval.path1_v1.operations.user_capacity import (
@@ -729,7 +852,8 @@ class DurableIntentExecutor:
 
             if type(observed) is UserAssociationSnapshot:
                 return validate_user_association_capacity(
-                    observed, request, ledger, stage_cap, self.clock(), validated_phase)
+                    observed, request, ledger, stage_cap, self.clock(), validated_phase,
+                    resolved_e0=resolved_e0, store=self.store)
         if (
             not isinstance(observed, AccountSnapshot)
             or observed.capacity is None
@@ -753,11 +877,21 @@ class DurableIntentExecutor:
         }
         unknown_account = unknown_campaign = 0
         for intent, record in ledger["intents"].items():
-            if intent == request.intent_id or record["status"] == "claimed":
+            if intent == request.intent_id or (
+                record["status"] == "claimed" and validated_phase != "E0"
+            ):
                 continue
             previous = self._stored_request(record)
             represented = [job for job in jobs if job.matches(previous)]
-            if not represented:
+            if intent in resolved_e0:
+                resolved_e0[intent].validate(record, store=self.store)
+                if any(job.state != "DEADLINE" or job.job_id != resolved_e0[intent].job_id
+                       for job in represented):
+                    raise SubmissionDisabled("scheduler contradicts sealed unstarted E0")
+                continue
+            if not represented or (validated_phase == "E0" and not any(
+                job.active for job in represented
+            )):
                 unknown_account += 1
                 unknown_campaign += previous.campaign_id == request.campaign_id
         total = len(active) + unknown_account
@@ -931,9 +1065,9 @@ class DurableIntentExecutor:
             if (worker.contract["phase"] == "E0"
                     and worker.contract["job"]["kind"] == "resource_probe"):
                 # sbatch has no --immediate option on the deployed Slurm.
-                # 120s walltime + a 10s planned start opportunity: scheduling
+                # 120s walltime + a 3600s planned start opportunity: scheduling
                 # feasibility deadline, not a precise queue-deletion timer.
-                argv = (*argv, "--deadline=now+130seconds")
+                argv = (*argv, f"--deadline=now+{RESOURCE_DEADLINE_OFFSET_SECONDS}seconds")
             manifest = {
                 "schema_version": 1,
                 "nonce": uuid4().hex,
@@ -1021,7 +1155,7 @@ class DurableIntentExecutor:
                         snapshot, ledger, "persist submitter identity before release"
                     )
                     current_worker, _, current_script, _, current_user = self._validate_launch(
-                        request
+                        request, e0_model_verification=getattr(worker, "model_verification", None)
                     )
                     if (
                         current_worker.request_sha256 != worker.request_sha256

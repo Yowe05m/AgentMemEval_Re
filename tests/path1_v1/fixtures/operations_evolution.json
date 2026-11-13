@@ -18,14 +18,15 @@
     "operations/intent_executor.py": {
       "baseline_git_bytes_sha256": "6ac00f61f5bd8bbba422c7c62b5fde9336835a28a3fb483b019ef6ac441f0040",
       "baseline_normalized_ast_sha256": "4db6ae3d6ff622b02d47ec942499daed0a778b44eacafa4d500e7a1148a74695",
-      "current_worktree_bytes_sha256": "a4f35d453748277fd5bff5b9c6f40515a64fb86e74b30c00bc40764bcbe09952",
-      "normalized_ast_sha256": "f15c093e50a014f4338977626e9241c1b9b525c375d2513142920b96a980e323",
-      "reason": "Owned Linux helper lifecycle and JSON-safe cleanup receipts; dedicated E0 fixed launcher, live preflight and E0-only user-association capacity; preserve research admission and unknown no-reissue.",
+      "current_worktree_bytes_sha256": "aac1271711855347d0e8fe7bc9ecbd024f84cc183e9514570c09e64a4d217734",
+      "normalized_ast_sha256": "8fba099646c20c41461414fce99c8536b5fa8a5bf2ca1bdad79a9c4b7950fb78",
+      "reason": "Verified unstarted E0 terminal reconciliation and retry lineage; unresolved capacity retained; longer resource queue opportunity with unchanged runtime; same-process model verification reuse before go.",
       "regression_tests": [
         "tests/path1_v1/unit/test_intent_executor.py",
         "tests/path1_v1/integration/test_intent_executor_faults.py",
         "tests/path1_v1/unit/test_e0_executor.py",
-        "tests/path1_v1/unit/test_user_capacity.py"
+        "tests/path1_v1/unit/test_user_capacity.py",
+        "tests/path1_v1/unit/test_e0_reconcile.py"
       ]
     },
     "operations/submission_process.py": {
@@ -47,6 +48,22 @@
       "regression_tests": [
         "tests/path1_v1/unit/test_snapshot_archive_hardlinks.py",
         "tests/path1_v1/unit/test_operations_closure.py"
+      ]
+    },
+    "operations/contracts.py": {
+      "baseline_git_bytes_sha256": "0cba863de19b20cabb09b9cc250f929d226cdb09099d9c38ca07defb46ed5015",
+      "baseline_normalized_ast_sha256": "fc0f7e86c30e55a2e7827093844a8ded95ba92134c9062f1306260978c760ce6",
+      "current_worktree_bytes_sha256": "93a61af46335f78b437fe46cf502753f5aa22e07a0eac12dd132bdeb4eaa2786",
+      "normalized_ast_sha256": "67a14b9867bb3979755610c6c4ed3c0ca6b98379256fa383ee48dc6ab1bd0510",
+      "allowed_top_level_changes": [
+        "build_runtime_identity"
+      ],
+      "baseline_unchanged_top_level_ast_sha256": "8b123fb523b9052da32959ea8b4a736e10070b713e371e128c96183dcacbfc28",
+      "reason": "Reuse a process-bound fully verified model capability in the identity builder; all other model hashing, contract validation and scientific rules remain AST-identical.",
+      "regression_tests": [
+        "tests/path1_v1/unit/test_model_verification.py",
+        "tests/path1_v1/unit/test_operations_contracts.py",
+        "tests/path1_v1/test_isolation_parity.py"
       ]
     }
   }
