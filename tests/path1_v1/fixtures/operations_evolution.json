@@ -18,15 +18,19 @@
     "operations/intent_executor.py": {
       "baseline_git_bytes_sha256": "6ac00f61f5bd8bbba422c7c62b5fde9336835a28a3fb483b019ef6ac441f0040",
       "baseline_normalized_ast_sha256": "4db6ae3d6ff622b02d47ec942499daed0a778b44eacafa4d500e7a1148a74695",
-      "current_worktree_bytes_sha256": "aac1271711855347d0e8fe7bc9ecbd024f84cc183e9514570c09e64a4d217734",
-      "normalized_ast_sha256": "8fba099646c20c41461414fce99c8536b5fa8a5bf2ca1bdad79a9c4b7950fb78",
-      "reason": "Verified unstarted E0 terminal reconciliation and retry lineage; unresolved capacity retained; longer resource queue opportunity with unchanged runtime; same-process model verification reuse before go.",
+      "current_worktree_bytes_sha256": "09383eb4dc6962e0fe103fb988f3bfd510f3a927989915c8e47b1c5e5bec0c4f",
+      "normalized_ast_sha256": "3f7a85916215eea1ca9d1ddf61153dcc660d67de73f4e0ed951d24f7f7ce5680",
+      "reason": "Independent E0 service resource/profile validation and executed resource terminal resolution with post-validation capacity freshness; original unresolved occupancy, unstarted-only retry lineage and default research admission gates remain enforced.",
       "regression_tests": [
         "tests/path1_v1/unit/test_intent_executor.py",
         "tests/path1_v1/integration/test_intent_executor_faults.py",
         "tests/path1_v1/unit/test_e0_executor.py",
         "tests/path1_v1/unit/test_user_capacity.py",
-        "tests/path1_v1/unit/test_e0_reconcile.py"
+        "tests/path1_v1/unit/test_e0_reconcile.py",
+        "tests/path1_v1/unit/test_service_resources.py",
+        "tests/path1_v1/unit/test_e0_service_cli.py",
+        "tests/path1_v1/unit/test_resource_terminal.py",
+        "tests/path1_v1/unit/test_e0_retry_lineage.py"
       ]
     },
     "operations/submission_process.py": {
@@ -63,6 +67,39 @@
       "regression_tests": [
         "tests/path1_v1/unit/test_model_verification.py",
         "tests/path1_v1/unit/test_operations_contracts.py",
+        "tests/path1_v1/test_isolation_parity.py"
+      ]
+    },
+    "operations/slurm.py": {
+      "baseline_git_bytes_sha256": "da404ea5053acd66c9fc645c0ba7606000f96c9b46f3bb91b27d03288eb796fe",
+      "baseline_normalized_ast_sha256": "a9b0d59d21fd65e39ff3734a16f7b7887f5b81c849b8dbfbe2ca735306bcff9d",
+      "current_worktree_bytes_sha256": "d4ed537cbb212b2cf165f8ded5f6922bc4e2f4faa8fdb4018e698939d8c31ee9",
+      "normalized_ast_sha256": "05f69133b9dcd8819c9aeb62a10d023d4af5cb0f6368a9028248ba0e7edcb4d3",
+      "allowed_class_changes": {
+        "SubmitSpec": {
+          "new_fields": [
+            "cpus_per_task",
+            "memory_mib"
+          ],
+          "methods": [
+            "__post_init__",
+            "payload",
+            "from_payload"
+          ]
+        },
+        "SubmissionRequest": {
+          "new_fields": [],
+          "methods": [
+            "sbatch_argv"
+          ]
+        }
+      },
+      "baseline_unchanged_ast_sha256": "039ac901f82de91d65e8ab1f0748ce06fe18b1c57145f6ce66db268432e90b06",
+      "reason": "Optional paired CPU/MiB resources for service E0 only; absent fields preserve original payload, request SHA and sbatch argv. All unrelated Slurm rules remain AST-identical.",
+      "regression_tests": [
+        "tests/path1_v1/unit/test_service_resources.py",
+        "tests/path1_v1/unit/test_slurm_adapter.py",
+        "tests/path1_v1/unit/test_e0_service_cli.py",
         "tests/path1_v1/test_isolation_parity.py"
       ]
     }

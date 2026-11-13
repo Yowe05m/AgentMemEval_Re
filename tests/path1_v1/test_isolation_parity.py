@@ -67,7 +67,7 @@ def test_mechanical_modules_preserve_complete_ast_and_import_only_their_version(
     assert set(evolution["modules"]) == {
         "operations/worker.py", "operations/intent_executor.py",
         "operations/submission_process.py", "storage/snapshot_archive.py",
-        "operations/contracts.py",
+        "operations/contracts.py", "operations/slurm.py",
     }
     root = files(PREFIX)
     for name, record in expected["modules"].items():
@@ -100,6 +100,38 @@ def test_mechanical_modules_preserve_complete_ast_and_import_only_their_version(
                         expected.get("routing_literal_inverse")).visit(preserved))
                     assert hashlib.sha256(unchanged.encode()).hexdigest() == (
                         change["baseline_unchanged_top_level_ast_sha256"]
+                    )
+                if name == "operations/slurm.py":
+                    # Only optional CPU/MiB fields and their exact rendering/
+                    # validation may evolve. Preserve every other scheduler,
+                    # identity, capacity and transport rule from the baseline.
+                    scopes = {
+                        "SubmitSpec": {
+                            "new_fields": ["cpus_per_task", "memory_mib"],
+                            "methods": ["__post_init__", "payload", "from_payload"],
+                        },
+                        "SubmissionRequest": {"new_fields": [], "methods": ["sbatch_argv"]},
+                    }
+                    assert change["allowed_class_changes"] == scopes
+                    preserved = ast.parse(root.joinpath(name).read_text(encoding="utf-8"))
+                    for node in preserved.body:
+                        if isinstance(node, ast.ClassDef) and node.name in scopes:
+                            scope = scopes[node.name]
+                            node.body = [
+                                child for child in node.body
+                                if not (
+                                    isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                    and child.name in scope["methods"]
+                                ) and not (
+                                    isinstance(child, ast.AnnAssign)
+                                    and isinstance(child.target, ast.Name)
+                                    and child.target.id in scope["new_fields"]
+                                )
+                            ]
+                    unchanged = stable_ast_dump(OriginalNamespace(
+                        expected.get("routing_literal_inverse")).visit(preserved))
+                    assert hashlib.sha256(unchanged.encode()).hexdigest() == (
+                        change["baseline_unchanged_ast_sha256"]
                     )
                 expected_ast = change["normalized_ast_sha256"]
             else:
