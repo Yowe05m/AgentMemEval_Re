@@ -70,6 +70,26 @@ def make_e0_fixture(
             "gpus": 1, "stage_cap": 1, "queue_start_window_seconds": queue_policy[0],
             "scheduler_deadline_offset_seconds": queue_policy[1],
         }), encoding="utf-8")
+    else:
+        from agentmemeval.path1_v1.operations.interpreters import verify_python_interpreter
+
+        python = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+        proof = verify_python_interpreter(python, file_sha256(python))
+        (repo / data["build_kwargs"]["config_path"]).write_text(json.dumps({
+            "schema_version": 1, "kind": "path1_e0_service_site_config", "phase": "E0",
+            "job_kind": "service_probe", "resource_profile_version": 1,
+            "walltime_seconds": 7200, "command_seconds": 6600, "cleanup_seconds": 600,
+            "startup_seconds": 1200, "gpus": 1, "stage_cap": 1,
+            "cpus_per_task": 8, "memory_mib": 65536,
+            "queue_policy": "no_scheduler_deadline", "qos_policy": "site_default",
+            "service_port": 8123, "python_executable": str(python),
+            "python_sha256": file_sha256(python), "python_prefix": proof["prefix"],
+            "service_python": str(python), "service_python_sha256": file_sha256(python),
+            "service_python_prefix": proof["prefix"], "model_root": str(data["model"]),
+            "model_manifest_path": str(data["manifest"]),
+            "model_manifest_sha256": file_sha256(data["manifest"]),
+            "cluster": scope[0], "account": scope[1], "user": scope[2], "partition": "gpu",
+        }), encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "complete E0 fixture closure")
     kwargs = dict(data["build_kwargs"])
@@ -131,6 +151,8 @@ def make_e0_fixture(
         "/code/e0.sh",
         file_sha256(script),
         walltime_seconds=7200 if service else 120,
+        cpus_per_task=8 if service else None,
+        memory_mib=65536 if service else None,
     )
     fixture.request = SubmissionRequest(contract["campaign_id"], request["intent_id"], spec)
     fixture.script = script
@@ -186,6 +208,9 @@ def test_real_git_model_preflight_helper_submission_chain_and_reentry(tmp_path, 
     assert not any(arg.startswith("--immediate") for arg in effect["argv"])
     if kind == "service_probe":
         assert not any(arg.startswith("--deadline") for arg in effect["argv"])
+        assert "--cpus-per-task=8" in effect["argv"] and "--mem=65536" in effect["argv"]
+    else:
+        assert not any(arg.startswith(("--cpus-per-task", "--mem")) for arg in effect["argv"])
     assert ("--time=00:02:00" if kind == "resource_probe" else "--time=02:00:00") in effect["argv"]
     assert effect["script_sha256"] == file_sha256(fixture.script)
     assert (

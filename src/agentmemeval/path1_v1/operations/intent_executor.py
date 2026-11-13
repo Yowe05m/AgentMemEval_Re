@@ -387,6 +387,15 @@ class E0PreSubmitVerifier:
                 or probe.contract["campaign_id"] != request.campaign_id):
             raise SubmissionDisabled("E0 preflight intent mismatch")
         validate_probe_launch(probe.request["launch"], probe.contract["job"]["kind"])
+        service_profile = None
+        if probe.contract["job"]["kind"] == "service_probe":
+            from agentmemeval.path1_v1.operations.service_profile import (
+                read_service_config,
+                validate_service_submission,
+            )
+
+            service_profile = validate_service_submission(
+                request, probe, read_service_config(probe))
         pins = self.command.validate(fixture_mode=self.fixture_mode)
         if not self.fixture_mode and Path(self.command.argv_prefix[0]).name != "scontrol":
             raise SubmissionDisabled("E0 preflight requires pinned scontrol")
@@ -414,6 +423,16 @@ class E0PreSubmitVerifier:
             raise SubmissionDisabled("partition walltime could not be read")
         if seconds < request.spec.walltime_seconds:
             raise SubmissionDisabled("partition cannot accommodate the frozen probe walltime")
+        if service_profile is not None:
+            for field, requested in (
+                ("MaxCPUsPerNode", request.spec.cpus_per_task),
+                ("MaxMemPerCPU", request.spec.memory_mib / request.spec.cpus_per_task),
+            ):
+                value = fields.get(field)
+                if value is not None and value != "UNLIMITED" and (
+                    not value.isdigit() or (int(value) != 0 and requested > int(value))
+                ):
+                    raise SubmissionDisabled("partition cannot accommodate service " + field)
         output_root = Path(probe.request["output_root"])
         if (probe.output_directory.exists() or not output_root.is_dir()
                 or not os.access(output_root, os.W_OK | os.X_OK)):
@@ -441,6 +460,8 @@ class E0PreSubmitVerifier:
                                          "sha256": file_sha256(filesystem_record)},
                     "launch": probe.request["launch"], "stage_cap": 1,
                     "runtime_admission": False}
+        if service_profile is not None:
+            evidence["service_profile"] = service_profile
         # The write/fsync is also an actual evidence-filesystem health check.
         destination = self.root / (uuid4().hex + ".json")
         write_exclusive_json(destination, evidence)
@@ -603,6 +624,8 @@ class DurableIntentExecutor:
             )
         if type(files) is not LaunchFiles:
             raise ExecutorError("launcher must explicitly select research or E0 topology")
+        if request.spec.cpus_per_task is not None or request.spec.memory_mib is not None:
+            raise ExecutorError("explicit host resources are currently service E0 only")
         python = _file(files.python_executable)
         digest(files.python_sha256)
         if file_sha256(python) != files.python_sha256:
@@ -714,6 +737,15 @@ class DurableIntentExecutor:
         if kind == "resource_probe":
             resource_queue_policy(_strict_json(
                 _file(repository / identity["config"]["path"]).read_bytes()))
+            if request.spec.cpus_per_task is not None or request.spec.memory_mib is not None:
+                raise ExecutorError("v2 resource probe cannot change its historical resources")
+        else:
+            from agentmemeval.path1_v1.operations.service_profile import (
+                read_service_config,
+                validate_service_submission,
+            )
+
+            validate_service_submission(request, probe, read_service_config(probe))
         source_records = identity["core_files"] + identity["operations_files"]
         required = {"src/agentmemeval/path1_v1/operations/" + name + ".py"
                     for name in ("worker", "runtime_probe", "probe_launcher", "resource_probe",
