@@ -1,4 +1,4 @@
-"""Contract-bound Path1 worker; no default live runtime admission implementation.
+"""Contract-bound Path1 worker with opt-in, non-admitting live E0 probes.
 
 The executor owns allocation and service lifecycle. This worker owns one reserved
 payload directory and never retries an incomplete scientific unit. CLI admission
@@ -579,6 +579,31 @@ def _execute(request: ValidatedWorkerRequest, factory: StrictPath1ClientFactory)
     return {"completed_units": completed}
 
 
+def _produced_artifacts(output: Path) -> list[dict]:
+    """Seal completed producer bytes before publishing the terminal receipt."""
+    paths = sorted(output.rglob("*"))
+    records = []
+    for path in paths:
+        if path.is_symlink():
+            raise RuntimeAdmissionRequired("payload symlink cannot be sealed")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(output).as_posix()
+        if relative == "worker_terminal.json":
+            raise RuntimeAdmissionRequired("worker terminal already exists before sealing")
+        before = path.stat()
+        digest = _hash_file(path)
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns, before.st_ino) != (
+            after.st_size, after.st_mtime_ns, after.st_ctime_ns, after.st_ino
+        ):
+            raise RuntimeAdmissionRequired("payload changed during producer sealing")
+        records.append({"path": relative, "size": after.st_size, "sha256": digest})
+    if paths != sorted(output.rglob("*")):
+        raise RuntimeAdmissionRequired("payload inventory changed during producer sealing")
+    return records
+
+
 def run_worker(
     request_path: Path | str,
     *,
@@ -622,6 +647,16 @@ def run_worker(
         "primary_analysis_admitted": False,
         "retry_eligibility": "not_established",
         "service_release_verified": False,
+        "campaign_id": request.contract["campaign_id"],
+        "phase": request.contract["phase"],
+        "run_id": claim["run_id"],
+        "slurm_job_id": admission.slurm_job_id,
+        "service_instance_id": admission.service_instance_id,
+        "core_manifest_sha256": admission.core_manifest_sha256,
+        "operations_manifest_sha256": admission.operations_manifest_sha256,
+        "config_sha256": admission.config_sha256,
+        "model_manifest_sha256": admission.model_manifest_sha256,
+        "protocol_sha256": request.contract["protocol_sha256"],
     }
     owns_output = False
     try:
@@ -655,6 +690,7 @@ def run_worker(
                 "backend_execution_attested_only_by_runtime_verifier": True,
             },
         )
+        receipt["produced_artifacts"] = _produced_artifacts(output)
         path1._new_json(output / "worker_terminal.json", receipt)
     except BaseException as exc:
         receipt.update(status="incomplete", failure_type=type(exc).__name__)
@@ -688,8 +724,23 @@ def run_worker(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request", required=True, type=Path)
+    parser.add_argument("--runtime-probe-output", type=Path)
+    parser.add_argument("--service-python", type=Path)
+    parser.add_argument("--service-port", type=int)
     args = parser.parse_args(argv)
     try:
+        if args.runtime_probe_output is not None:
+            from agentmemeval.path1_v1.operations.runtime_probe import run_service_probe
+
+            if args.service_python is None or args.service_port is None:
+                raise RuntimeAdmissionRequired("live probe needs explicit service Python and port")
+            run_service_probe(args.request, args.runtime_probe_output,
+                              args.service_python, args.service_port)
+            # Exit success means only the explicitly requested E0 collection
+            # completed. Its report still has runtime_admission=False.
+            return 0
+        if args.service_python is not None or args.service_port is not None:
+            raise RuntimeAdmissionRequired("service options require an explicit E0 probe")
         run_worker(args.request)
     except (ContractError, RuntimeAdmissionRequired):
         # No serialized "verified" flag or CLI switch can install a trusted verifier.

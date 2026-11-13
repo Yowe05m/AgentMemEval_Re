@@ -58,7 +58,9 @@ def build_snapshot_archive(
         target.parent.mkdir(parents=True, exist_ok=True)
 
     manifest_summary = build_file_manifest(source, manifest_path)
-    with tarfile.open(archive_path, mode="x:gz") as handle:
+    # Atomic publication preserves hard-linked staging files. Archive both names
+    # as regular bytes so strict extraction never needs to permit link members.
+    with tarfile.open(archive_path, mode="x:gz", dereference=True) as handle:
         handle.add(_filesystem_path(source), arcname=source.name, recursive=True)
 
     source_verification = verify_file_manifest(source, manifest_path)

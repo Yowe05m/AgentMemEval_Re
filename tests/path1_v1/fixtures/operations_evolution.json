@@ -1,0 +1,51 @@
+{
+  "schema": "reviewed-path1-operations-evolution-v1",
+  "baseline_integration_commit": "b9885e4d75ef32a21360323784004de9919181ea",
+  "original_source_commit": "af8beb585f9a92dfe7591cc6cd8e1582568b3538",
+  "scientific_contract_changed": false,
+  "modules": {
+    "operations/worker.py": {
+      "baseline_git_bytes_sha256": "3b7446e3a42546d8a66f6605e04891f7a5cbdf6e7f774486132a79711735092d",
+      "baseline_normalized_ast_sha256": "63a8a75df7ab2d9cb5749198c82bd4938f1d5edc6515819d5fa6f6cc816314ec",
+      "current_worktree_bytes_sha256": "8aff1d346ef71cf2a2a943acda2d9b8464cc2b1b6c5d36fb91bfd3b4d2e3eb69",
+      "normalized_ast_sha256": "100491d7bc13e96913a0fcd94129984c688e06dad3f541a3bd8f3b96c413c187",
+      "reason": "Independent E0 request CLI and content-bound terminal artifact seal; research default remains closed.",
+      "regression_tests": [
+        "tests/path1_v1/unit/test_runtime_probe.py",
+        "tests/path1_v1/unit/test_operations_worker.py"
+      ]
+    },
+    "operations/intent_executor.py": {
+      "baseline_git_bytes_sha256": "6ac00f61f5bd8bbba422c7c62b5fde9336835a28a3fb483b019ef6ac441f0040",
+      "baseline_normalized_ast_sha256": "4db6ae3d6ff622b02d47ec942499daed0a778b44eacafa4d500e7a1148a74695",
+      "current_worktree_bytes_sha256": "e35e6aa7c44fd3ec98484f8f094585f0517d7c49953255bf7232b2e7bad901c3",
+      "normalized_ast_sha256": "70c176b5374f3030ba3a559f849457d708448c2bccefe88139c8663acc0c9240",
+      "reason": "Owned Linux helper lifecycle retains leader anchor until descendant cleanup; unknown prevents reissue.",
+      "regression_tests": [
+        "tests/path1_v1/unit/test_intent_executor.py",
+        "tests/path1_v1/integration/test_intent_executor_faults.py"
+      ]
+    },
+    "operations/submission_process.py": {
+      "baseline_git_bytes_sha256": "2a0f6acfd95f39a114de1cd3de21a9c9672fc7adb2f40b54d5b17b469e60b486",
+      "baseline_normalized_ast_sha256": "0c77484cee555fff7a0eaf8a159e6fdbdd7bc499d94a2d7410f9e4f7beccebd7",
+      "current_worktree_bytes_sha256": "27eee7b39479981d8480c4b7d0bc4c6116d0fafc2d71f76bd54a388bc5492168",
+      "normalized_ast_sha256": "72a5a15057fc02ac660b35a98139372734b7a80193b7fb2e2379744e6348ac1e",
+      "reason": "Linux submit command inherits the held helper session; parent performs verified group cleanup before reap.",
+      "regression_tests": [
+        "tests/path1_v1/integration/process_ownership_linux_smoke.py"
+      ]
+    },
+    "storage/snapshot_archive.py": {
+      "baseline_git_bytes_sha256": "a1a46f1e8b02bdadc2c94b99a398f4f6993dc75b29f6698dad7b42d99ea63f19",
+      "baseline_normalized_ast_sha256": "838e87d394b97096150d4a78b0ae3bc33da03b05f19407b24ceebaf359cbdd01",
+      "current_worktree_bytes_sha256": "7c700c9fa28f0429fcddbc13ce76efb2cb1c1dda6844210a852b1dd688ac3a27",
+      "normalized_ast_sha256": "6d16ac8245bcfc84f7dd3dac6ef721b37618e172d40c7d8633ad36b3417e02b5",
+      "reason": "Materialize hard-link aliases as regular tar members while retaining strict member/path/hash validation.",
+      "regression_tests": [
+        "tests/path1_v1/unit/test_snapshot_archive_hardlinks.py",
+        "tests/path1_v1/unit/test_operations_closure.py"
+      ]
+    }
+  }
+}

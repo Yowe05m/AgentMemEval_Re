@@ -23,7 +23,8 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -32,6 +33,12 @@ from uuid import uuid4
 from agentmemeval.path1_v1.operations.contracts import (
     build_runtime_identity,
     content_digest,
+)
+from agentmemeval.path1_v1.operations.process_ownership import (
+    OwnedProcess,
+    OwnershipError,
+    ProcessBinding,
+    SpawnOwnershipError,
 )
 from agentmemeval.path1_v1.operations.slurm import (
     AccountSnapshot,
@@ -95,12 +102,12 @@ def verify_loaded_package(repository_root: Path, source_records: list[dict]) -> 
     package_root = repository / "src/agentmemeval"
     declared = {item["path"]: item["sha256"] for item in source_records}
     required = {
-        'agentmemeval.path1_v1.operations.contracts',
-        'agentmemeval.path1_v1.operations.state',
-        'agentmemeval.path1_v1.operations.slurm',
-        'agentmemeval.path1_v1.operations.worker',
-        'agentmemeval.path1_v1.operations.intent_executor',
-        'agentmemeval.path1_v1.operations.submission_process',
+        "agentmemeval.path1_v1.operations.contracts",
+        "agentmemeval.path1_v1.operations.state",
+        "agentmemeval.path1_v1.operations.slurm",
+        "agentmemeval.path1_v1.operations.worker",
+        "agentmemeval.path1_v1.operations.intent_executor",
+        "agentmemeval.path1_v1.operations.submission_process",
     }
     modules = {
         name: module
@@ -259,7 +266,7 @@ def render_worker_script(
         + shlex.quote(str(repository_root / "src"))
         + "\nexec "
         + shlex.quote(str(python_executable))
-        + ' -s -m agentmemeval.path1_v1.operations.worker --request '
+        + " -s -m agentmemeval.path1_v1.operations.worker --request "
         + shlex.quote(str(worker_request_path))
         + "\n"
     )
@@ -319,6 +326,7 @@ class DurableIntentExecutor:
         fixture_mode: bool = False,
         fixture_paths: Mapping[str, Path] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        transport_term_grace_seconds: float = 120,
     ) -> None:
         if not control_root.is_absolute():
             raise ExecutorError("control root must be absolute")
@@ -331,6 +339,13 @@ class DurableIntentExecutor:
         self.cluster, self.account, self.command = cluster, account, command
         self.launch_files, self.pre_submit_verifier = launch_files, pre_submit_verifier
         self.account_reader, self.fixture_mode, self.clock = account_reader, fixture_mode, clock
+        if (
+            type(transport_term_grace_seconds) not in (int, float)
+            or not math.isfinite(transport_term_grace_seconds)
+            or not 0 <= transport_term_grace_seconds <= 120
+        ):
+            raise ExecutorError("transport TERM grace must be within 0..120 seconds")
+        self.transport_term_grace_seconds = transport_term_grace_seconds
         if fixture_paths and not fixture_mode:
             raise ExecutorError("path remapping is restricted to explicit offline fixtures")
         self.fixture_paths = dict(fixture_paths or {})
@@ -457,7 +472,7 @@ class DurableIntentExecutor:
         source_records = identity["core_files"] + identity["operations_files"]
         paths = {item["path"] for item in source_records}
         if (
-            'src/agentmemeval/path1_v1/operations/worker.py' not in paths
+            "src/agentmemeval/path1_v1/operations/worker.py" not in paths
             or identity["dirty"]
             or identity["untracked_declared_paths"]
             or identity["uncovered_execution_paths"]
@@ -745,63 +760,108 @@ class DurableIntentExecutor:
                 helper_python_sha256=file_sha256(helper_python),
             )
             snapshot = self._commit(snapshot, ledger, "persist unknown before starting submitter")
-            process = subprocess.Popen(
-                [str(helper_python), "-I", str(helper), str(manifest_path), manifest_sha],
-                env=clean_environment(),
-                cwd=invocation_dir,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-            )
-            try:
-                ready_path = invocation_dir / "ready.json"
-                while not ready_path.exists():
-                    if process.poll() is not None or time.monotonic() >= deadline:
-                        return self._receipt(request, record)
-                    time.sleep(0.01)
-                ready = read_json(ready_path)
-                expected_ready = {
-                    "nonce": manifest["nonce"],
-                    "request_sha256": request.request_sha256,
-                    "manifest_sha256": manifest_sha,
-                    "submitter": process_identity(process.pid),
-                    "effective_user": effective_user,
-                }
-                if ready != expected_ready:
-                    raise StoreIntegrityError("submitter handshake identity mismatch")
-                record["ready"] = ready
-                snapshot = self._commit(
-                    snapshot, ledger, "persist submitter identity before release"
+            helper_argv = [str(helper_python), "-I", str(helper), str(manifest_path), manifest_sha]
+            owner = None
+            if sys.platform.startswith("linux"):
+                guard = OwnedProcess.managed(
+                    helper_argv,
+                    cwd=invocation_dir,
+                    env=clean_environment(),
+                    term_grace_seconds=self.transport_term_grace_seconds,
+                    binding=ProcessBinding(
+                        request.campaign_id,
+                        request.intent_id,
+                        None,
+                        content_digest(worker.contract["runtime_identity"]),
+                        "submission_transport",
+                        manifest["nonce"],
+                    ),
                 )
-                # Recheck actual current bytes/gates/account AFTER the helper exists,
-                # immediately before releasing its external command. It still cannot run.
-                current_worker, _, current_script, _, current_user = self._validate_launch(request)
-                if (
-                    current_worker.request_sha256 != worker.request_sha256
-                    or current_script != script
-                    or current_user != effective_user
-                ):
-                    raise ExecutorError("launch changed during submitter handshake")
-                current_admission = self._admit(request, current_worker)
-                record["capacity"] = self._capacity(request, ledger, current_admission.stage_cap)
-                record["admission_sha256"] = current_admission.evidence_sha256
-                snapshot = self._commit(snapshot, ledger, "persist fresh pre-exec gates")
-                if time.monotonic() >= deadline:
+                process = None
+            else:
+                # Windows remains an explicit offline fixture, not a production
+                # process-tree release producer. Use the exact Popen handle only.
+                process = subprocess.Popen(
+                    helper_argv,
+                    env=clean_environment(),
+                    cwd=invocation_dir,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    shell=False,
+                )
+                guard = nullcontext()
+            try:
+                with guard as owner:
+                    ready_path = invocation_dir / "ready.json"
+                    while not ready_path.exists():
+                        exited = (
+                            owner.poll_exit() if owner is not None else process.poll() is not None
+                        )
+                        if exited or time.monotonic() >= deadline:
+                            return self._receipt(request, record)
+                        time.sleep(0.01)
+                    ready = read_json(ready_path)
+                    helper_pid = owner.identity.pid if owner is not None else process.pid
+                    expected_ready = {
+                        "nonce": manifest["nonce"],
+                        "request_sha256": request.request_sha256,
+                        "manifest_sha256": manifest_sha,
+                        "submitter": process_identity(helper_pid),
+                        "effective_user": effective_user,
+                    }
+                    if ready != expected_ready:
+                        raise StoreIntegrityError("submitter handshake identity mismatch")
+                    record["ready"] = ready
+                    snapshot = self._commit(
+                        snapshot, ledger, "persist submitter identity before release"
+                    )
+                    current_worker, _, current_script, _, current_user = self._validate_launch(
+                        request
+                    )
+                    if (
+                        current_worker.request_sha256 != worker.request_sha256
+                        or current_script != script
+                        or current_user != effective_user
+                    ):
+                        raise ExecutorError("launch changed during submitter handshake")
+                    current_admission = self._admit(request, current_worker)
+                    record["capacity"] = self._capacity(
+                        request, ledger, current_admission.stage_cap
+                    )
+                    record["admission_sha256"] = current_admission.evidence_sha256
+                    snapshot = self._commit(snapshot, ledger, "persist fresh pre-exec gates")
+                    if time.monotonic() >= deadline:
+                        return self._receipt(request, record)
+                    write_exclusive_json(invocation_dir / "go.json", ready)
+                    if owner is not None:
+                        cleanup = owner.finish(
+                            deadline_monotonic=deadline,
+                            term_grace_seconds=self.transport_term_grace_seconds,
+                        )
+                        record["local_cleanup"] = asdict(cleanup)
+                        record["submitter_finished"] = cleanup.leader_reaped
+                    else:
+                        process.wait(timeout=max(0.01, deadline - time.monotonic()))
+                        record["submitter_finished"] = True
+                    job_id, result_sha = self._result(request, record)
+                    if job_id:
+                        record.update(status="accepted", job_id=job_id, result_sha256=result_sha)
+                    snapshot = self._commit(
+                        snapshot, ledger, "persist completed submitter evidence"
+                    )
                     return self._receipt(request, record)
-                write_exclusive_json(invocation_dir / "go.json", ready)
-                process.wait(timeout=max(0.01, deadline - time.monotonic()))
-                record["submitter_finished"] = True  # This Popen handle actually reaped its child.
-                job_id, result_sha = self._result(request, record)
-                if job_id:
-                    record.update(status="accepted", job_id=job_id, result_sha256=result_sha)
-                snapshot = self._commit(snapshot, ledger, "persist completed submitter evidence")
-                return self._receipt(request, record)
-            except (subprocess.TimeoutExpired, OSError, ExecutorError):
+            except (subprocess.TimeoutExpired, OSError, ExecutorError, OwnershipError) as exc:
+                if isinstance(exc, SpawnOwnershipError):
+                    write_exclusive_json(invocation_dir / "spawn_failure.json", asdict(exc.receipt))
                 # Unknown remains durable. Do not convert transport/process failure
                 # into not_submitted or a retry; do not cancel any allocation.
                 return self._receipt(request, record)
             finally:
-                if process.poll() is None:
+                if owner is not None:
+                    cleanup = owner.close(term_grace_seconds=self.transport_term_grace_seconds)
+                    # This durable diagnostic grants no future kill authority.
+                    write_exclusive_json(invocation_dir / "local_cleanup.json", asdict(cleanup))
+                elif process is not None and process.poll() is None:
                     process.kill()  # Only this exact internal handshake child.
                     process.wait(timeout=5)

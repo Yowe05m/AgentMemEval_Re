@@ -160,6 +160,10 @@ def helper_main(manifest_path: Path, expected_sha256: str) -> int:
     ):
         raise ValueError("unsupported invocation manifest")
     directory = manifest_path.parent
+    if sys.platform.startswith("linux") and (
+        os.getsid(0) != os.getpid() or os.getpgrp() != os.getpid()
+    ):
+        raise ValueError("Linux submitter must be its owner's isolated session leader")
     identity = process_identity(os.getpid())
     expected_user = manifest["expected_effective_user"]
     if expected_user is not None and current_effective_user() != expected_user:
@@ -221,6 +225,12 @@ def helper_main(manifest_path: Path, expected_sha256: str) -> int:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
+            if sys.platform.startswith("linux"):
+                # The parent retains this helper's unreaped session-leader PID
+                # until it has TERM/KILLed the whole local group. Do not race its
+                # cleanup by killing only sbatch, or waiting on inherited pipes.
+                # Exiting here leaves the helper waitable as the PGID anchor.
+                return 72
             # Only this exact Popen child is stopped, never a Slurm allocation.
             process.kill()
             stdout, stderr = process.communicate(timeout=5)

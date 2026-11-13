@@ -565,14 +565,15 @@ BGE-M3、schedule、统计计划和用户授权冻结后才能进入真实黄金
 
 ## Path1 v1 独立协议库
 
-`agentmemeval.path1_v1` 保存冻结来源
-`af8beb585f9a92dfe7591cc6cd8e1582568b3538` 的 Path1 行为，运行环境为
+`agentmemeval.path1_v1` 以冻结来源
+`af8beb585f9a92dfe7591cc6cd8e1582568b3538` 的 Path1 行为为基线，运行环境为
 Python `>=3.11,<3.13`。原有 main 模块、CLI 和 Python 3.10 支持保持各自契约。
 此命名空间仅支持 Expr/NoMemory 控制器、6×50 手形成与冻结内容保留/移除评价的库 API，
 并包含独立发牌/收益复算、终态策略、归档及本地调度状态机。worker 模块入口为
 `python -s -m agentmemeval.path1_v1.operations.worker --request <request.json>`；
 执行器及 helper 同属版本内命名空间，默认缺少可信运行时准入即拒绝执行。
-Linux 生产进程所有权和远端环境尚未验收；测试通过、Slurm 终态或导入成功
+新增 Linux 进程所有权、E0 观测、静默归档及回收实现；站点实际运行仍需验收。
+测试通过、Slurm 终态或导入成功
 都不授予论文实验准入。63 位发牌 RNG 与 HTTP 请求种子均独立记录；
 客户端种子身份验证不等于服务端已经验证种子生效。
 
@@ -597,5 +598,32 @@ Expr/Null factory、Path1 使用的 ArtifactManager 方法和固定英文 profil
 全部已加载 `agentmemeval` 模块，父包及旁支缺少清单覆盖或来自其他仓库均拒绝。
 fixture 固定时钟与 UUID，
 所有时间字段保留比较，仅文件管理器的返回路径和目录冲突消息使用相对测试根目录。
-该版本刻意独立保留控制器、记忆和扑克环境，后续 main 修复不会
-自动改变它。维护时须显式移植所需修复、更新来源记录，并重跑双实现差分与各自回归。
+该版本独立保留控制器、记忆和扑克环境，后续 main 修复不会自动改变它。
+后续实现直接在本命名空间演进；原 `source_sha256.json` 保留来源，
+`operations_evolution.json` 明确列出经过审查的运维变化及对应回归，
+科学输出和三个适配继续与原来源比较。原 candidate 保持只读参考。
+
+固定模型目录可由以下入口从现有 Hugging Face 缓存建立：
+
+```text
+python -m agentmemeval.path1_v1.operations.model_materialize --cache-snapshot <固定revision目录> --destination <新模型目录> --receipt <目录外新回执文件>
+```
+
+工具按固定 Hub revision 的 LFS SHA-256/Git blob 身份核对原文件，复制为独立普通文件，
+并在复制后复核全量内容；不覆盖已有目标，失败的部分目标保留。模型目录身份不证明模型已加载。
+
+真实 E0 服务观测入口：
+
+```text
+python -s -m agentmemeval.path1_v1.operations.worker --request <E0请求.json> --runtime-probe-output <请求绑定的新E0目录> --service-python <服务Python> --service-port <端口>
+```
+
+E0 请求使用独立 `E0/service_probe` 合同，无研究 seed 或 E1 claim；入口只允许在已核验的
+Slurm allocation 内启动自身模型服务，记录主机、模型文件、本地 tokenizer 及原始 HTTP，
+最后清理自身进程组。E0 观测成功仍标记 `runtime_admission=False`：服务端实际 sampler、
+tokenizer/loader 与分配 GPU 的证据必须补齐后才能实现 E1 的可信 RuntimeVerifier。
+当前没有从 JSON `verified` 字段授予运行权限的接口。
+
+`operations.closure` 联合 worker 终态、scheduler allocation/step、服务退出证据，
+检查至少 10 秒静默和完整归档/恢复哈希；`closure_service` 提供持久化服务生产者与读取器。
+其现场接线和跨主机恢复尚待验收，技术闭合不授予统计主表资格。
