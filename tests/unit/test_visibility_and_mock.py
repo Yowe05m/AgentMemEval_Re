@@ -102,8 +102,10 @@ def test_prompt_includes_authoritative_river_hand_and_call_cost() -> None:
     text = render_user_prompt(observation, MemoryContext())
     assert "当前已成牌：Pair" in text
     assert "河牌已结束，没有未来补牌" in text
-    assert "实际最多投入 920（显示需补齐 1960）" in text
-    assert "需要约 29.5% 胜率" in text
+    assert "实际最多投入 920 chips（显示需补齐 1960 chips）" in text
+    assert "跟注前可争夺底池 1200 chips，跟注后可争夺底池 2120 chips" in text
+    assert "需要约 43.4% 胜率" in text
+    assert "需要约 29.5% 胜率" not in text
     assert "这是全下跟注" in text
 
 

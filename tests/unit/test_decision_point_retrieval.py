@@ -118,9 +118,10 @@ def test_factual_memory_persists_versioned_decision_views() -> None:
     assert decision["retrieval_query"] == build_retrieval_query(make_observation())
     assert decision["features"] == observation_features(make_observation())
     snapshot = memory.snapshot()
-    assert snapshot.payload["schema_version"] == 6
+    assert snapshot.payload["schema_version"] == 8
+    assert snapshot.payload["top_k"] == memory.top_k
     assert snapshot.payload["retrieval_unit"] == "decision_point_max_v1"
-    restored = FactualMemory("agent_00")
+    restored = FactualMemory("agent_00", retrieval_unit="decision_point_max_v1")
     restored.restore(snapshot)
     assert restored.retrieval_unit == "decision_point_max_v1"
 

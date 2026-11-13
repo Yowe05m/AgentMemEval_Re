@@ -12,7 +12,6 @@ from typing import Any
 from agentmemeval.evaluation.aggregation import validate_runtime_homogeneity
 from agentmemeval.experiments.campaign import build_campaign_aggregate_payload
 
-
 EXPECTED_RAW_BLOCKERS = {
     "aggregate runtime homogeneity is not verified",
     "runtime identity is not homogeneous: 2 identities",
@@ -70,7 +69,10 @@ def build_gate(
 
     raw_blockers = {str(value) for value in raw_gate.get("blockers", [])}
     if raw_gate.get("status") != "no_go" or raw_blockers != EXPECTED_RAW_BLOCKERS:
-        blockers.append(f"raw gate blockers are not the expected isolated false positive: {sorted(raw_blockers)}")
+        blockers.append(
+            "raw gate blockers are not the expected isolated false positive: "
+            f"{sorted(raw_blockers)}"
+        )
     if raw_gate.get("behavior_freeze_preview", {}).get("status") != "frozen":
         blockers.append("raw gate behavior freeze did not pass")
     if raw_gate.get("aggregate_metrics_match_canonical_leaf_rebuild") is not True:

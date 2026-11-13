@@ -294,10 +294,9 @@ def test_phase_f_compact_source_preserves_recovery_schema_fields(tmp_path: Path)
     }
     compact = task8b_analysis_module._compact_lineage_source(source)
     schema_path = (
-        Path(__file__).parents[3]
-        / "docs"
-        / "task-records"
-        / "TASK8B"
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "task8b_phase_f"
         / "phase_f_generated"
         / "data_lineage.schema.json"
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 
 from agentmemeval.path1_v1.core.domain import (
@@ -14,13 +15,14 @@ from agentmemeval.path1_v1.core.domain import (
     TableSpec,
 )
 from agentmemeval.path1_v1.core.errors import EnvironmentError
-from agentmemeval.path1_v1.core.seeds import make_rng
+from agentmemeval.path1_v1.core.seeds import derive_seed, make_rng
 from agentmemeval.path1_v1.environment.action_guard import ActionGuard
 from agentmemeval.path1_v1.environment.hand_evaluator import evaluate_best, split_side_pots
 
 RANKS = "23456789TJQKA"
 SUITS = "cdhs"
 PHASES = ("preflop", "flop", "turn", "river")
+DIRECT_RNG_ALGORITHM = "python-random-direct-int63-v1"
 
 
 @dataclass(slots=True)
@@ -67,7 +69,9 @@ class HoldemEnvironment:
         self._guard = ActionGuard()
         self._hand_counter = 0
 
-    def reset(self, table_spec: TableSpec, seed: int) -> None:
+    def reset(
+        self, table_spec: TableSpec, seed: int, *, direct_rng_seed: int | None = None
+    ) -> None:
 
         if len(table_spec.agent_ids) < 2:
             raise EnvironmentError("a table requires at least two agents")
@@ -75,7 +79,16 @@ class HoldemEnvironment:
             raise EnvironmentError("invalid blinds: big_blind must be at least small_blind")
         self.table_spec = table_spec
         self.seed = seed
-        self.rng = make_rng(seed, table_spec.table_id)
+        if direct_rng_seed is None:
+            self.actual_rng_seed = derive_seed(seed, table_spec.table_id)
+            self.actual_rng_algorithm = "legacy-sha256-table-id-int32-v1"
+            self.rng = make_rng(seed, table_spec.table_id)
+        else:
+            if type(direct_rng_seed) is not int or not 0 <= direct_rng_seed < 2**63:
+                raise EnvironmentError("direct RNG seed must be an integer in [0, 2**63)")
+            self.actual_rng_seed = direct_rng_seed
+            self.actual_rng_algorithm = DIRECT_RNG_ALGORITHM
+            self.rng = random.Random(direct_rng_seed)
         self._hand_counter += 1
         hand_number = max(1, int(table_spec.hand_number))
         self.hand_id = f"{table_spec.table_id}-h{hand_number}-{seed}"

@@ -149,7 +149,70 @@ def test_same_seed_claim_with_different_actual_deal_rejected(evidence):
         root / "terminal_receipt.json",
         lambda value: value["arms"]["removed"]["deals"].__setitem__(0, fake),
     )
-    with pytest.raises(EvidenceError, match="exogenous pairing"):
+    with pytest.raises(EvidenceError, match="independent RNG replay"):
+        audit(evidence)
+
+
+@pytest.mark.parametrize("field", ["campaign", "artifact", "phase", "root_seed", "seed_namespace"])
+def test_seed_manifest_namespace_is_bound_to_expected_design(evidence, field):
+    change_json(
+        evidence[0] / "seed_manifest.json",
+        lambda value: value["namespace"].update({field: "another_namespace"}),
+    )
+    with pytest.raises(EvidenceError, match="seed namespace"):
+        audit(evidence)
+
+
+@pytest.mark.parametrize("change", ["missing", "extra", "float", "value"])
+def test_seed_stream_inventory_is_independently_rederived(evidence, change):
+    def alter(value):
+        streams = value["streams"]
+        key = next(iter(streams))
+        if change == "missing":
+            streams.pop(key)
+        elif change == "extra":
+            streams['["unexpected"]'] = 7
+        elif change == "float":
+            streams[key] = float(streams[key])
+        else:
+            streams[key] += 1
+
+    change_json(evidence[0] / "seed_manifest.json", alter)
+    with pytest.raises(EvidenceError, match="seed stream ledger"):
+        audit(evidence)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("actual_rng_seed", 7),
+    ("actual_rng_seed", True),
+    ("actual_rng_algorithm", "legacy-sha256-table-id-int32-v1"),
+])
+def test_raw_engine_rng_identity_cannot_be_self_reported_as_legacy(evidence, field, value):
+    change_jsonl(
+        evidence[0] / "evaluation_0000_retained/hand_summaries.jsonl",
+        lambda rows: rows[0].update({field: value}),
+    )
+    with pytest.raises(EvidenceError, match="engine RNG|invalid integer"):
+        audit(evidence)
+
+
+def test_two_arms_with_same_forged_deal_still_fail_independent_replay(evidence):
+    root = evidence[0]
+    fake = "a" * 64
+    for arm in ("retained", "removed"):
+        change_jsonl(
+            root / f"evaluation_0000_{arm}/hand_summaries.jsonl",
+            lambda rows: rows[0].update(deal_sha256=fake),
+        )
+        change_json(
+            root / f"evaluation_0000_{arm}/episode_receipt.json",
+            lambda value: value["deals"].__setitem__(0, fake),
+        )
+        change_json(
+            root / "terminal_receipt.json",
+            lambda value, arm=arm: value["arms"][arm]["deals"].__setitem__(0, fake),
+        )
+    with pytest.raises(EvidenceError, match="independent RNG replay"):
         audit(evidence)
 
 

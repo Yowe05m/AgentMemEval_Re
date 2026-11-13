@@ -1,0 +1,115 @@
+{
+  "analysis_code_dirty": false,
+  "analysis_code_files": [
+    {
+      "relative_path": "src/agentmemeval/evaluation/task8b_analysis.py",
+      "sha256": "fc180c96b1fc4b76606e7ff322a8124d3882ae519d33d64b40b07f78347d91de",
+      "size": 238099
+    },
+    {
+      "relative_path": "configs/formal/task8b_phase_f_contract.json",
+      "sha256": "e4bdebe355cb8eeda79b3919e28c6c8ee1e25901e2ab27ff5e460ae0e55cc5c6",
+      "size": 3351
+    },
+    {
+      "relative_path": "configs/formal/task8b_six_seed_analysis_contract.json",
+      "sha256": "ce7212752913561c99acadf3cdedd9515d003bac8867228ba0b66f17885c367a",
+      "size": 2038
+    }
+  ],
+  "analysis_code_sha": "b38297843694f76f7a502bfcdca21228b4122f6f",
+  "analysis_contract_id": "task8b-phase-f-six-seed-v1",
+  "analysis_contract_sha256": "ce7212752913561c99acadf3cdedd9515d003bac8867228ba0b66f17885c367a",
+  "dependency_lock": {
+    "name": "requirements-phase-f.lock",
+    "sha256": "7afbb97a8bf84dbd08b91284d208a25e2193c090628e91ead422f4bbb27609da",
+    "size": 1053,
+    "verified_real_lock": true
+  },
+  "formal_result_loaded": false,
+  "frozen_at_utc": "2026-07-25T14:06:15.012402+00:00",
+  "manifest_status": "FROZEN_BEFORE_FORMAL_RESULT",
+  "phase_f_files": [
+    {
+      "relative_path": "analysis_contract.md",
+      "sha256": "9bd94e35a6e22756d9779041ac9cb27651abcef7e2f479d0e7e53df8d1772646",
+      "size": 11140
+    },
+    {
+      "relative_path": "analysis_manifest_template.json",
+      "sha256": "d47919c5ea343d5a9f97a71333a295651ca64b99b39bc32518c434a2582379af",
+      "size": 2684
+    },
+    {
+      "relative_path": "data_lineage.schema.json",
+      "sha256": "de6eac009817edde8fbd7f4f3f5130db96bed282d3798c5bcc31e439d0d23a5d",
+      "size": 11008
+    },
+    {
+      "relative_path": "data_lineage_template.csv",
+      "sha256": "9e850f8129f25c3c0a03b1ff1f1c5980dc7c86d421e930b397fbc3382c87cc13",
+      "size": 1165
+    },
+    {
+      "relative_path": "exclusion_ledger_template.csv",
+      "sha256": "add1eefa4a05dda7df047df5a504184121ce119de02334453d6fdd80a4b5fd65",
+      "size": 827
+    },
+    {
+      "relative_path": "figure_specifications.md",
+      "sha256": "7a2d73dcb24568efd3768ec8016cbb2477f3daf2013f26a1ab2c675b68afab94",
+      "size": 3576
+    },
+    {
+      "relative_path": "independent_review_report_template.md",
+      "sha256": "13b6d4eb754d4de240c392668b78f583021163b7f59558c9478bbfa869a46e9f",
+      "size": 3879
+    },
+    {
+      "relative_path": "phase_f_generation_record.md",
+      "sha256": "c2f6b4a8918f839929443ce42fc41bf0d6f5cf45129fe7c0ea81b161b1f12f19",
+      "size": 4185
+    },
+    {
+      "relative_path": "pre_unlock_manifest_template.json",
+      "sha256": "f4bcebef2e208df3e7d01a00156c77477ee13d7fbc95ebfd0dcdc31de2bcdb3e",
+      "size": 492
+    },
+    {
+      "relative_path": "README.md",
+      "sha256": "4115c860d6111ff7ebf6b441689b35e49f8ea614704f782b10ffa46136f09f47",
+      "size": 3234
+    },
+    {
+      "relative_path": "table_field_dictionary.md",
+      "sha256": "44941c428501131db0e3f170d53bf55a5e92922b6410fd47621825b11d2baea7",
+      "size": 2434
+    },
+    {
+      "relative_path": "table_templates/table1_protocol_identity.csv",
+      "sha256": "ec6b302114bf49e6c4178fd1fce3af393f22a4f30b74803ad2b347e4b966caa3",
+      "size": 4105
+    },
+    {
+      "relative_path": "table_templates/table2_core_adaptation_generalization.csv",
+      "sha256": "6f9090665cf4c89d852ea6c10f0d813d8c969bf86deee1f944fd7585b7bc14fe",
+      "size": 879
+    },
+    {
+      "relative_path": "table_templates/table3_checkpoint_scan.csv",
+      "sha256": "dbe9fd1c3abfb371ad1a0112c1ceafb179331246722eb20b5b87ac6c9a203d7a",
+      "size": 1963
+    },
+    {
+      "relative_path": "table_templates/table4_frozen_online_without.csv",
+      "sha256": "db42c2b5c7d534526660137b28976fc90bb6683985d22ceec1893e323de778ad",
+      "size": 891
+    },
+    {
+      "relative_path": "table_templates/table5_behavior_robustness.csv",
+      "sha256": "48830dc39f4ea4630c8ec182bcc1f4c8101f13b3133d7d20148b53b5048da6fd",
+      "size": 926
+    }
+  ],
+  "schema_version": "task8b-phase-f-pre-unlock-v1"
+}

@@ -190,8 +190,29 @@ def _collect(prefix: str, root: Path, helper_path: Path) -> dict:
                     assert memory.current.version == 2, result
             policies[name] = {"calls": calls, "result": result, "snapshot": snapshot}
 
+    identity = load("llm.request_identity")
+    context = identity.EpisodeRequestContext(
+        "parity", "E1", "artifact_00", "identity_fixture", 918,
+        "formation", 0, "formation", "agent_00", 2**62 + 273,
+    )
+    ledger = identity.SamplerSeedLedger()
+    binding = identity.RequestIdentityBinding(context, ledger)
+    request = helper.request()
+    request.observation.agent_id = "agent_00"
+    request.observation.table_id = "artifact_00_formation_0000"
+    sampler_records = []
+    for purpose in ("action", "revision"):
+        for index in (0, 1):
+            budget = load("llm.terminal_policy").LogicalRequestBudget(
+                17, purpose, logical_request_id=f"fixture_{purpose}_{index}",
+            )
+            sampler_records.append(binding.issue(request, budget, "primary"))
+            if index == 0:
+                sampler_records.append(binding.issue(request, budget, "contract_repair"))
+
     return normalize({"factory": constructions, "storage": storage_result,
                       "profiles": [profiles.active_experience_section_labels(),
                                    profiles.active_prompt_localization()],
                       "engine": {"receipt": receipt, "files": scientific_files,
-                                 "actual_requests": requests}, "terminal": policies})
+                                 "actual_requests": requests}, "terminal": policies,
+                      "http_identity": {"records": sampler_records, "streams": ledger.entries}})

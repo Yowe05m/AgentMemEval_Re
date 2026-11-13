@@ -21,6 +21,7 @@ from agentmemeval.path1_v1.agents.base import LLMDecisionAgent
 from agentmemeval.path1_v1.agents.llm_agent import build_agent
 from agentmemeval.path1_v1.core.domain import HandResult, MemorySnapshot
 from agentmemeval.path1_v1.core.protocols import LLMClient
+from agentmemeval.path1_v1.environment.holdem_adapter import DIRECT_RNG_ALGORITHM
 from agentmemeval.path1_v1.experiments.table_play import run_single_hand
 from agentmemeval.path1_v1.memory.experiential import ExperientialMemory
 from agentmemeval.path1_v1.storage.artifacts import ArtifactManager
@@ -80,6 +81,7 @@ class Path1Design:
     artifact_id: str
     phase: str
     root_seed: int
+    seed_namespace: str = "legacy"
     formation_episodes: int = 6
     formation_episode_hands: int = 50
     evaluation_episode_hands: int = 50
@@ -92,10 +94,11 @@ class Path1Design:
     def __post_init__(self) -> None:
         _component(self.campaign_id)
         _component(self.artifact_id)
+        _component(self.seed_namespace)
         if self.phase not in {"offline", "E1", "E2", "E3"}:
             raise ValueError("unknown Path1 phase")
         for field, value in asdict(self).items():
-            if field in {"campaign_id", "artifact_id", "phase"}:
+            if field in {"campaign_id", "artifact_id", "phase", "seed_namespace"}:
                 continue
             if type(value) is not int or value < (0 if field == "root_seed" else 1):
                 raise ValueError(f"{field} must be a valid integer")
@@ -114,17 +117,22 @@ class SeedLedger:
 
     def __init__(self, design: Path1Design, forbidden_seeds: set[int] | None = None):
         self.namespace = {
-            "algorithm": "path1-sha256-31bit-v1",
+            "algorithm": "path1-sha256-63bit-v2",
             "campaign": design.campaign_id, "artifact": design.artifact_id,
             "phase": design.phase, "root_seed": design.root_seed,
+            "seed_namespace": design.seed_namespace,
         }
         self.entries: dict[str, int] = {}
         self.owners: dict[int, str] = {}
         self.forbidden = set(forbidden_seeds or ())
+        if any(type(value) is not int or not 0 <= value < 2**63 for value in self.forbidden):
+            raise ValueError("invalid forbidden Path1 seed")
 
     def get(self, *labels: str | int) -> int:
         key = _canonical(list(labels)).decode()
-        value = int(_digest([self.namespace, list(labels)])[:16], 16) % (2**31 - 1)
+        if any(type(label) not in {str, int} for label in labels):
+            raise ValueError("Path1 seed labels must be exact strings or integers")
+        value = int(_digest([self.namespace, list(labels)])[:16], 16) % 2**63
         if value in self.forbidden or (value in self.owners and self.owners[value] != key):
             raise ValueError("seed collision; freeze a new namespace before execution")
         self.owners[value] = key
@@ -192,11 +200,27 @@ class _Session:
         agents = {}
         for agent_id in [HERO_ID, *[f"opponent_{i:02d}" for i in range(1, 8)]]:
             seed = self.seeds.get(stage, episode, arm, "client", agent_id)
-            client = self.client_factory(agent_id, seed)
+            from agentmemeval.path1_v1.llm.request_identity import (
+                EpisodeRequestContext,
+                require_path1_request_identity,
+            )
+
+            request_context = EpisodeRequestContext(
+                campaign_id=self.design.campaign_id, phase=self.design.phase,
+                artifact_id=self.design.artifact_id, seed_namespace=self.design.seed_namespace,
+                root_seed=self.design.root_seed, stage=stage, episode_index=episode,
+                arm=arm, actor_id=agent_id, client_seed=seed,
+            )
+            episode_factory = getattr(self.client_factory, "create_episode_client", None)
+            client = (
+                episode_factory(request_context, artifacts.run_dir / "provider_exchanges.jsonl")
+                if episode_factory is not None else self.client_factory(agent_id, seed)
+            )
             if self.design.phase != "offline":
                 from agentmemeval.path1_v1.llm.terminal_policy import require_path1_terminal_policy
 
                 require_path1_terminal_policy(client)
+                require_path1_request_identity(client, request_context)
             if any(client is previous for previous in self.clients):
                 raise ValueError("client_factory reused a client across actors/episodes/arms")
             self.clients.append(client)
@@ -263,7 +287,8 @@ class _Session:
                     raise ValueError("cash flow does not conserve chips")
                 _append_json(self.output / "settled_hands.jsonl", {
                     **identity, "hand_index": hand_index, "hand_id": result.hand_id,
-                    "deal_seed": deal_seed, "dealer_index": hand_index % d.table_size,
+                    "deal_seed": deal_seed, "actual_rng_seed": deal_seed,
+                    "dealer_index": hand_index % d.table_size,
                     "rewards": result.rewards, "starting_stacks": starting,
                     "final_stacks": result.final_stacks, "memory_update": "not_yet_attempted",
                 })
@@ -275,7 +300,8 @@ class _Session:
             try:
                 run_single_hand(
                     agents=agents, table_id=f"{d.artifact_id}_{stage}_{index:04d}",
-                    agent_ids=agent_ids, stacks=stacks, seed=seed, stage=stage,
+                    agent_ids=agent_ids, stacks=stacks, seed=seed,
+                    direct_rng_seed=seed, stage=stage,
                     small_blind=d.small_blind, big_blind=d.big_blind,
                     max_raises_per_street=d.max_raises_per_street,
                     update_memory=stage == "formation", artifacts=artifacts,
@@ -314,11 +340,19 @@ class _Session:
         rows = artifacts.hand_summaries.read_all()
         if len(rows) != count:
             raise ValueError("missing completed hand summaries")
+        if d.phase != "offline" and any(
+            type(row.get("actual_rng_seed")) is not int
+            or row["actual_rng_seed"] != self.seeds.get(stage, index, "deal", hand)
+            or row.get("actual_rng_algorithm") != DIRECT_RNG_ALGORITHM
+            for hand, row in enumerate(rows)
+        ):
+            raise ValueError("actual environment RNG binding is missing or differs")
         receipt = {**identity, "status": "complete", "hands": count, "rewards": rewards,
                    "rebuys": rebuys, "final_stacks": stacks,
                    "hero_net_bb100": rewards[HERO_ID] * 100 / (d.big_blind * count),
                    "deals": [row["deal_sha256"] for row in rows],
                    "deal_seeds": [row["seed"] for row in rows],
+                   "actual_rng_seeds": [row.get("actual_rng_seed") for row in rows],
                    "initial_stacks": rows[0]["starting_stacks"],
                    "controller": type(agents[HERO_ID]).__name__,
                    "mechanism": agents[HERO_ID].snapshot_memory().mechanism,
@@ -334,6 +368,8 @@ class _Session:
                    "primary_analysis_admitted": False, **extra}
         _new_json(self.output / "seed_manifest.json", {
             "namespace": self.seeds.namespace, "streams": self.seeds.entries,
+            "environment_rng_binding": "direct_rng_seed_without_secondary_hash",
+            "actual_rng_algorithm": DIRECT_RNG_ALGORITHM,
             "backend_binding_verified": False,
         })
         _new_json(self.output / "terminal_receipt.json", receipt)
@@ -385,7 +421,9 @@ def run_evaluation_pair(*, output_dir: Path, design: Path1Design,
             _, rows[arm] = session.episode(episode_index, arm, "evaluation", snapshot,
                                            episode_index % design.table_size)
         first, second = rows["retained"], rows["removed"]
-        for field in ("deals", "deal_seeds", "initial_stacks", "hero_seat", "hands"):
+        for field in (
+            "deals", "deal_seeds", "actual_rng_seeds", "initial_stacks", "hero_seat", "hands",
+        ):
             if first[field] != second[field]:
                 raise ValueError(f"evaluation exogenous pairing mismatch: {field}")
         if _digest(snapshot.to_dict()) != parent_hash:

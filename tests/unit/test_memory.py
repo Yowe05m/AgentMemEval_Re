@@ -6,6 +6,10 @@
 不负责：不运行真实环境或 Provider。
 """
 
+import hashlib
+
+import pytest
+
 from agentmemeval.core.domain import (
     ActionDecision,
     AgentObservation,
@@ -127,9 +131,12 @@ def test_factual_memory_snapshot_restore_and_retrieve() -> None:
     context = memory.build_context(make_observation())
     assert len(context.facts) == 1
     snapshot = memory.snapshot()
-    restored = FactualMemory("agent_00")
+    restored = FactualMemory("agent_00", top_k=3)
     restored.restore(snapshot)
     assert restored.metrics()["fact_count"] == 1
+    assert restored.build_context(make_observation()).facts == context.facts
+    with pytest.raises(ValueError, match="semantic config mismatch: top_k"):
+        FactualMemory("agent_00", top_k=4).restore(snapshot)
 
 
 def test_factual_record_ids_remain_unique_after_capacity_trimming_and_restore() -> None:
@@ -181,16 +188,24 @@ def test_llm_experience_revision_is_schema_and_prompt_audited() -> None:
         llm_client=MockLLMClient(),
         model="mock-deterministic-v1",
     )
+    old_md = memory.current.body
     memory.on_hand_finished(make_trajectory())
 
     revision = memory.snapshot().payload["revision_log"][0]
-    assert revision["revision_strategy"] == "llm_structured_revision"
-    assert revision["schema_version"] == "experience_revision_v1"
+    assert revision["revision_strategy"] == "llm_structured_patch_revision"
+    assert revision["schema_version"] == "experience_revision_v2"
     assert len(revision["prompt_sha256"]) == 64
-    assert revision["old_md"]
-    assert revision["new_md"]
+    # Revision logs retain fingerprints; document bodies live in versioned documents.
+    assert revision["old_md_sha256"] == hashlib.sha256(old_md.encode("utf-8")).hexdigest()
+    assert revision["new_md_sha256"] == hashlib.sha256(
+        memory.current.body.encode("utf-8")
+    ).hexdigest()
+    assert revision["old_md_chars"] == len(old_md) > 0
+    assert revision["new_md_chars"] == len(memory.current.body) > 0
+    assert "old_md" not in revision and "new_md" not in revision
     assert revision["fallback_used"] is False
-    assert EXPERIENCE_PROMPT_VERSION == "2026-07-19-v3-counterfactual-calibrated"
+    assert EXPERIENCE_PROMPT_VERSION == "2026-07-26-v5-json-example-semantic-repair"
+    assert revision["prompt_version"] == EXPERIENCE_PROMPT_VERSION
 
 
 def test_llm_experience_revision_prompt_rejects_single_action_counterfactuals() -> None:
@@ -213,7 +228,12 @@ def test_llm_experience_revision_prompt_rejects_single_action_counterfactuals() 
     memory.on_hand_finished(make_trajectory(action_type="fold"))
 
     request = client.requests[0]
-    assert "单手或单一动作覆盖不足时必须 keep=true" in request.system_prompt
+    assert request.metadata["response_schema"] == "experience_revision_v2"
+    assert "通过结构化 patch 增量维护" in request.system_prompt
+    assert "operation 只能是 keep 或 patch" in request.user_prompt
+    assert "就推断该动作优于未观察动作" in request.user_prompt
+    assert "单条轨迹可以形成 observed_evidence + tentative" in request.user_prompt
+    assert "但不能据此标成supported" in request.user_prompt
     assert "不包含未选择动作的反事实结果" in request.user_prompt
     assert "不得把“没有观察到反例”写成支持证据" in request.user_prompt
 

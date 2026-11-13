@@ -20,6 +20,14 @@ def digest(value):
 
 
 class OriginalNamespace(ast.NodeTransformer):
+    def __init__(self, routing_literal_inverse=None):
+        self.routing_literal_inverse = routing_literal_inverse or {}
+
+    def visit_Constant(self, node):
+        if type(node.value) is str and node.value in self.routing_literal_inverse:
+            node.value = self.routing_literal_inverse[node.value]
+        return node
+
     def visit_ImportFrom(self, node):
         if node.module and node.module.startswith(PREFIX + "."):
             node.module = "agentmemeval" + node.module[len(PREFIX):]
@@ -52,8 +60,11 @@ def test_mechanical_modules_preserve_complete_ast_and_import_only_their_version(
                        else [node.module] if isinstance(node, ast.ImportFrom) else [])
             assert not any(value and value.startswith("agentmemeval.")
                            and not value.startswith(PREFIX + ".") for value in imports), name
-        if record["mode"] == "namespace_imports_only":
-            normalized = ast.dump(OriginalNamespace().visit(tree), include_attributes=False)
+        if record["mode"] in {
+            "namespace_imports_only", "namespace_imports_and_reviewed_routing_literals",
+        }:
+            normalized = ast.dump(OriginalNamespace(expected.get("routing_literal_inverse"))
+                                  .visit(tree), include_attributes=False)
             assert hashlib.sha256(normalized.encode()).hexdigest() == record["ast_sha256"], name
 
 

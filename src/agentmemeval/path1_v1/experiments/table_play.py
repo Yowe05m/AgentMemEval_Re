@@ -40,6 +40,7 @@ def run_single_hand(
     max_actions: int = 200,
     hand_metadata: dict[str, Any] | None = None,
     on_settled: Callable[[HandResult], None] | None = None,
+    direct_rng_seed: int | None = None,
 ) -> HandResult:
 
     table_spec = TableSpec(
@@ -54,7 +55,10 @@ def run_single_hand(
     )
     env = HoldemEnvironment()
     starting_stacks = dict(table_spec.starting_stacks)
-    env.reset(table_spec, seed=seed)
+    if direct_rng_seed is None:
+        env.reset(table_spec, seed=seed)
+    else:
+        env.reset(table_spec, seed=seed, direct_rng_seed=direct_rng_seed)
     # Audit the actual exogenous deal before any policy can affect the trajectory.
     # Private cards remain hashed audit data and never enter another player's prompt.
     deal_sha256 = hashlib.sha256(
@@ -202,6 +206,9 @@ def run_single_hand(
             "memory_updated": update_memory,
             **(hand_metadata or {}),
             "deal_sha256": deal_sha256,
+            **({"actual_rng_seed": env.actual_rng_seed,
+                "actual_rng_algorithm": env.actual_rng_algorithm}
+               if direct_rng_seed is not None else {}),
         }
     )
     return result

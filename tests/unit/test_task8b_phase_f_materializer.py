@@ -47,6 +47,13 @@ from agentmemeval.experiments.task8b_phase_f_materializer import (
 )
 
 
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # Recovery evidence has long fixed filenames; keep each isolated test root short
+    # so Windows can exercise the same hash/identity gates as other platforms.
+    return tmp_path_factory.mktemp("m")
+
+
 def _json_bytes(value: object) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
@@ -271,10 +278,9 @@ def _make_source_map(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     preunlock = root / "pre_unlock_manifest.json"
     preunlock.write_bytes(
         (
-            Path(__file__).resolve().parents[3]
-            / "docs"
-            / "task-records"
-            / "TASK8B"
+            Path(__file__).resolve().parents[1]
+            / "fixtures"
+            / "task8b_phase_f"
             / "phase_f_pre_unlock_manifest_b382978_six_seed.json"
         ).read_bytes()
     )

@@ -566,11 +566,15 @@ BGE-M3、schedule、统计计划和用户授权冻结后才能进入真实黄金
 ## Path1 v1 独立协议库
 
 `agentmemeval.path1_v1` 保存冻结来源
-`06416317cca98105cb155941ffb76e3cdc29eeae` 的 Path1 行为，运行环境为
+`af8beb585f9a92dfe7591cc6cd8e1582568b3538` 的 Path1 行为，运行环境为
 Python `>=3.11,<3.13`。原有 main 模块、CLI 和 Python 3.10 支持保持各自契约。
 此命名空间仅支持 Expr/NoMemory 控制器、6×50 手形成与冻结内容保留/移除评价的库 API，
-并包含证据复算、终态策略及本地调度状态机。尚未提供真实 worker/远端执行器入口；
-测试通过、Slurm 终态或导入成功都不授予论文实验准入。
+并包含独立发牌/收益复算、终态策略、归档及本地调度状态机。worker 模块入口为
+`python -s -m agentmemeval.path1_v1.operations.worker --request <request.json>`；
+执行器及 helper 同属版本内命名空间，默认缺少可信运行时准入即拒绝执行。
+Linux 生产进程所有权和远端环境尚未验收；测试通过、Slurm 终态或导入成功
+都不授予论文实验准入。63 位发牌 RNG 与 HTTP 请求种子均独立记录；
+客户端种子身份验证不等于服务端已经验证种子生效。
 
 入口为 `agentmemeval.path1_v1.experiments.path1` 的 `Path1Design`、
 `run_formation`、`run_evaluation_pair`，独立复算入口为
@@ -588,7 +592,10 @@ python -m ruff check src/agentmemeval/path1_v1 tests/path1_v1
 
 测试包含冻结来源的 AST/资源哈希，以及三个小适配的同 fixture 差分结果：
 Expr/Null factory、Path1 使用的 ArtifactManager 方法和固定英文 profile。
-真实 engine 的发牌、收益、动作/更新/修复请求亦与来源比较；fixture 固定时钟与 UUID，
+真实 engine 的发牌、收益、动作/更新/修复请求及 HTTP 种子身份亦与来源比较；
+执行器必需模块、worker 清单路径与 launcher 指向版本内模块，但来源核验仍扫描
+全部已加载 `agentmemeval` 模块，父包及旁支缺少清单覆盖或来自其他仓库均拒绝。
+fixture 固定时钟与 UUID，
 所有时间字段保留比较，仅文件管理器的返回路径和目录冲突消息使用相对测试根目录。
 该版本刻意独立保留控制器、记忆和扑克环境，后续 main 修复不会
 自动改变它。维护时须显式移植所需修复、更新来源记录，并重跑双实现差分与各自回归。

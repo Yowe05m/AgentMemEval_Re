@@ -5,8 +5,7 @@ import json
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKSPACE_ROOT = REPO_ROOT.parent
-PHASE_F_DIR = WORKSPACE_ROOT / "docs" / "task-records" / "TASK8B" / "phase_f_generated"
+PHASE_F_DIR = REPO_ROOT / "tests" / "fixtures" / "task8b_phase_f" / "phase_f_generated"
 CONTRACT_PATH = REPO_ROOT / "configs" / "formal" / "task8b_phase_f_contract.json"
 SCHEMA_PATH = PHASE_F_DIR / "data_lineage.schema.json"
 LINEAGE_TEMPLATE_PATH = PHASE_F_DIR / "data_lineage_template.csv"

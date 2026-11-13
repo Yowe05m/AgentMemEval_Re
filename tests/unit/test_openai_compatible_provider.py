@@ -77,7 +77,7 @@ def test_local_service_can_skip_api_key_and_parse_fenced_json(
             (
                 "```json\n"
                 '{"action_type": "call", "amount": null, "confidence": 0.8, '
-                '"reason_summary": "跟注观察"}\n'
+                '"reason_summary": "跟注观察", "intent": "控制底池并保留摊牌价值"}\n'
                 "```"
             ),
             "stop",
@@ -90,6 +90,28 @@ def test_local_service_can_skip_api_key_and_parse_fenced_json(
     decision = client.generate_structured(object(), ActionDecision)  # type: ignore[arg-type]
     assert decision.action_type == "call"
     assert decision.amount is None
+    assert decision.intent == "控制底池并保留摊牌价值"
+
+
+@pytest.mark.parametrize("intent", [None, "", "   ", 123, "x" * 61])
+def test_action_response_requires_explicit_bounded_intent(monkeypatch, intent) -> None:
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
+    client = OpenAICompatibleClient(
+        {"base_url_env": "LOCAL_LLM_BASE_URL", "api_key_required": False, "max_retries": 0}
+    )
+    payload = {
+        "action_type": "call",
+        "amount": None,
+        "confidence": 0.8,
+        "reason_summary": "This reason must not be substituted for intent.",
+    }
+    if intent is not None:
+        payload["intent"] = intent
+    monkeypatch.setattr(
+        client, "_post", lambda *args, **kwargs: _CompletionResult(json.dumps(payload), "stop")
+    )
+    with pytest.raises(ProviderError, match="intent"):
+        client.generate_structured(object(), ActionDecision)
 
 
 def test_truncated_json_uses_compact_repair_request(
@@ -114,7 +136,7 @@ def test_truncated_json_uses_compact_repair_request(
             ),
             _CompletionResult(
                 '{"action_type":"call","amount":null,"confidence":0.9,'
-                '"reason_summary":"赔率可接受"}',
+                '"reason_summary":"赔率可接受","intent":"保留摊牌价值"}',
                 "stop",
             ),
         ]
@@ -130,15 +152,16 @@ def test_truncated_json_uses_compact_repair_request(
 
     assert decision.action_type == "call"
     assert decision.reason_summary == "赔率可接受"
+    assert decision.intent == "保留摊牌价值"
     assert len(calls) == 2
     assert calls[1]["max_tokens"] == 256
     assert "JSON 修复器" in calls[1]["messages"][0]["content"]  # type: ignore[index]
 
 
-def test_truncated_json_conservatively_recovers_complete_action_fields(
+def test_truncated_action_without_explicit_intent_cannot_be_recovered_as_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """修复请求也失败时，只恢复截断前已经完整返回的动作字段。"""
+    """完整动作字段仍不足以替代缺失的显式 intent；不得补造研究输入。"""
 
     monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
     client = OpenAICompatibleClient(
@@ -160,11 +183,9 @@ def test_truncated_json_conservatively_recovers_complete_action_fields(
     )
     monkeypatch.setattr(client, "_post", lambda *args, **kwargs: next(completions))
 
-    decision = client.generate_structured(object(), ActionDecision)  # type: ignore[arg-type]
-
-    assert decision.action_type == "fold"
-    assert decision.confidence == 0.7
-    assert decision.raw_response["provider_recovered_from_truncation"] is True
+    with pytest.raises(ProviderError, match="缺少非空 intent"):
+        client.generate_structured(object(), ActionDecision)  # type: ignore[arg-type]
+    assert client.last_call_diagnostics["http_call_count"] == 2
 
 
 def test_irrecoverable_truncation_reports_finish_reason(
@@ -200,9 +221,13 @@ def _experience_request() -> LLMRequest:
         user_prompt="experience evidence",
         metadata={
             "response_schema": "experience_revision_v1",
-            "evidence_ids": ["h1", "h2"],
+            "evidence_ids": ["hand_1", "hand_2", "fact_1", "fact_2"],
+            "trajectory_ids": ["hand_1", "hand_2"],
+            "fact_ids": ["fact_1", "fact_2"],
+            "experience_fact_classification_fields": True,
             "experience_max_chars": 1600,
             "experience_aux_max_chars": 240,
+            "experience_prompt_token_budget": 8192,
         },
     )
 
@@ -214,9 +239,9 @@ def _experience_payload() -> str:
             "new_md": "# 经验\n保持简洁。",
             "calibration_note": "已校准",
             "self_check": "仅使用可见证据",
-            "supporting_fact_ids": ["h1"],
+            "supporting_fact_ids": ["fact_1"],
             "contradicting_fact_ids": [],
-            "noise_fact_ids": ["h2"],
+            "noise_fact_ids": ["fact_2"],
         },
         ensure_ascii=False,
     )
@@ -239,7 +264,7 @@ def test_experience_revision_uses_independent_output_budget(
 
     def fake_post(*args: object, **kwargs: object) -> _CompletionResult:
         calls.append(kwargs)
-        return _CompletionResult(_experience_payload(), "stop")
+        return _CompletionResult(_experience_payload(), "stop", prompt_tokens=8192)
 
     monkeypatch.setattr(client, "_post", fake_post)
     payload = client.generate_structured(_experience_request(), dict)
@@ -263,8 +288,10 @@ def test_experience_revision_truncation_uses_compact_schema_aware_regeneration(
     )
     completions = iter(
         [
-            _CompletionResult('{"keep": false, "new_md": "未闭合', "length"),
-            _CompletionResult(_experience_payload(), "stop"),
+            _CompletionResult(
+                '{"keep": false, "new_md": "未闭合', "length", prompt_tokens=8192
+            ),
+            _CompletionResult(_experience_payload(), "stop", prompt_tokens=1024),
         ]
     )
     calls: list[dict[str, object]] = []
@@ -287,11 +314,52 @@ def test_experience_revision_schema_bounds_long_text_and_evidence_arrays() -> No
     assert response_format is not None
     schema = response_format["json_schema"]["schema"]  # type: ignore[index]
     properties = schema["properties"]  # type: ignore[index]
-    assert properties["new_md"]["minLength"] == 1
+    # keep=true may return an empty document; the memory contract checks revise semantics.
+    assert properties["new_md"]["minLength"] == 0
     assert properties["new_md"]["maxLength"] == 1600
     assert properties["calibration_note"]["maxLength"] == 240
     assert properties["self_check"]["maxLength"] == 240
     assert properties["supporting_fact_ids"]["maxItems"] == 2
+    assert properties["supporting_fact_ids"]["items"]["enum"] == ["fact_1", "fact_2"]
+    assert properties["contradicting_fact_ids"] == properties["supporting_fact_ids"]
+    assert properties["noise_fact_ids"] == properties["supporting_fact_ids"]
+
+    request_without_facts = _experience_request()
+    request_without_facts.metadata["fact_ids"] = []
+    empty_fact_format = _response_format("json_schema", request_without_facts)
+    empty_fact_schema = empty_fact_format["json_schema"]["schema"]
+    assert empty_fact_schema["properties"]["supporting_fact_ids"]["maxItems"] == 0
+
+
+@pytest.mark.parametrize(
+    "budget,usage,error",
+    [
+        (None, 1, "positive integer"),
+        (True, 1, "positive integer"),
+        (8192.0, 1, "positive integer"),
+        (0, 1, "positive integer"),
+        (8192, None, "usage_missing"),
+        (8192, True, "usage_missing"),
+        (8192, 8193, "budget_exceeded"),
+    ],
+)
+def test_experience_budget_and_observed_usage_fail_closed(monkeypatch, budget, usage, error):
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
+    client = OpenAICompatibleClient(
+        {"base_url_env": "LOCAL_LLM_BASE_URL", "api_key_required": False, "max_retries": 0}
+    )
+    request = _experience_request()
+    request.metadata["experience_prompt_token_budget"] = budget
+    calls = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(kwargs)
+        return _CompletionResult(_experience_payload(), "stop", prompt_tokens=usage)
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    with pytest.raises(ProviderError, match=error):
+        client.generate_structured(request, dict)
+    assert len(calls) == 1
 
 
 def test_online_compatible_provider_still_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:

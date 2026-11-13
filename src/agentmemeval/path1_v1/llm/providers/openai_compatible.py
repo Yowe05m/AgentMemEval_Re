@@ -20,6 +20,7 @@ from agentmemeval.path1_v1.core.domain import ActionDecision
 from agentmemeval.path1_v1.core.errors import ProviderError
 from agentmemeval.path1_v1.core.model_identity import canonical_model_family
 from agentmemeval.path1_v1.environment.action_guard import coerce_decision
+from agentmemeval.path1_v1.llm.request_identity import RequestIdentityBinding
 from agentmemeval.path1_v1.llm.retry import retry_call
 from agentmemeval.path1_v1.llm.schemas import LLMRequest
 from agentmemeval.path1_v1.llm.terminal_policy import (
@@ -197,6 +198,15 @@ class OpenAICompatibleClient:
         self._observed_response_models: set[str] = set()
         self._exchange_recorder: ProviderExchangeRecorder | None = None
         self._exchange_client_role = "primary"
+        self._request_identity_binding: RequestIdentityBinding | None = None
+
+    def bind_request_identity(self, binding: RequestIdentityBinding) -> None:
+        if (type(binding) is not RequestIdentityBinding
+                or self._request_identity_binding is not None):
+            raise Path1TerminalError("configuration", "request_identity_rebind_or_wrong_type")
+        if self._terminal_policy_version != PATH1_TERMINAL_POLICY:
+            raise Path1TerminalError("configuration", "request_identity_requires_strict_policy")
+        self._request_identity_binding = binding
 
     def bind_exchange_recorder(
         self, recorder: ProviderExchangeRecorder, *, client_role: str = "primary"
@@ -792,6 +802,21 @@ class OpenAICompatibleClient:
             "max_tokens": reserved_output_tokens,
             "messages": resolved_messages,
         }
+        request_identity = None
+        if self._request_identity_binding is not None:
+            budget = active_path1_budget()
+            if budget is None or exchange_context is None:
+                raise Path1TerminalError("state", "identity_request_outside_logical_budget")
+            request_identity = self._request_identity_binding.issue(
+                request, budget, str(exchange_context["stage"]),
+            )
+            # These are actual OpenAI-compatible HTTP body fields, not prompt
+            # annotations. The user ID links the full non-secret audit identity.
+            payload["seed"] = request_identity["sampler_seed"]
+            payload["user"] = request_identity["request_id"]
+            if type(self.config.get("enable_thinking")) is not bool:
+                raise Path1TerminalError("configuration", "thinking_policy_not_explicit")
+            payload["chat_template_kwargs"] = {"enable_thinking": self.config["enable_thinking"]}
         response_mode = (
             self.experience_structured_output_mode
             if is_experience_revision
@@ -856,6 +881,8 @@ class OpenAICompatibleClient:
                 "table_id": getattr(request.observation, "table_id", None),
                 "hand_id": getattr(request.observation, "hand_id", None),
                 **(exchange_context or {}),
+                **({"path1_request_identity": request_identity}
+                   if request_identity is not None else {}),
             }
             self._record_exchange(
                 exchange, "request", base_url, api_key,

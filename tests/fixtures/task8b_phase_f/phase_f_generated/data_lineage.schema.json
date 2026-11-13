@@ -1,0 +1,258 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "task8b-phase-f-data-lineage-v1",
+  "title": "TASK8B Phase F table and figure cell lineage",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "lineage_id",
+    "output_artifact_id",
+    "output_element_id",
+    "output_kind",
+    "analysis_contract_id",
+    "analysis_code_sha",
+    "experiment_code_sha",
+    "analysis_manifest_sha256",
+    "input_snapshot_id",
+    "input_manifest_sha256",
+    "source_records",
+    "row_selector",
+    "transformation",
+    "aggregation_order",
+    "statistical_unit",
+    "cluster_ids",
+    "n_planned",
+    "n_effective",
+    "exclusion_ledger_sha256",
+    "verification_status"
+  ],
+  "properties": {
+    "lineage_id": {"type": "string", "minLength": 1},
+    "output_artifact_id": {"type": "string", "minLength": 1},
+    "output_element_id": {"type": "string", "minLength": 1},
+    "output_kind": {"enum": ["table_cell", "figure_point", "figure_line", "figure_interval", "caption_statistic"]},
+    "analysis_contract_id": {
+      "enum": ["task8b-phase-f-v1", "task8b-phase-f-six-seed-v1"]
+    },
+    "analysis_code_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "experiment_code_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "analysis_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "input_snapshot_id": {"type": "string", "minLength": 1},
+    "input_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "source_records": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/sourceRecord"}
+    },
+    "row_selector": {"type": "string", "minLength": 1},
+    "transformation": {"type": "string", "minLength": 1},
+    "aggregation_order": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    },
+    "statistical_unit": {"const": "seed"},
+    "cluster_ids": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 2026090101, "maximum": 2026090112},
+      "uniqueItems": true
+    },
+    "n_planned": {"enum": [6, 12]},
+    "n_effective": {"type": "integer", "minimum": 0, "maximum": 12},
+    "bootstrap": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["method", "replicates", "prng", "seed", "lower_quantile", "upper_quantile"],
+      "properties": {
+        "method": {"const": "seed_cluster_percentile"},
+        "replicates": {"const": 10000},
+        "prng": {"const": "PCG64"},
+        "seed": {"const": 2026090199},
+        "lower_quantile": {"const": 0.025},
+        "upper_quantile": {"const": 0.975}
+      }
+    },
+    "exclusion_ledger_sha256": {"$ref": "#/$defs/sha256"},
+    "missing_reason_codes": {"type": "array", "items": {"type": "string"}},
+    "derived_value_full_precision": {"type": ["number", "null"]},
+    "display_value": {"type": ["string", "null"]},
+    "verification_status": {
+      "description": "VERIFIED means source identity and hashes passed automated gates; independent paper audit is tracked separately.",
+      "enum": ["UNVERIFIED", "VERIFIED", "REJECTED"]
+    },
+    "reviewer": {"type": ["string", "null"]},
+    "reviewed_at_utc": {"type": ["string", "null"], "format": "date-time"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sourceRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "worker_id",
+        "pod_id",
+        "seed",
+        "condition",
+        "task_id",
+        "analysis_family",
+        "mechanism",
+        "memory_mode",
+        "location",
+        "checkpoint_hand",
+        "attempt",
+        "code_sha",
+        "experiment_code_sha",
+        "config_sha256",
+        "prompt_sha256",
+        "model_fingerprint",
+        "embedding_fingerprint",
+        "schedule_sha256",
+        "source_file_relative_path",
+        "source_file_sha256",
+        "exclusion_status",
+        "recovery_disposition",
+        "verifier_code_sha",
+        "protocol_amendment_id",
+        "protocol_amendment_sha256",
+        "pre_recovery_archive_sha256",
+        "pre_recovery_file_manifest_sha256",
+        "original_terminal_state_sha256",
+        "original_expected_config_sha256",
+        "corrected_config_sha256",
+        "canonicalization_equivalence_audit_sha256",
+        "recovery_certificate_sha256",
+        "task1_adoption_attestation_sha256",
+        "scientific_execution_code_sha",
+        "source_execution_stage",
+        "raw_artifact_reused",
+        "task1_rerun_performed"
+      ],
+      "properties": {
+        "run_id": {"type": "string"},
+        "worker_id": {"type": "string", "pattern": "^[PS](0[1-9]|1[0-2])$"},
+        "pod_id": {"type": "string", "pattern": "^pod(0[1-9]|1[0-2])$"},
+        "pair_id": {"type": "string"},
+        "physical_slot": {"type": "string"},
+        "shard_id": {"type": "string"},
+        "shard_side": {"type": "string", "enum": ["", "high", "low"]},
+        "shard_role": {"type": "string"},
+        "paired_physical_slots": {"type": "string"},
+        "shard_manifest_sha256": {
+          "anyOf": [{"$ref": "#/$defs/sha256"}, {"const": ""}]
+        },
+        "composition_receipt_path": {"type": "string"},
+        "composition_receipt_sha256": {
+          "anyOf": [{"$ref": "#/$defs/sha256"}, {"const": ""}]
+        },
+        "seed": {"type": "integer", "minimum": 2026090101, "maximum": 2026090112},
+        "condition": {"type": "string"},
+        "task_id": {"type": "string", "minLength": 1},
+        "analysis_family": {"enum": ["R1-E1-I", "R1-E1-M", "R1-E4", "R1-E5"]},
+        "mechanism": {"enum": ["NoMemory", "Fact", "Expr", "Sync", "Async"]},
+        "memory_mode": {"enum": ["Frozen", "Online", "Without"]},
+        "location": {"enum": ["Source", "Heldout"]},
+        "checkpoint_hand": {"enum": [30, 75, 150, 300]},
+        "heldout_table_id": {"type": ["string", "null"], "enum": ["H01", "H02", "H03", null]},
+        "attempt": {"type": "string", "pattern": "^(attempt_01|__attempt_[0-9]{2})$"},
+        "code_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "experiment_code_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "config_sha256": {"$ref": "#/$defs/sha256"},
+        "prompt_sha256": {"$ref": "#/$defs/sha256"},
+        "model_fingerprint": {"type": "string", "minLength": 1},
+        "embedding_fingerprint": {"type": "string", "minLength": 1},
+        "schedule_sha256": {"$ref": "#/$defs/sha256"},
+        "source_file_relative_path": {"type": "string", "minLength": 1},
+        "source_file_sha256": {"$ref": "#/$defs/sha256"},
+        "exclusion_status": {"enum": ["eligible", "excluded", "missing"]},
+        "missing_reason_code": {"type": ["string", "null"]},
+        "recovery_disposition": {
+          "enum": ["NONE", "VERIFIER_FALSE_POSITIVE_SAME_ATTEMPT_RECOVERY"]
+        },
+        "verifier_code_sha": {
+          "anyOf": [
+            {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            {"type": "null"}
+          ]
+        },
+        "protocol_amendment_id": {"type": ["string", "null"]},
+        "protocol_amendment_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "pre_recovery_archive_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "pre_recovery_file_manifest_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "original_terminal_state_sha256": {
+          "description": "SHA-256 of the canonical serialization of the original terminal state row; not the hash of the complete state file.",
+          "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "original_expected_config_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "corrected_config_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "canonicalization_equivalence_audit_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "recovery_certificate_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "task1_adoption_attestation_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "scientific_execution_code_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "source_execution_stage": {
+          "enum": ["standard", "pre_recovery_task1", "post_adoption_task2_plus"]
+        },
+        "raw_artifact_reused": {"type": "boolean"},
+        "task1_rerun_performed": {"type": "boolean"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "recovery_disposition": {"const": "VERIFIER_FALSE_POSITIVE_SAME_ATTEMPT_RECOVERY"}
+            },
+            "required": ["recovery_disposition"]
+          },
+          "then": {
+            "properties": {
+              "attempt": {"const": "attempt_01"},
+              "verifier_code_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+              "protocol_amendment_id": {"const": "TASK8B-VFPR-20260722"},
+              "protocol_amendment_sha256": {"$ref": "#/$defs/sha256"},
+              "pre_recovery_archive_sha256": {"$ref": "#/$defs/sha256"},
+              "pre_recovery_file_manifest_sha256": {"$ref": "#/$defs/sha256"},
+              "original_terminal_state_sha256": {"$ref": "#/$defs/sha256"},
+              "original_expected_config_sha256": {"$ref": "#/$defs/sha256"},
+              "corrected_config_sha256": {"$ref": "#/$defs/sha256"},
+              "canonicalization_equivalence_audit_sha256": {"$ref": "#/$defs/sha256"},
+              "recovery_certificate_sha256": {"$ref": "#/$defs/sha256"},
+              "task1_adoption_attestation_sha256": {"$ref": "#/$defs/sha256"},
+              "experiment_code_sha": {"const": "a1d1eb97efb41d52585057ab7c9594dcd19227ae"},
+              "scientific_execution_code_sha": {"const": "a1d1eb97efb41d52585057ab7c9594dcd19227ae"},
+              "source_execution_stage": {"enum": ["pre_recovery_task1", "post_adoption_task2_plus"]},
+              "task1_rerun_performed": {"const": false}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "recovery_disposition": {"const": "VERIFIER_FALSE_POSITIVE_SAME_ATTEMPT_RECOVERY"},
+              "source_execution_stage": {"const": "pre_recovery_task1"}
+            },
+            "required": ["recovery_disposition", "source_execution_stage"]
+          },
+          "then": {
+            "properties": {
+              "raw_artifact_reused": {"const": true}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "recovery_disposition": {"const": "VERIFIER_FALSE_POSITIVE_SAME_ATTEMPT_RECOVERY"},
+              "source_execution_stage": {"const": "post_adoption_task2_plus"}
+            },
+            "required": ["recovery_disposition", "source_execution_stage"]
+          },
+          "then": {
+            "properties": {
+              "raw_artifact_reused": {"const": false}
+            }
+          }
+        }
+      ]
+    }
+  }
+}

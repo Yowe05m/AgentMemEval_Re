@@ -9,11 +9,15 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 from agentmemeval.path1_v1.memory.experiential import INITIAL_EXPERIENCE
+
+DIRECT_RNG = "python-random-direct-int63-v1"
+DERIVED_SEEDS = "path1-sha256-63bit-v2"
 
 HERO = "agent_00"
 ARMS = ("retained", "removed")
@@ -112,6 +116,50 @@ def _same_number(actual: Any, expected: Fraction) -> None:
         and math.isclose(actual, float(expected), abs_tol=1e-12, rel_tol=1e-12),
         "reported BB/100 differs from independently recomputed cash flow",
     )
+
+
+def _assigned_pair_streams(design: dict, episode: int, manifest: dict) -> list[int]:
+    """Independently reconstruct v2 labels; do not trust the runner's ledger."""
+    namespace = {
+        "algorithm": DERIVED_SEEDS,
+        "campaign": design["campaign_id"],
+        "artifact": design["artifact_id"],
+        "phase": design["phase"],
+        "root_seed": _integer(design["root_seed"], 0),
+        "seed_namespace": design["seed_namespace"],
+    }
+    _require(_same_value(manifest.get("namespace"), namespace), "seed namespace differs")
+    expected = {}
+
+    def derive(labels: list) -> int:
+        key = json.dumps(labels, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        value = int(_hash_json([namespace, labels])[:16], 16) % 2**63
+        expected[key] = value
+        return value
+
+    deals = [
+        derive(["evaluation", episode, "deal", hand])
+        for hand in range(_integer(design["evaluation_episode_hands"], 1))
+    ]
+    for arm in ARMS:
+        for actor in [HERO, *[f"opponent_{i:02d}" for i in range(1, 8)]]:
+            derive(["evaluation", episode, arm, "client", actor])
+    _require(len(set(expected.values())) == len(expected), "assigned seed collision")
+    _require(_same_value(manifest.get("streams"), expected), "seed stream ledger differs")
+    return deals
+
+
+def _deal_digest(seed: int, dealer: int) -> str:
+    # This is an independent replay of the frozen deal contract, not a call to
+    # the runner or HoldemEnvironment. Engine records alone cannot prove binding.
+    deck = [rank + suit for rank in "23456789TJQKA" for suit in "cdhs"]
+    random.Random(seed).shuffle(deck)
+    hole_cards = [[deck.pop(), deck.pop()] for _ in range(8)]
+    return _hash_json({
+        "hole_cards_by_seat": hole_cards,
+        "remaining_deck": deck,
+        "dealer_index": dealer,
+    })
 
 
 def file_inventory(root: str | Path) -> list[dict[str, Any]]:
@@ -228,6 +276,7 @@ def _audit_arm(
     arm: str,
     settlements: list[dict],
     lifecycle: list[dict],
+    assigned_deals: list[int],
 ) -> dict[str, Any]:
     directory = root / f"evaluation_{episode:04d}_{arm}"
     _require(directory.is_dir() and not directory.is_symlink(), "missing/linked arm directory")
@@ -289,6 +338,7 @@ def _audit_arm(
         _require(
             settled.get("hand_id") == hand["hand_id"]
             and _integer(settled.get("deal_seed"), 0) == hand["seed"]
+            and _integer(settled.get("actual_rng_seed"), 0) == hand["seed"]
             and _integer(settled.get("dealer_index"), 0) == index % 8,
             "settlement join mismatch",
         )
@@ -323,6 +373,16 @@ def _audit_arm(
         )
         deals.append(deal)
         seeds.append(_integer(hand.get("seed"), 0))
+        _require(
+            _integer(hand.get("actual_rng_seed"), 0) == hand["seed"] < 2**63
+            and hand.get("actual_rng_algorithm") == DIRECT_RNG,
+            "actual engine RNG differs from assigned Path1 stream",
+        )
+        _require(hand["seed"] == assigned_deals[index], "raw seed differs from assigned stream")
+        _require(
+            deal == _deal_digest(assigned_deals[index], index % 8),
+            "actual deal differs from independent RNG replay",
+        )
     actual_rebuys = []
     for event in rebuy_events:
         _identity(event, design, episode, arm)
@@ -340,6 +400,10 @@ def _audit_arm(
     _require(type(receipt.get("deal_seeds")) is list, "invalid receipt seed list")
     for seed in receipt["deal_seeds"]:
         _integer(seed, 0)
+    _require(
+        _same_value(receipt.get("actual_rng_seeds"), assigned_deals),
+        "receipt actual RNG ledger differs",
+    )
     _require(
         receipt.get("rewards") == total_reward
         and receipt.get("rebuys") == total_rebuy
@@ -399,6 +463,14 @@ def audit_evaluation_pair(
         "unexpected design/manifest",
     )
     design = manifest["design"]
+    seed_manifest = _json(root / "seed_manifest.json")
+    namespace = seed_manifest.get("namespace")
+    _require(
+        type(namespace) is dict
+        and namespace.get("algorithm") == DERIVED_SEEDS
+        and seed_manifest.get("actual_rng_algorithm") == DIRECT_RNG,
+        "unknown or unbound actual RNG algorithm",
+    )
     _require(
         _integer(design.get("table_size"), 1) == 8
         and _integer(design.get("big_blind"), 1) == 2
@@ -418,6 +490,7 @@ def audit_evaluation_pair(
     )
     _require(terminal.get("primary_analysis_admitted") is False, "library cannot grant admission")
     episode = _integer(terminal.get("episode_index"), 0)
+    assigned_deals = _assigned_pair_streams(design, episode, seed_manifest)
     _require(
         type(terminal.get("arms")) is dict and set(terminal["arms"]) == set(ARMS),
         "pair must contain both arms exactly once",
@@ -452,6 +525,7 @@ def audit_evaluation_pair(
             arm,
             [row for row in settlements if row.get("arm") == arm],
             [row for row in lifecycle if row.get("arm") == arm],
+            assigned_deals,
         )
     retained, removed = results["retained"], results["removed"]
     for field in ("deals", "seeds", "initial_stacks"):
@@ -479,5 +553,8 @@ def audit_evaluation_pair(
         "exact_difference": [difference.numerator, difference.denominator],
         "net_chips": {arm: result["net_reward_chips"] for arm, result in results.items()},
         "input_inventory_sha256": _hash_json(before_inventory),
-        "scope": "raw cash flow, pairing, frozen snapshots; provider/admission separate",
+        "scope": (
+            "raw cash flow, v2 RNG/deal replay, pairing, frozen snapshots; "
+            "provider/admission separate"
+        ),
     }

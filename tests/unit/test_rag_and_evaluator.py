@@ -7,10 +7,10 @@
 """
 
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
+from agentmemeval.core.bgem3_contract import make_output_contract_metadata
 from agentmemeval.core.domain import (
     FactualMemoryRecord,
     LegalAction,
@@ -69,13 +69,13 @@ def test_hybrid_rag_prefers_matching_poker_state() -> None:
     assert HashEmbeddingBackend().audit_metadata()["semantic_model"] is False
 
 
-def test_versioned_semantic_embedding_cache_batches_missing_texts() -> None:
+def test_versioned_semantic_embedding_cache_batches_missing_texts(tmp_path: Path) -> None:
     class FakeEmbeddingBackend(OpenAICompatibleEmbeddingBackend):
         def _request(self, texts: list[str]) -> list[list[float]]:
             self.request_count += 1
             return [[float(len(text)), 1.0] for text in texts]
 
-    cache_path = Path("tmp") / f"embedding-cache-{uuid4().hex}.json"
+    cache_path = tmp_path / "embedding-cache.json"
     backend = FakeEmbeddingBackend(
         model="semantic-test-model",
         revision="revision-abc",
@@ -119,6 +119,22 @@ def test_qwen_query_instruction_is_separate_from_document_encoding() -> None:
     assert backend.audit_metadata()["document_instruction"] is None
 
 
+def _bgem3_runtime_response() -> dict[str, object]:
+    # Explicit synthetic response contract, never evidence of a live embedding service.
+    return {
+        "runtime_identity": "offline-test-runtime",
+        "runtime_source_root": "/offline-test/source",
+        "server_source_sha256": "b" * 64,
+        "output_contract": make_output_contract_metadata(
+            observed_dense_dimensions=1024,
+            observed_dense_norm_min=1.0,
+            observed_dense_norm_max=1.0,
+            observed_colbert_dimensions=1024,
+            validated_vector_count=2,
+        ),
+    }
+
+
 def test_bgem3_hybrid_backend_uses_raw_query_and_preserves_all_score_modes() -> None:
     class RecordingBgeM3Backend(BgeM3HybridHttpBackend):
         requested: list[tuple[str, list[str]]]
@@ -127,7 +143,7 @@ def test_bgem3_hybrid_backend_uses_raw_query_and_preserves_all_score_modes() -> 
             super().__init__(
                 model="BAAI/bge-m3",
                 revision="fixed-bgem3-revision",
-                weights_hash="fixed-bgem3-weights",
+                weights_hash="a" * 64,
                 tokenizer_revision="fixed-bgem3-tokenizer",
                 cache_schema_version="bgem3_native_document_repr_v1",
                 cache_namespace="run/fact_00",
@@ -138,9 +154,10 @@ def test_bgem3_hybrid_backend_uses_raw_query_and_preserves_all_score_modes() -> 
         def _request(self, query: str, documents: list[str]) -> dict[str, object]:
             self.requested.append((query, list(documents)))
             return {
+                **_bgem3_runtime_response(),
                 "model": "BAAI/bge-m3",
                 "revision": "fixed-bgem3-revision",
-                "weights_hash": "fixed-bgem3-weights",
+                "weights_hash": "a" * 64,
                 "tokenizer_revision": "fixed-bgem3-tokenizer",
                 "cache_schema_version": "bgem3_native_document_repr_v1",
                 "cache_namespace": "run/fact_00",
@@ -148,7 +165,7 @@ def test_bgem3_hybrid_backend_uses_raw_query_and_preserves_all_score_modes() -> 
                 "weights": {"dense": 0.4, "sparse": 0.2, "colbert": 0.4},
                 "scores": [
                     {
-                        "combined": 0.61,
+                        "combined": 0.57,
                         "dense": 0.50,
                         "sparse": 0.25,
                         "colbert": 0.80,
@@ -161,7 +178,7 @@ def test_bgem3_hybrid_backend_uses_raw_query_and_preserves_all_score_modes() -> 
     scores = backend.score_documents("phase=flop", ["historical fact"])
 
     assert backend.requested == [("phase=flop", ["historical fact"])]
-    assert scores[0].combined == 0.61
+    assert scores[0].combined == pytest.approx(0.4 * 0.50 + 0.2 * 0.25 + 0.4 * 0.80)
     assert scores[0].dense == 0.50
     assert scores[0].sparse == 0.25
     assert scores[0].colbert == 0.80
@@ -196,15 +213,16 @@ def test_bgem3_hybrid_backend_fails_closed_on_identity_or_non_finite_score() -> 
     backend = BgeM3HybridHttpBackend(
         model="BAAI/bge-m3",
         revision="revision",
-        weights_hash="weights",
+        weights_hash="a" * 64,
         tokenizer_revision="tokenizer",
         cache_schema_version="schema-v1",
         cache_namespace="run/fact_00",
     )
     valid = {
+        **_bgem3_runtime_response(),
         "model": "BAAI/bge-m3",
         "revision": "revision",
-        "weights_hash": "weights",
+        "weights_hash": "a" * 64,
         "tokenizer_revision": "tokenizer",
         "cache_schema_version": "schema-v1",
         "cache_namespace": "run/fact_00",
@@ -213,10 +231,10 @@ def test_bgem3_hybrid_backend_fails_closed_on_identity_or_non_finite_score() -> 
         "scores": [{"combined": 0.1, "dense": 0.1, "sparse": 0.1, "colbert": 0.1}],
     }
     backend._request = lambda _query, _documents: dict(valid)  # type: ignore[method-assign]
-    assert backend.score_documents("query", ["document"])[0].combined == 0.1
+    assert backend.score_documents("query", ["document"])[0].combined == pytest.approx(0.1)
 
     invalid_identity = dict(valid)
-    invalid_identity["weights_hash"] = "wrong"
+    invalid_identity["weights_hash"] = "c" * 64
     backend._request = lambda _query, _documents: invalid_identity  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="weights identity"):
         backend.score_documents("query", ["document"])
@@ -228,6 +246,38 @@ def test_bgem3_hybrid_backend_fails_closed_on_identity_or_non_finite_score() -> 
     backend._request = lambda _query, _documents: invalid_score  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="non-finite"):
         backend.score_documents("query", ["document"])
+
+    invalid_combined = dict(valid)
+    invalid_combined["scores"] = [
+        {"combined": 0.61, "dense": 0.50, "sparse": 0.25, "colbert": 0.80}
+    ]
+    backend._request = lambda _query, _documents: invalid_combined  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="combined score drifted"):
+        backend.score_documents("query", ["document"])
+
+    missing_runtime = dict(valid)
+    del missing_runtime["runtime_identity"]
+    backend._request = lambda _query, _documents: missing_runtime  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="runtime_identity"):
+        backend.score_documents("query", ["document"])
+
+    invalid_contract = dict(valid, output_contract={})
+    backend._request = lambda _query, _documents: invalid_contract  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="output contract"):
+        backend.score_documents("query", ["document"])
+
+
+@pytest.mark.parametrize("weights_hash", ["weights", "a" * 63, "g" * 64])
+def test_bgem3_rejects_malformed_weights_hash_before_request(weights_hash) -> None:
+    with pytest.raises(ValueError, match="weights_hash"):
+        BgeM3HybridHttpBackend(
+            model="BAAI/bge-m3",
+            revision="revision",
+            weights_hash=weights_hash,
+            tokenizer_revision="tokenizer",
+            cache_schema_version="schema-v1",
+            cache_namespace="run/fact_00",
+        )
 
 
 def test_poker_evaluator_names_straight_flush() -> None:

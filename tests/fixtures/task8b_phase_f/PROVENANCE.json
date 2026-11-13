@@ -1,0 +1,45 @@
+{
+  "schema_version": "task8b-phase-f-test-fixture-provenance-v1",
+  "acquired_on": "2026-11-13",
+  "purpose": "Fixed contract/schema/header templates for offline unit tests, not experiment evidence",
+  "source_frozen_analysis_code_sha": "b38297843694f76f7a502bfcdca21228b4122f6f",
+  "approved_preunlock_sha256": "2da0d149b30b815a747442ebc71661f17f75642aef39b57fd95aad7c2370f300",
+  "data_scope": "No result rows, credentials, host endpoints, or original run artifacts",
+  "files": [
+    {
+      "fixture_path": "phase_f_pre_unlock_manifest_b382978_six_seed.json",
+      "source_project_relative_path": "02_项目文档/task-records/TASK8B/phase_f_pre_unlock_manifest_b382978_six_seed.json",
+      "size": 4084,
+      "sha256": "2da0d149b30b815a747442ebc71661f17f75642aef39b57fd95aad7c2370f300",
+      "transformation": "none; byte-for-byte copy"
+    },
+    {
+      "fixture_path": "phase_f_generated/data_lineage.schema.json",
+      "source_project_relative_path": "02_项目文档/task-records/TASK8B/phase_f_generated/data_lineage.schema.json",
+      "size": 11008,
+      "sha256": "de6eac009817edde8fbd7f4f3f5130db96bed282d3798c5bcc31e439d0d23a5d",
+      "transformation": "none; byte-for-byte copy"
+    },
+    {
+      "fixture_path": "phase_f_generated/data_lineage_template.csv",
+      "source_project_relative_path": "02_项目文档/task-records/TASK8B/phase_f_generated/data_lineage_template.csv",
+      "size": 1165,
+      "sha256": "9e850f8129f25c3c0a03b1ff1f1c5980dc7c86d421e930b397fbc3382c87cc13",
+      "transformation": "none; byte-for-byte copy"
+    },
+    {
+      "fixture_path": "phase_f_generated/exclusion_ledger_template.csv",
+      "source_project_relative_path": "02_项目文档/task-records/TASK8B/phase_f_generated/exclusion_ledger_template.csv",
+      "size": 827,
+      "sha256": "add1eefa4a05dda7df047df5a504184121ce119de02334453d6fdd80a4b5fd65",
+      "transformation": "none; byte-for-byte copy"
+    },
+    {
+      "fixture_path": "phase_f_generated/analysis_contract.md",
+      "source_project_relative_path": "02_项目文档/task-records/TASK8B/phase_f_generated/analysis_contract.md",
+      "size": 11140,
+      "sha256": "9bd94e35a6e22756d9779041ac9cb27651abcef7e2f479d0e7e53df8d1772646",
+      "transformation": "none; byte-for-byte copy"
+    }
+  ]
+}

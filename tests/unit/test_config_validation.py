@@ -14,7 +14,7 @@ from agentmemeval.experiments.campaign import (
     _validate_campaign_spec,
 )
 from agentmemeval.prompts.decision import BASE_SYSTEM_PROMPT, PROMPT_TEMPLATE_VERSION
-from agentmemeval.prompts.experience_update import EXPERIENCE_UPDATE_PROMPT
+from agentmemeval.prompts.experience_update import EXPERIENCE_PATCH_UPDATE_PROMPT
 from agentmemeval.storage.artifacts import collect_runtime_metadata
 
 
@@ -60,6 +60,7 @@ def test_validate_config_rejects_strategy_risk_gate() -> None:
 def test_validate_config_requires_versioned_instructed_semantic_embedding() -> None:
     config = _valid_config()
     config["agent"] = {
+        "mechanism": "fact",
         "embedding_backend": "openai_compatible",
         "embedding_model": "Qwen/Qwen3-Embedding-4B",
         "embedding_revision": "fixed-revision",
@@ -71,10 +72,11 @@ def test_validate_config_requires_versioned_instructed_semantic_embedding() -> N
 def test_validate_config_accepts_bgem3_native_hybrid_without_instruction() -> None:
     config = _valid_config()
     config["agent"] = {
+        "mechanism": "fact",
         "embedding_backend": "bgem3_hybrid_http",
         "embedding_model": "BAAI/bge-m3",
         "embedding_revision": "fixed-revision",
-        "embedding_weights_hash": "fixed-weights",
+        "embedding_weights_hash": "a" * 64,
         "embedding_tokenizer_revision": "fixed-tokenizer",
         "embedding_base_url_env": "BGEM3_BASE_URL",
         "embedding_query_policy": "raw_symmetric_no_instruction",
@@ -207,12 +209,20 @@ def test_528_bgem3_v7_mirrors_848_contract_and_freezes_preflight() -> None:
     assert "not_for_main_table" in spec["protocol_label"]
 
 
-def test_528_bgem3_v7_prompt_identity_matches_848_true_leaf_manifest() -> None:
-    assert PROMPT_TEMPLATE_VERSION == "2026-07-19-v6-counterfactual-calibrated-memory"
-    assert hashlib.sha256(BASE_SYSTEM_PROMPT.encode("utf-8")).hexdigest() == (
+def test_528_bgem3_v7_reference_preserves_historical_prompt_identity() -> None:
+    # The sealed July 23 reference must not be rewritten to the active July 27 prompt.
+    reference = json.loads(
+        Path("configs/audits/task6_848_campaign_p_v7_reference_identity.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert reference["prompts"]["decision_version"] == (
+        "2026-07-19-v6-counterfactual-calibrated-memory"
+    )
+    assert reference["prompts"]["decision_system_sha256"] == (
         "9cd2f157225e14bfee9113c3af01a2ff4fff839aeb68dcfd8f11740bd8647800"
     )
-    assert hashlib.sha256(EXPERIENCE_UPDATE_PROMPT.encode("utf-8")).hexdigest() == (
+    assert reference["prompts"]["experience_update_sha256"] == (
         "7788fa2f85adca9710cf20f2fc95769db1b2b93ee60f9a5236a430b87d4ad382"
     )
 
@@ -278,20 +288,26 @@ def test_task6_diff_register_has_no_unexplained_paths() -> None:
     assert register["admission"]["unexplained_change_count"] == 0
 
 
-def test_task6_848_reference_identity_is_sealed_and_matches_prompt_contract() -> None:
+def test_task6_reference_is_sealed_and_current_metadata_records_active_prompts() -> None:
     reference = json.loads(
         Path(
             "configs/audits/task6_848_campaign_p_v7_reference_identity.json"
         ).read_text(encoding="utf-8")
     )
     assert reference["status"] == "sealed_read_only_reference"
-    assert reference["prompts"]["decision_version"] == PROMPT_TEMPLATE_VERSION
-    assert reference["prompts"]["decision_system_sha256"] == hashlib.sha256(
-        BASE_SYSTEM_PROMPT.encode("utf-8")
-    ).hexdigest()
-    assert reference["prompts"]["experience_update_sha256"] == hashlib.sha256(
-        EXPERIENCE_UPDATE_PROMPT.encode("utf-8")
-    ).hexdigest()
+    config = load_config("configs/experiments/task6_campaign_p_v7_bgem3_native_528.yaml")
+    prompts = collect_runtime_metadata(config, Path.cwd())["prompts"]
+    # Active hashes independently recovered from Git b19a272, not from this run's output.
+    assert PROMPT_TEMPLATE_VERSION == "2026-07-27-v9-chip-bb-unit-explicit"
+    assert prompts["decision_version"] == PROMPT_TEMPLATE_VERSION
+    assert prompts["decision_system_sha256"] == (
+        hashlib.sha256(BASE_SYSTEM_PROMPT.encode("utf-8")).hexdigest()
+    ) == "7771cda4707e9bb89d4f72147c96ba1ec2cc2578366d1dabdef792c8265dc62b"
+    assert prompts["experience_update_sha256"] == (
+        hashlib.sha256(EXPERIENCE_PATCH_UPDATE_PROMPT.encode("utf-8")).hexdigest()
+    ) == "69d12c2f76d72ce4bcb71f5cfa40ef8fb1955c14bae8def0bab15f5a2d32df8c"
+    assert prompts["experience_revision_schema_version"] == "experience_revision_v2"
+    assert all(reference["prompts"][key] != prompts[key] for key in reference["prompts"])
     assert reference["protocol"]["seeds"] == list(range(2026072301, 2026072309))
 
 
@@ -386,8 +402,13 @@ def test_validate_config_rejects_persona_outside_smoke() -> None:
         validate_config(config)
 
 
-def test_frozen_retrieval_threshold_requires_numeric_value() -> None:
+@pytest.mark.parametrize("value", [None, True, "0.5", float("nan"), float("inf")])
+def test_frozen_retrieval_threshold_requires_numeric_value(value) -> None:
     config = _valid_config()
-    config["agent"] = {"retrieval_threshold_status": "frozen"}
+    config["agent"] = {
+        "mechanism": "fact",
+        "retrieval_threshold_status": "frozen",
+        "minimum_retrieval_score": value,
+    }
     with pytest.raises(ConfigError, match="minimum_retrieval_score"):
         validate_config(config)

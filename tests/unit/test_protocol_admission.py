@@ -48,7 +48,7 @@ def test_pilot_requires_real_service_smokes_before_run_directory() -> None:
         "provider": "openai_compatible",
         "model": "decision",
         "model_revision": "revision",
-        "model_weights_hash": "decision-hash",
+        "model_weights_hash": "a" * 64,
         "served_model_name": "decision",
         "service_startup_parameters": {"port": 8000},
     }
@@ -58,7 +58,8 @@ def test_pilot_requires_real_service_smokes_before_run_directory() -> None:
         "embedding_backend": "openai_compatible",
         "embedding_model": "embedding",
         "embedding_revision": "revision",
-        "embedding_weights_hash": "embedding-hash",
+        "embedding_query_instruction": "Retrieve strategically similar visible poker decisions.",
+        "embedding_weights_hash": "b" * 64,
         "embedding_service_startup_parameters": {"port": 8001},
     }
     config["experiment"]["runtime_verification"] = {
