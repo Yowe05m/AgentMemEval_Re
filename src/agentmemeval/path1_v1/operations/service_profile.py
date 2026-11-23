@@ -22,7 +22,6 @@ def validate_service_profile(config: dict) -> None:
         "gpus": 1,
         "stage_cap": 1,
         "cpus_per_task": 8,
-        "memory_mib": 65536,
         "queue_policy": "no_scheduler_deadline",
         "qos_policy": "site_default",
     }
@@ -32,12 +31,20 @@ def validate_service_profile(config: dict) -> None:
     ):
         raise SubmissionDisabled("service E0 profile differs from frozen settings")
     version = config.get("resource_profile_version")
-    if type(version) is not int or version not in (1, 2):
+    if type(version) is not int or version not in (1, 2, 3):
         raise SubmissionDisabled("unsupported service E0 profile version")
+    if version == 3:
+        if ("memory_mib" not in config or config["memory_mib"] is not None
+                or type(config.get("memory_policy")) is not str
+                or config["memory_policy"] != "site_default"):
+            raise SubmissionDisabled("service profile version 3 requires site_default memory")
+    elif ("memory_policy" in config or type(config.get("memory_mib")) is not int
+          or config["memory_mib"] != 65536):
+        raise SubmissionDisabled("legacy service profile requires fixed explicit memory")
     if version == 1 and "language_model_only" in config:
         raise SubmissionDisabled("legacy service profile cannot change its multimodal policy")
-    if version == 2 and config.get("language_model_only") is not True:
-        raise SubmissionDisabled("service profile version 2 requires language_model_only=true")
+    if version in (2, 3) and config.get("language_model_only") is not True:
+        raise SubmissionDisabled("text-only service profile requires language_model_only=true")
     if any(
         key in config
         for key in (
@@ -92,6 +99,7 @@ def validate_service_submission(request, probe, config: dict) -> dict:
         or probe.contract["job"]["kind"] != "service_probe"
         or request.spec.cpus_per_task != config["cpus_per_task"]
         or request.spec.memory_mib != config["memory_mib"]
+        or request.spec.memory_policy != config.get("memory_policy")
         or request.spec.walltime_seconds != config["walltime_seconds"]
         or request.spec.gpus != config["gpus"]
         or request.spec.script_args
@@ -145,9 +153,12 @@ def validate_service_submission(request, probe, config: dict) -> dict:
         "allocation_verified": False,
         "runtime_admission": False,
     }
-    if config["resource_profile_version"] == 2:
+    if config["resource_profile_version"] in (2, 3):
         result.update(language_model_only=True, requested_modality_limit=0,
                       effective_multimodal_state_verified=False)
+    if config["resource_profile_version"] == 3:
+        resources["memory_policy"] = "site_default"
+        result["allocated_memory_verified"] = False
     return result
 
 

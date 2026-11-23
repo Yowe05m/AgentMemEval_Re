@@ -102,12 +102,12 @@ def test_mechanical_modules_preserve_complete_ast_and_import_only_their_version(
                         change["baseline_unchanged_top_level_ast_sha256"]
                     )
                 if name == "operations/slurm.py":
-                    # Only optional CPU/MiB fields and their exact rendering/
+                    # Only CPU/MiB/policy fields and their exact rendering/
                     # validation may evolve. Preserve every other scheduler,
                     # identity, capacity and transport rule from the baseline.
                     scopes = {
                         "SubmitSpec": {
-                            "new_fields": ["cpus_per_task", "memory_mib"],
+                            "new_fields": ["cpus_per_task", "memory_mib", "memory_policy"],
                             "methods": ["__post_init__", "payload", "from_payload"],
                         },
                         "SubmissionRequest": {"new_fields": [], "methods": ["sbatch_argv"]},

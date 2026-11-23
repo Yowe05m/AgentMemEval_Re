@@ -380,9 +380,16 @@ def validate_user_association_capacity(
     if resolutions:
         from agentmemeval.path1_v1.operations.e0_reconcile import E0TerminalResolution
         from agentmemeval.path1_v1.operations.resource_terminal import ResourceTerminalResolution
+        from agentmemeval.path1_v1.operations.service_terminal import ServiceTerminalResolution
+        from agentmemeval.path1_v1.operations.submission_rejection import (
+            RejectionTerminalResolution,
+        )
 
         if store is None or any(
-            type(value) not in {E0TerminalResolution, ResourceTerminalResolution}
+            type(value) not in {
+                E0TerminalResolution, ResourceTerminalResolution, ServiceTerminalResolution,
+                RejectionTerminalResolution,
+            }
             for value in resolutions.values()
         ):
             raise SubmissionDisabled("typed durable E0 terminal resolutions required")

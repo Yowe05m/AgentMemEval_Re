@@ -370,16 +370,25 @@ def test_pid_reuse_observation_never_authorizes_unknown_retry(fixture, monkeypat
     import agentmemeval.path1_v1.operations.intent_executor as executor_module
 
     original_popen = executor_module.subprocess.Popen
+    helper_attempts = []
 
     def fail_helper_only(argv, *args, **kwargs):
         if any(str(part).endswith("submission_process.py") for part in argv):
+            helper_attempts.append(tuple(argv))
             raise OSError("fixture launch error")
         return original_popen(argv, *args, **kwargs)
 
     monkeypatch.setattr(executor_module.subprocess, "Popen", fail_helper_only)
-    with pytest.raises(OSError):
-        submit(fixture)
+    if sys.platform.startswith("linux"):
+        # Managed creation fails inside the production transport exception gate.
+        assert submit(fixture).status == "unknown"
+    else:
+        with pytest.raises(OSError, match="fixture launch error"):
+            submit(fixture)
+    assert len(helper_attempts) == 1
+    assert not (fixture.root / "external_effect.json").exists()
     before = fixture.executor.lookup(fixture.request, timeout_seconds=1)
+    stored_before = fixture.executor.store.read_registry()
     identity = fixture.executor.inspect(fixture.request)["parent_identity"]
     monkeypatch.setattr(
         submission_process, "process_identity", lambda _: {**identity, "start_marker": "different"}
@@ -389,6 +398,10 @@ def test_pid_reuse_observation_never_authorizes_unknown_retry(fixture, monkeypat
     assert not inspected["process_observation_authorizes_retry"]
     assert fixture.executor.lookup(fixture.request, timeout_seconds=1) == before
     assert not before.submitter_finished and before.status == "unknown"
+    assert submit(fixture) == before
+    assert len(helper_attempts) == 1
+    assert fixture.executor.store.read_registry() == stored_before
+    assert not (fixture.root / "external_effect.json").exists()
 
 
 def test_rebinding_existing_intent_or_tampering_durable_result_fails(fixture):
@@ -568,21 +581,64 @@ def test_loaded_package_search_path_cannot_point_at_another_checkout(tmp_path, m
 
 def test_actual_subprocess_timeout_is_unknown_and_records_exact_descendant_observation(tmp_path):
     fixture = make_executor_fixture(tmp_path, "timeout")
+    invocation_dir = fixture.executor.store.directory / "i" / fixture.request.intent_id[:16]
+    # The old three-second budget expired before go on slow durable filesystems.
+    # Give the unchanged pre-exec gates time, then keep only this fixture command
+    # alive beyond the real pinned deadline. No production clock/deadline is mocked.
+    fixture.fake_path.write_text(
+        """import hashlib, json, os, runpy, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+identity = runpy.run_path(sys.argv[3])["process_identity"](os.getpid())
+script = sys.stdin.buffer.read()
+manifest = json.loads(Path(__PINNED_MANIFEST__).read_text(encoding="utf-8"))
+started = time.monotonic()
+deadline = manifest["deadline_monotonic"]
+assert 0 < deadline - started <= 15
+with (root / "external_effect.json").open("x", encoding="utf-8") as stream:
+    json.dump({"command_identity": identity, "script_sha256": hashlib.sha256(script).hexdigest(),
+               "started_monotonic": started, "deadline_monotonic": deadline}, stream)
+    stream.flush()
+    os.fsync(stream.fileno())
+# Absolute fixture bound: at most 17 seconds after command entry, even if the
+# parent disappears; sleep uses the same kernel clock as the actual deadline.
+time.sleep(min(17.0, max(0.0, deadline - time.monotonic()) + 2.0))
+print("551;cluster")
+""".replace("__PINNED_MANIFEST__", repr(str(invocation_dir / "invocation.json"))),
+        encoding="utf-8",
+    )
+    command = fixture.executor.command
+    fixture.executor.command = replace(
+        command,
+        files=tuple(
+            (name, file_sha256(fixture.fake_path) if Path(name) == fixture.fake_path else digest)
+            for name, digest in command.files
+        ),
+    )
     started = time.monotonic()
-    receipt = submit(fixture, timeout=3)
-    assert receipt.status == "unknown" and time.monotonic() - started < 15
+    receipt = submit(fixture, timeout=15)
+    assert receipt.status == "unknown" and time.monotonic() - started < 30
+    manifest = json.loads((invocation_dir / "invocation.json").read_text(encoding="utf-8"))
+    ready = json.loads((invocation_dir / "ready.json").read_text(encoding="utf-8"))
+    assert json.loads((invocation_dir / "go.json").read_text(encoding="utf-8")) == ready
     effect_path = tmp_path / "external_effect.json"
     effect = json.loads(effect_path.read_text(encoding="utf-8"))
+    assert effect["script_sha256"] == fixture.request.spec.script_sha256
+    assert effect["deadline_monotonic"] == manifest["deadline_monotonic"]
+    assert effect["started_monotonic"] < manifest["deadline_monotonic"] <= time.monotonic()
     identity = effect["command_identity"]
+    assert type(identity["pid"]) is int and identity["pid"] > 0
+    assert identity["start_marker"] and identity["platform"] == sys.platform
     initial_observation = submission_process.observe_process(identity)
-    # The fixture command has a four-second bounded lifetime. Wait for its kernel
-    # identity to become unavailable; do not infer natural exit versus termination.
+    # The command ends no later than the pinned deadline + two seconds. Observe
+    # its exact kernel identity; do not infer natural exit versus termination.
     deadline = time.monotonic() + 8
     while submission_process.observe_process(identity) == "same_identity":
         if time.monotonic() >= deadline:
             pytest.fail("owned finite-lifetime fixture process did not exit")
         time.sleep(0.05)
     inspected = fixture.executor.inspect(fixture.request)
+    stored_before = fixture.executor.store.read_registry()
     observation = {
         "status": receipt.status,
         "command_identity": identity,
@@ -596,3 +652,4 @@ def test_actual_subprocess_timeout_is_unknown_and_records_exact_descendant_obser
     (tmp_path / "timeout_observation.json").write_text(json.dumps(observation), encoding="utf-8")
     assert submit(fixture).status == "unknown"
     assert json.loads(effect_path.read_text(encoding="utf-8")) == effect
+    assert fixture.executor.store.read_registry() == stored_before

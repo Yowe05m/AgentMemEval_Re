@@ -91,8 +91,10 @@ def _config(raw: bytes) -> dict:
         "model_manifest_sha256",
         "commands",
     }
-    if config["resource_profile_version"] == 2:
+    if config["resource_profile_version"] in (2, 3):
         keys.add("language_model_only")
+    if config["resource_profile_version"] == 3:
+        keys.add("memory_policy")
     _require(set(config) == keys, "service config keys differ")
     for key in ("cluster", "account", "user", "partition"):
         identifier(config[key])
@@ -121,8 +123,8 @@ def prepare(repository: Path, run_root: Path, campaign_id: str, config_relative:
     config_path = _config_path(repository, config_relative)
     raw = config_path.read_bytes()
     config = _config(raw)
-    _require(config["resource_profile_version"] == 2 and config["language_model_only"] is True,
-             "new service preparation requires text-only profile version 2")
+    _require(config["resource_profile_version"] == 3 and config["language_model_only"] is True,
+             "new service preparation requires text-only site-default profile version 3")
     lock_path = _config_path(repository, config["dependency_lock"])
     lock_raw = lock_path.read_bytes()
     verify_environment(lock_path)
@@ -284,6 +286,7 @@ def prepare(repository: Path, run_root: Path, campaign_id: str, config_relative:
         walltime_seconds=7200,
         cpus_per_task=config["cpus_per_task"],
         memory_mib=config["memory_mib"],
+        memory_policy=config.get("memory_policy"),
     )
     submission = SubmissionRequest(campaign_id, probe["intent_id"], spec)
     profile = validate_service_submission(
@@ -460,6 +463,8 @@ def execute(run_root: Path, expected_descriptor_sha256: str, *, lookup: bool) ->
     descriptor, config, request = read_prepared(run_root, expected_descriptor_sha256)
     repository = Path(descriptor["repository_root"])
     if not lookup:
+        _require(config["resource_profile_version"] == 3,
+                 "historical service profiles support lookup only")
         _require(
             file_sha256(_config_path(repository, descriptor["config_relative"]))
             == descriptor["config_sha256"],

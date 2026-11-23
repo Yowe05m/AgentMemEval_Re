@@ -18,9 +18,9 @@
     "operations/intent_executor.py": {
       "baseline_git_bytes_sha256": "6ac00f61f5bd8bbba422c7c62b5fde9336835a28a3fb483b019ef6ac441f0040",
       "baseline_normalized_ast_sha256": "4db6ae3d6ff622b02d47ec942499daed0a778b44eacafa4d500e7a1148a74695",
-      "current_worktree_bytes_sha256": "09383eb4dc6962e0fe103fb988f3bfd510f3a927989915c8e47b1c5e5bec0c4f",
-      "normalized_ast_sha256": "3f7a85916215eea1ca9d1ddf61153dcc660d67de73f4e0ed951d24f7f7ce5680",
-      "reason": "Independent E0 service resource/profile validation and executed resource terminal resolution with post-validation capacity freshness; original unresolved occupancy, unstarted-only retry lineage and default research admission gates remain enforced.",
+      "current_worktree_bytes_sha256": "ad94b7138a1af347dd5e1cd3b45d851402c3e909d1b81dcc0fb734a31a9942a4",
+      "normalized_ast_sha256": "e09874e489741589b022150101626d89b296bb721759272795bce05e4236a220",
+      "reason": "E0 profile3 site-default RAM validation, typed one-time service policy supersession with repeated pre-go lineage checks, and manifest-bound helper v2 raw-output verification. Changes from 765d1509 are limited to E0PreSubmitVerifier.__call__ and DurableIntentExecutor._ledger/_validate_e0_retry/_result/submit_once; all other AST nodes are unchanged. Existing unresolved occupancy, unstarted-only resource retry and default research admission gates remain enforced.",
       "regression_tests": [
         "tests/path1_v1/unit/test_intent_executor.py",
         "tests/path1_v1/integration/test_intent_executor_faults.py",
@@ -30,17 +30,24 @@
         "tests/path1_v1/unit/test_service_resources.py",
         "tests/path1_v1/unit/test_e0_service_cli.py",
         "tests/path1_v1/unit/test_resource_terminal.py",
-        "tests/path1_v1/unit/test_e0_retry_lineage.py"
+        "tests/path1_v1/unit/test_e0_retry_lineage.py",
+        "tests/path1_v1/unit/test_service_memory_policy.py",
+        "tests/path1_v1/unit/test_service_supersession.py",
+        "tests/path1_v1/unit/test_accepted_submission_streams.py",
+        "tests/path1_v1/unit/test_submission_streams.py"
       ]
     },
     "operations/submission_process.py": {
       "baseline_git_bytes_sha256": "2a0f6acfd95f39a114de1cd3de21a9c9672fc7adb2f40b54d5b17b469e60b486",
       "baseline_normalized_ast_sha256": "0c77484cee555fff7a0eaf8a159e6fdbdd7bc499d94a2d7410f9e4f7beccebd7",
-      "current_worktree_bytes_sha256": "27eee7b39479981d8480c4b7d0bc4c6116d0fafc2d71f76bd54a388bc5492168",
-      "normalized_ast_sha256": "72a5a15057fc02ac660b35a98139372734b7a80193b7fb2e2379744e6348ac1e",
-      "reason": "Linux submit command inherits the held helper session; parent performs verified group cleanup before reap.",
+      "current_worktree_bytes_sha256": "d2e2cbe30b4ebba91dce65eb5ba02897e2c7fc78d673020b4c906f276a4293d5",
+      "normalized_ast_sha256": "2fdee043b1bef22f38c0a9030ee3305947377f55d17aae108df0f589a4f37a1c",
+      "reason": "Manifest v2 binds bounded raw stdout/stderr bytes, complete/timeout/overflow/error status and strict non-downgradable readers while retaining historical v1 reads. Only helper_main and the declared raw-capture/validation additions change from 765d1509; existing identity/file/publication helpers remain AST-identical. Linux retains the held helper session for parent group cleanup before reap; incomplete capture never authorizes acceptance or retry.",
       "regression_tests": [
-        "tests/path1_v1/integration/process_ownership_linux_smoke.py"
+        "tests/path1_v1/integration/process_ownership_linux_smoke.py",
+        "tests/path1_v1/unit/test_submission_streams.py",
+        "tests/path1_v1/unit/test_accepted_submission_streams.py",
+        "tests/path1_v1/unit/test_intent_executor.py"
       ]
     },
     "storage/snapshot_archive.py": {
@@ -73,13 +80,14 @@
     "operations/slurm.py": {
       "baseline_git_bytes_sha256": "da404ea5053acd66c9fc645c0ba7606000f96c9b46f3bb91b27d03288eb796fe",
       "baseline_normalized_ast_sha256": "a9b0d59d21fd65e39ff3734a16f7b7887f5b81c849b8dbfbe2ca735306bcff9d",
-      "current_worktree_bytes_sha256": "d4ed537cbb212b2cf165f8ded5f6922bc4e2f4faa8fdb4018e698939d8c31ee9",
-      "normalized_ast_sha256": "05f69133b9dcd8819c9aeb62a10d023d4af5cb0f6368a9028248ba0e7edcb4d3",
+      "current_worktree_bytes_sha256": "d0b734b7979e0f767516dcd61a3c6d89cc8f7718648ff70f2bb0b34b638cca05",
+      "normalized_ast_sha256": "cb1b0ede9bb485b476d643d22944f552e09760a83c13308c46d930d5b49c95ac",
       "allowed_class_changes": {
         "SubmitSpec": {
           "new_fields": [
             "cpus_per_task",
-            "memory_mib"
+            "memory_mib",
+            "memory_policy"
           ],
           "methods": [
             "__post_init__",
@@ -95,11 +103,12 @@
         }
       },
       "baseline_unchanged_ast_sha256": "039ac901f82de91d65e8ab1f0748ce06fe18b1c57145f6ce66db268432e90b06",
-      "reason": "Optional paired CPU/MiB resources for service E0 only; absent fields preserve original payload, request SHA and sbatch argv. All unrelated Slurm rules remain AST-identical.",
+      "reason": "Optional paired CPU/MiB resources plus explicit site_default memory_policy for service E0 profile3. Legacy absent policy preserves prior payload, request SHA and argv; CPU-only requests require site_default and null RAM. The existing four resource methods and three added fields are the complete allowed scope; the original unchanged-AST baseline is retained for every unrelated Slurm rule.",
       "regression_tests": [
         "tests/path1_v1/unit/test_service_resources.py",
         "tests/path1_v1/unit/test_slurm_adapter.py",
         "tests/path1_v1/unit/test_e0_service_cli.py",
+        "tests/path1_v1/unit/test_service_memory_policy.py",
         "tests/path1_v1/test_isolation_parity.py"
       ]
     }

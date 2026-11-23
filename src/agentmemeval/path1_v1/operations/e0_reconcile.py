@@ -97,7 +97,7 @@ def _git(repository: Path, *arguments: str, data: bytes | None = None) -> bytes:
     return result.stdout
 
 
-def _historical_identity(repository: Path, identity: dict) -> dict:
+def _historical_identity(repository: Path, identity: dict, *, allow_model: bool = False) -> dict:
     """Hash every declared historical blob in one cat-file batch; never import it."""
     _validate_identity(identity, scientific=False)
     commit = identity["core_sha"]
@@ -110,7 +110,9 @@ def _historical_identity(repository: Path, identity: dict) -> dict:
         "head_content_mismatches",
     ):
         _require(identity[name] == [], "historical source closure is incomplete")
-    _require(identity["model"] is None, "resource reconciliation cannot validate a model run")
+    _require(type(allow_model) is bool, "invalid historical model scope")
+    _require(allow_model or identity["model"] is None,
+             "resource reconciliation cannot validate a model run")
     tree = {}
     for entry in _git(repository, "ls-tree", "-rz", commit).split(b"\0"):
         if entry:
@@ -338,6 +340,13 @@ def _bound_inputs(
         and descriptor["config_sha256"] == contract["runtime_identity"]["config"]["sha256"],
         "historical site configuration differs",
     )
+    return _accepted_inputs(store, descriptor, request, run, probe, contract, config,
+                            repository, record, claim, require_empty_output=require_empty_output)
+
+
+def _accepted_inputs(store, descriptor, request, run, probe, contract, config,
+                     repository, record, claim, *, require_empty_output: bool) -> dict:
+    """Shared immutable submission/claim binding; callers validate their own job kind first."""
     scope = content_digest({"cluster": request.spec.cluster, "account": request.spec.account})
     _require(
         store.campaign_id == "executor_" + scope[:32]
@@ -373,8 +382,24 @@ def _bound_inputs(
     cleanup = _json(invocation / "local_cleanup.json")
     _require(
         _sha(manifest_path) == record["manifest_sha256"]
-        and _sha(invocation / "result.json") == record["result_sha256"]
-        and ready == go == record["ready"]
+        and _sha(invocation / "result.json") == record["result_sha256"],
+        "durable invocation/result bytes changed",
+    )
+    from agentmemeval.path1_v1.operations.submission_process import validate_helper_result
+
+    try:
+        result_version = validate_helper_result(
+            invocation, result, manifest=manifest,
+            expected_result_schema=record.get("helper_result_schema_version"),
+        )
+    except (ValueError, OSError) as exc:
+        raise E0ReconciliationError("accepted raw submission evidence is invalid") from exc
+    _require(
+        result_version == 1 or result["capture_status"] == "complete",
+        "accepted submission capture is incomplete",
+    )
+    _require(
+        ready == go == record["ready"]
         and all(result.get(key) == value for key, value in ready.items())
         and result["timed_out"] is False
         and type(result["returncode"]) is int
@@ -752,6 +777,18 @@ def validate_e0_terminal_receipt(
     record: dict, claim: RunClaim, *, store: CampaignStore
 ) -> E0TerminalResolution:
     """Re-read authoritative SQLite plus original/sealed bytes; no fresh Slurm RPC is needed."""
+    if (type(claim.terminal_receipt) is dict
+            and claim.terminal_receipt.get("kind") == "path1_submission_rejection_terminal_v1"):
+        from agentmemeval.path1_v1.operations.submission_rejection import (
+            validate_rejection_terminal,
+        )
+
+        return validate_rejection_terminal(record, claim, store=store)
+    if (type(claim.terminal_receipt) is dict
+            and claim.terminal_receipt.get("kind") == "path1_e0_service_terminal_v1"):
+        from agentmemeval.path1_v1.operations.service_terminal import validate_service_terminal
+
+        return validate_service_terminal(record, claim, store=store)
     if (type(claim.terminal_receipt) is dict
             and claim.terminal_receipt.get("kind") == "path1_e0_resource_terminal_v1"):
         from agentmemeval.path1_v1.operations.resource_terminal import validate_resource_terminal

@@ -15,11 +15,268 @@ import math
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
+
+RAW_OUTPUT_LIMIT_BYTES = 1024 * 1024
+_INVOCATION_KEYS = {
+    "schema_version", "nonce", "request_sha256", "argv", "cwd", "environment",
+    "stdin_path", "stdin_sha256", "input_files", "wait_seconds",
+    "command_timeout_seconds", "deadline_monotonic", "expected_effective_user",
+}
+
+
+def invocation_result_schema(manifest: dict) -> int:
+    """Read a hash-bound invocation version; never infer it from result JSON."""
+    if type(manifest) is not dict:
+        raise ValueError("invocation manifest must be an object")
+    version = manifest.get("schema_version")
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("unsupported invocation manifest")
+    expected = _INVOCATION_KEYS | ({"result_schema_version"} if version == 2 else set())
+    if set(manifest) != expected:
+        raise ValueError("invocation manifest fields differ")
+    if version == 2 and (
+        type(manifest["result_schema_version"]) is not int
+        or manifest["result_schema_version"] != 2
+    ):
+        raise ValueError("invocation result schema differs")
+    return version
+
+
+def _signature(value) -> tuple:
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+            value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _raw_bytes(path: Path) -> bytes:
+    """Bounded regular-file read with stable inode/path checks, no symlink following."""
+    if not path.is_absolute() or any(parent.is_symlink() for parent in path.parents):
+        raise ValueError("invalid raw output parent path")
+    before = path.lstat()
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or before.st_size > RAW_OUTPUT_LIMIT_BYTES + 1):
+        raise ValueError("invalid raw command output file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        if _signature(os.fstat(fd)) != _signature(before):
+            raise ValueError("raw output identity changed before read")
+        parts, remaining = [], RAW_OUTPUT_LIMIT_BYTES + 2
+        while remaining:
+            block = os.read(fd, min(65536, remaining))
+            if not block:
+                break
+            parts.append(block)
+            remaining -= len(block)
+        data = b"".join(parts)
+        if (len(data) != before.st_size
+                or _signature(os.fstat(fd)) != _signature(before)
+                or _signature(path.lstat()) != _signature(before)):
+            raise ValueError("raw command output changed during read")
+        return data
+    finally:
+        os.close(fd)
+
+
+def validate_helper_result(
+    directory: Path, result: dict, *, manifest: dict, expected_result_schema: int | None = None,
+) -> int:
+    """Validate raw evidence, not acceptance/rejection or any retry permission.
+
+    The caller must first bind manifest/result bytes to its durable record.
+    Historical manifest 1 results remain readable without invented raw files.
+    """
+    version = invocation_result_schema(manifest)
+    if type(result) is not dict:
+        raise ValueError("helper result must be an object")
+    if expected_result_schema is not None and (
+        type(expected_result_schema) is not int or expected_result_schema != version
+    ):
+        raise ValueError("durable helper result schema differs from invocation")
+    actual = result.get("schema_version", 1)
+    if type(actual) is not int or actual != version:
+        raise ValueError("helper result schema downgrade or mismatch")
+    if version == 1:
+        if "raw_outputs" in result or "capture_status" in result:
+            raise ValueError("legacy helper result cannot contain new evidence fields")
+        return 1
+    status = result.get("capture_status")
+    if status not in {"complete", "timeout", "output_limit", "error"}:
+        raise ValueError("invalid command capture status")
+    if (type(result.get("timed_out")) is not bool
+            or result["timed_out"] != (status == "timeout")
+            or type(result.get("command_spawned")) is not bool
+            or (result.get("returncode") is not None and type(result["returncode"]) is not int)
+            or (status == "complete" and (
+                not result["command_spawned"] or type(result["returncode"]) is not int))):
+        raise ValueError("invalid command completion evidence")
+    error = result.get("capture_error_type")
+    if (status == "error" and (type(error) is not str or not error)
+            or status != "error" and error is not None):
+        raise ValueError("invalid command capture failure evidence")
+    outputs = result.get("raw_outputs")
+    if type(outputs) is not dict or set(outputs) != {"stdout", "stderr"}:
+        raise ValueError("raw output inventory differs")
+    payloads = {}
+    for name in ("stdout", "stderr"):
+        item = outputs[name]
+        if (type(item) is not dict
+                or set(item) != {"path", "size", "sha256", "limit_bytes", "complete",
+                                 "limit_exceeded"}
+                or item["path"] != name + ".raw"
+                or type(item["size"]) is not int
+                or not 0 <= item["size"] <= RAW_OUTPUT_LIMIT_BYTES + 1
+                or type(item["limit_bytes"]) is not int
+                or item["limit_bytes"] != RAW_OUTPUT_LIMIT_BYTES
+                or type(item["complete"]) is not bool
+                or type(item["limit_exceeded"]) is not bool
+                or item["limit_exceeded"] != (item["size"] > RAW_OUTPUT_LIMIT_BYTES)
+                or item["limit_exceeded"] and item["complete"]):
+            raise ValueError("invalid raw output descriptor")
+        raw = _raw_bytes(directory / item["path"])
+        if (len(raw) != item["size"] or hashlib.sha256(raw).hexdigest() != item["sha256"]
+                or result.get(name + "_sha256") != item["sha256"]):
+            raise ValueError("raw output bytes differ from result")
+        payloads[name] = raw
+    exceeded = any(x["limit_exceeded"] for x in outputs.values())
+    if (status == "output_limit") != exceeded:
+        raise ValueError("output limit status differs from raw evidence")
+    if status == "complete" and not all(x["complete"] for x in outputs.values()):
+        raise ValueError("complete result has incomplete streams")
+    display = payloads["stdout"].decode("utf-8", errors="replace").strip()
+    safe = display if re.fullmatch(r"[1-9][0-9]*(?:;[A-Za-z0-9_.-]+)?", display) else None
+    if result.get("stdout") != safe:
+        raise ValueError("display stdout differs from raw bytes")
+    return 2
+
+
+def _sync_directory(directory: Path) -> None:
+    if os.name == "posix":
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+class _RawCapture:
+    def __init__(self, path: Path):
+        self.path = path
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                 | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        self.fd = os.open(path, flags, 0o600)
+        self.identity = os.fstat(self.fd)
+        self.lock = threading.Lock()
+        self.done = threading.Event()
+        self.complete = False
+        self.exceeded = False
+        self.error = None
+        self.frozen = False
+        self.size = 0
+
+    def pump(self, pipe) -> None:
+        try:
+            while True:
+                block = os.read(pipe.fileno(), min(65536, RAW_OUTPUT_LIMIT_BYTES + 1 - self.size))
+                with self.lock:
+                    if self.frozen:
+                        return
+                    if not block:
+                        self.complete = True
+                        return
+                    remaining = memoryview(block)
+                    while remaining:
+                        count = os.write(self.fd, remaining)
+                        if count <= 0:
+                            raise OSError("raw output write made no progress")
+                        self.size += count
+                        remaining = remaining[count:]
+                    # Prefixes survive timeout/termination even without a final result.
+                    os.fsync(self.fd)
+                    if self.size > RAW_OUTPUT_LIMIT_BYTES:
+                        self.exceeded = True
+                        return
+        except Exception as exc:
+            with self.lock:
+                self.error = type(exc).__name__
+        finally:
+            self.done.set()
+
+    def freeze(self) -> dict:
+        with self.lock:
+            self.frozen = True
+            try:
+                os.fsync(self.fd)
+                current = os.fstat(self.fd)
+                if ((current.st_dev, current.st_ino) !=
+                        (self.identity.st_dev, self.identity.st_ino)
+                        or _signature(current) != _signature(self.path.lstat())):
+                    raise ValueError("raw output path no longer names its created inode")
+            finally:
+                os.close(self.fd)
+            raw = _raw_bytes(self.path)
+            return {"path": self.path.name, "size": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "limit_bytes": RAW_OUTPUT_LIMIT_BYTES, "complete": self.complete,
+                    "limit_exceeded": self.exceeded}
+
+
+def _capture_command(argv, manifest: dict, directory: Path, stdin_stream, timeout: float) -> dict:
+    outputs = {name: _RawCapture(directory / (name + ".raw")) for name in ("stdout", "stderr")}
+    _sync_directory(directory)
+    process, status, failure = None, "error", None
+    started = time.time_ns()
+    try:
+        process = subprocess.Popen(
+            argv, cwd=manifest["cwd"], env=manifest["environment"], stdin=stdin_stream,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+        )
+        for name, capture in outputs.items():
+            threading.Thread(target=capture.pump, args=(getattr(process, name),),
+                             daemon=True).start()
+        deadline = time.monotonic() + timeout
+        while True:
+            if any(x.exceeded for x in outputs.values()):
+                status = "output_limit"
+                break
+            if any(x.error for x in outputs.values()):
+                failure = next(x.error for x in outputs.values() if x.error)
+                break
+            if all(x.done.is_set() for x in outputs.values()) and process.poll() is not None:
+                status = "complete"
+                break
+            if time.monotonic() >= deadline:
+                status = "timeout"
+                break
+            time.sleep(0.005)
+    except Exception as exc:
+        failure = type(exc).__name__
+    if process is not None and status != "complete" and not sys.platform.startswith("linux"):
+        # Only the exact Windows fixture child. Linux group cleanup remains with
+        # the parent owner, whose unreaped helper leader anchors the PGID.
+        process.kill()
+        process.wait(timeout=5)
+    records = {name: capture.freeze() for name, capture in outputs.items()}
+    # Creation names, as well as the file content, must be durable before result.
+    _sync_directory(directory)
+    raw = _raw_bytes(directory / "stdout.raw")
+    display = raw.decode("utf-8", errors="replace").strip()
+    safe = display if re.fullmatch(r"[1-9][0-9]*(?:;[A-Za-z0-9_.-]+)?", display) else None
+    return {
+        "schema_version": 2, "command_started_ns": started,
+        "command_spawned": process is not None,
+        "returncode": process.returncode if process is not None else None,
+        "timed_out": status == "timeout", "capture_status": status,
+        "capture_error_type": failure, "raw_outputs": records, "stdout": safe,
+        "stdout_sha256": records["stdout"]["sha256"],
+        "stderr_sha256": records["stderr"]["sha256"], "command_finished_ns": time.time_ns(),
+    }
 
 
 def file_sha256(path: Path) -> str:
@@ -139,26 +396,8 @@ def _strict_file(path: Path, expected: str) -> None:
 def helper_main(manifest_path: Path, expected_sha256: str) -> int:
     _strict_file(manifest_path, expected_sha256)
     manifest = read_json(manifest_path)
-    if (
-        set(manifest)
-        != {
-            "schema_version",
-            "nonce",
-            "request_sha256",
-            "argv",
-            "cwd",
-            "environment",
-            "stdin_path",
-            "stdin_sha256",
-            "input_files",
-            "wait_seconds",
-            "command_timeout_seconds",
-            "deadline_monotonic",
-            "expected_effective_user",
-        }
-        or manifest["schema_version"] != 1
-    ):
-        raise ValueError("unsupported invocation manifest")
+    if invocation_result_schema(manifest) != 2:
+        raise ValueError("new helper execution requires version 2 invocation")
     directory = manifest_path.parent
     if sys.platform.startswith("linux") and (
         os.getsid(0) != os.getpid() or os.getpgrp() != os.getpid()
@@ -210,44 +449,10 @@ def helper_main(manifest_path: Path, expected_sha256: str) -> int:
     # No shell, no inherited SBATCH_* / SQUEUE_* variables, no retry. Pinned script
     # bytes are passed on stdin so sbatch cannot reread a changed script path.
     with stdin_path.open("rb") as stdin_stream:
-        started = time.time_ns()
-        process = subprocess.Popen(
-            argv,
-            cwd=manifest["cwd"],
-            env=manifest["environment"],
-            stdin=stdin_stream,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=False,
-        )
-        timed_out = False
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            if sys.platform.startswith("linux"):
-                # The parent retains this helper's unreaped session-leader PID
-                # until it has TERM/KILLed the whole local group. Do not race its
-                # cleanup by killing only sbatch, or waiting on inherited pipes.
-                # Exiting here leaves the helper waitable as the PGID anchor.
-                return 72
-            # Only this exact Popen child is stopped, never a Slurm allocation.
-            process.kill()
-            stdout, stderr = process.communicate(timeout=5)
-    output = stdout.decode("utf-8", errors="replace").strip()
-    safe_output = output if re.fullmatch(r"[1-9][0-9]*(?:;[A-Za-z0-9_.-]+)?", output) else None
-    result = {
-        **binding,
-        "command_started_ns": started,
-        "returncode": process.returncode,
-        "timed_out": timed_out,
-        "stdout": safe_output,
-        "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
-        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
-        "command_finished_ns": time.time_ns(),
-    }
+        result = {**binding, **_capture_command(argv, manifest, directory, stdin_stream, timeout)}
+    validate_helper_result(directory, result, manifest=manifest, expected_result_schema=2)
     write_exclusive_json(directory / "result.json", result)
-    return 0
+    return {"complete": 0, "timeout": 72, "output_limit": 73, "error": 74}[result["capture_status"]]
 
 
 if __name__ == "__main__":

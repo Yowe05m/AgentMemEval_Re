@@ -48,6 +48,8 @@ def test_new_config_requires_literal_true(value):
 def test_legacy_config_can_be_read_but_cannot_prepare_new_job(tmp_path, monkeypatch):
     repo, path, value = fixture(tmp_path, monkeypatch)
     value["resource_profile_version"] = 1
+    value["memory_mib"] = 65536
+    value.pop("memory_policy")
     value.pop("language_model_only")
     raw = canonical_json(value)
     assert cli._config(raw) == value
@@ -146,15 +148,19 @@ def test_legacy_service_submission_cannot_claim_a_new_launch_policy(tmp_path, va
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="historical prepared Slurm paths require Linux")
+@pytest.mark.parametrize("historical_version", [1, 2])
 def test_legacy_descriptor_replay_remains_exact_after_new_profile_is_available(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, historical_version
 ):
-    """Anonymous v1 schema fixture; it is not a copy of any actual run artifact."""
+    """Anonymous historical fixture; not a copy of any actual run artifact."""
     repo, path, value = fixture(tmp_path, monkeypatch)
     root = tmp_path / "prepared"
     cli.prepare(repo, root, "campaign", "configs/path1_v1/site.json")
-    value["resource_profile_version"] = 1
-    value.pop("language_model_only")
+    value["resource_profile_version"] = historical_version
+    value["memory_mib"] = 65536
+    value.pop("memory_policy")
+    if historical_version == 1:
+        value.pop("language_model_only")
     raw = canonical_json(value)
     path.write_bytes(raw)
     _git(repo, "add", ".")
@@ -172,7 +178,8 @@ def test_legacy_descriptor_replay_remains_exact_after_new_profile_is_available(
     )
     (root / "contract.json").write_bytes(canonical_json(contract))
     request_data = json.loads((root / "probe_request.json").read_text(encoding="utf-8"))
-    request_data["launch"].pop("language_model_only")
+    if historical_version == 1:
+        request_data["launch"].pop("language_model_only")
     request_data.update(
         intent_id=canonical_intent_id(contract), contract_sha256=file_sha256(root / "contract.json")
     )
@@ -182,6 +189,8 @@ def test_legacy_descriptor_replay_remains_exact_after_new_profile_is_available(
     (root / "probe_request.json").write_bytes(canonical_json(request_data))
     (root / "inputs/site_config.json").write_bytes(raw)
     descriptor = json.loads((root / "submission.json").read_text(encoding="utf-8"))
+    descriptor["spec"].pop("memory_policy")
+    descriptor["spec"]["memory_mib"] = 65536
     request = SubmissionRequest(
         descriptor["campaign_id"],
         request_data["intent_id"],
@@ -204,9 +213,16 @@ def test_legacy_descriptor_replay_remains_exact_after_new_profile_is_available(
     }
     observed, frozen, historical_request = cli.read_prepared(root, digest)
     assert observed == descriptor and frozen == value and historical_request == request
-    assert observed["service_profile"]["profile_version"] == 1
-    assert "language_model_only" not in observed["service_profile"]
-    assert "--language-model-only" not in observed["service_profile"]["service_argv"]
+    assert observed["service_profile"]["profile_version"] == historical_version
+    assert ("language_model_only" in observed["service_profile"]) == (historical_version == 2)
+    assert ("--language-model-only" in observed["service_profile"]["service_argv"]) == (
+        historical_version == 2
+    )
+    assert "memory_policy" not in historical_request.spec.payload()
+    assert "--mem=65536" in historical_request.sbatch_argv()
+    assert SubmitSpec.from_payload(historical_request.spec.payload()) == historical_request.spec
+    with pytest.raises(ValueError, match="lookup only"):
+        cli.execute(root, digest, lookup=False)
     assert before == {
         p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()
     }

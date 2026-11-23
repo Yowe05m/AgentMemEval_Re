@@ -424,10 +424,23 @@ class E0PreSubmitVerifier:
         if seconds < request.spec.walltime_seconds:
             raise SubmissionDisabled("partition cannot accommodate the frozen probe walltime")
         if service_profile is not None:
-            for field, requested in (
-                ("MaxCPUsPerNode", request.spec.cpus_per_task),
-                ("MaxMemPerCPU", request.spec.memory_mib / request.spec.cpus_per_task),
-            ):
+            limits = [("MaxCPUsPerNode", request.spec.cpus_per_task)]
+            if request.spec.memory_policy == "site_default":
+                if (service_profile["profile_version"] != 3
+                        or request.spec.memory_mib is not None
+                        or type(request.spec.cpus_per_task) is not int):
+                    raise SubmissionDisabled("invalid site-default service memory policy")
+                # The allocation must later report actual RAM. No numeric memory
+                # amount was requested, so MaxMemPerCPU cannot validate one here.
+            elif (request.spec.memory_policy is None
+                  and type(request.spec.memory_mib) is int
+                  and type(request.spec.cpus_per_task) is int):
+                limits.append(
+                    ("MaxMemPerCPU", request.spec.memory_mib / request.spec.cpus_per_task)
+                )
+            else:
+                raise SubmissionDisabled("service memory is unspecified without site_default")
+            for field, requested in limits:
                 value = fields.get(field)
                 if value is not None and value != "UNLIMITED" and (
                     not value.isdigit() or (int(value) != 0 and requested > int(value))
@@ -587,6 +600,12 @@ class DurableIntentExecutor:
                 path = _file(Path(record["probe_request_path"]))
                 if file_sha256(path) != record.get("probe_request_file_sha256"):
                     raise StoreIntegrityError("durable E0 request bytes changed")
+            if "operational_supersession" in record:
+                from agentmemeval.path1_v1.operations.service_supersession import (
+                    validate_stored_supersession,
+                )
+
+                validate_stored_supersession(record, self.store)
         return value
 
     @staticmethod
@@ -789,7 +808,7 @@ class DurableIntentExecutor:
         admission.validate(request, worker, self.clock())
         return admission
 
-    def _validate_e0_retry(self, worker: Any) -> None:
+    def _validate_e0_retry(self, worker: Any):
         contract = worker.contract
         if contract["phase"] != "E0":
             return
@@ -798,6 +817,7 @@ class DurableIntentExecutor:
 
         ledger = self._ledger(self.store.read_registry())
         retry = contract["job"]["retry_evidence"]
+        supersession = None
         for intent, record in ledger["intents"].items():
             if intent == worker.intent_id or record.get("probe_request_path") is None:
                 continue
@@ -806,12 +826,31 @@ class DurableIntentExecutor:
                     or stored["job"]["kind"] != contract["job"]["kind"]):
                 continue
             old_retry = stored["job"]["retry_evidence"]
+            if (contract["job"]["kind"] == "service_probe"
+                    and contract["job"]["attempt"] == stored["job"]["attempt"] == 1
+                    and retry is None and old_retry is None):
+                from agentmemeval.path1_v1.operations.service_supersession import (
+                    resolve_service_supersession,
+                )
+
+                if supersession is not None:
+                    raise SubmissionDisabled("another service transition consumes this unit")
+                supersession = resolve_service_supersession(
+                    self.store, contract, worker.request, record)
+                continue
             if (stored["job"]["attempt"] == contract["job"]["attempt"]
                     or (retry is not None and old_retry is not None
                         and retry["prior_intent_id"] == old_retry["prior_intent_id"])):
                 raise SubmissionDisabled("E0 attempt or prior terminal already has another intent")
         if contract["job"]["attempt"] == 1:
-            return
+            current = ledger["intents"].get(worker.intent_id)
+            expected = supersession.payload() if supersession is not None else None
+            if current is not None and (
+                ("operational_supersession" in current) != (expected is not None)
+                or current.get("operational_supersession") != expected
+            ):
+                raise SubmissionDisabled("saved service transition differs from live evidence")
+            return supersession
         resolution = resolve_e0_terminal_intent(self.store, retry["prior_intent_id"])
         if getattr(resolution, "classification", None) != "unstarted_scheduler_deadline":
             raise SubmissionDisabled("executed resource terminal does not grant retry eligibility")
@@ -961,6 +1000,8 @@ class DurableIntentExecutor:
         }
 
     def _result(self, request: SubmissionRequest, record: dict) -> tuple[str | None, str | None]:
+        from agentmemeval.path1_v1.operations.submission_process import validate_helper_result
+
         path = Path(record["invocation_dir"]) / "result.json"
         if not path.exists():
             return None, None
@@ -968,8 +1009,19 @@ class DurableIntentExecutor:
         binding = record.get("ready")
         if binding is None or any(result.get(key) != value for key, value in binding.items()):
             raise StoreIntegrityError("submitter result identity differs from persisted release")
+        manifest_path = _file(Path(record["invocation_dir"]) / "invocation.json")
+        if file_sha256(manifest_path) != record["manifest_sha256"]:
+            raise StoreIntegrityError("submitter invocation bytes changed")
+        try:
+            version = validate_helper_result(
+                path.parent, result, manifest=read_json(manifest_path),
+                expected_result_schema=record.get("helper_result_schema_version"),
+            )
+        except (ValueError, OSError) as exc:
+            raise StoreIntegrityError("submitter raw output evidence is invalid") from exc
         if (
-            result.get("timed_out") is not False
+            (version == 2 and result["capture_status"] != "complete")
+            or result.get("timed_out") is not False
             or result.get("returncode") != 0
             or result.get("stderr_sha256") != hashlib.sha256(b"").hexdigest()
             or type(result.get("stdout")) is not str
@@ -1078,6 +1130,9 @@ class DurableIntentExecutor:
             if type(_files) is ProbeLaunchFiles:
                 record.update(probe_request_path=str(_files.probe_request_path),
                               probe_request_file_sha256=file_sha256(_files.probe_request_path))
+                supersession = self._validate_e0_retry(worker)
+                if supersession is not None:
+                    record["operational_supersession"] = supersession.payload()
             ledger["intents"][request.intent_id] = record
             snapshot = self._commit(snapshot, ledger, "reserve remote submission intent")
             claim = self.store.claim_run(
@@ -1119,7 +1174,8 @@ class DurableIntentExecutor:
                 # feasibility deadline, not a precise queue-deletion timer.
                 argv = (*argv, f"--deadline=now+{RESOURCE_DEADLINE_OFFSET_SECONDS}seconds")
             manifest = {
-                "schema_version": 1,
+                "schema_version": 2,
+                "result_schema_version": 2,
                 "nonce": uuid4().hex,
                 "request_sha256": request.request_sha256,
                 "argv": list(argv),
@@ -1141,6 +1197,7 @@ class DurableIntentExecutor:
                 manifest_sha256=manifest_sha,
                 helper_sha256=file_sha256(helper),
                 helper_python_sha256=file_sha256(helper_python),
+                helper_result_schema_version=2,
             )
             snapshot = self._commit(snapshot, ledger, "persist unknown before starting submitter")
             helper_argv = [str(helper_python), "-I", str(helper), str(manifest_path), manifest_sha]

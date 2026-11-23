@@ -33,14 +33,15 @@ def fixture(tmp_path, monkeypatch):
         schema_version=1,
         kind="path1_e0_service_site_config",
         job_kind="service_probe",
-        resource_profile_version=2,
+        resource_profile_version=3,
         language_model_only=True,
         walltime_seconds=7200,
         command_seconds=6600,
         cleanup_seconds=600,
         startup_seconds=1200,
         cpus_per_task=8,
-        memory_mib=65536,
+        memory_mib=None,
+        memory_policy="site_default",
         queue_policy="no_scheduler_deadline",
         qos_policy="site_default",
         service_port=18231,
@@ -53,7 +54,7 @@ def fixture(tmp_path, monkeypatch):
     )
     path.write_bytes(canonical_json(config))
     _git(repo, "add", ".")
-    _git(repo, "commit", "-qm", "version 2 text-only service fixture configuration")
+    _git(repo, "commit", "-qm", "version 3 site-default text-only service fixture")
     return repo, path, config
 
 
@@ -69,14 +70,17 @@ def test_prepare_real_git_model_and_inspect_without_scheduler_or_model(tmp_path,
     result = service.prepare(repo, root, "campaign", "configs/path1_v1/site.json")
     descriptor, frozen, request = service.read_prepared(root, result["descriptor_sha256"])
     assert frozen == config
-    assert request.spec.cpus_per_task == 8 and request.spec.memory_mib == 65536
-    assert "--cpus-per-task=8" in request.sbatch_argv() and "--mem=65536" in request.sbatch_argv()
+    assert request.spec.cpus_per_task == 8 and request.spec.memory_mib is None
+    assert request.spec.memory_policy == "site_default"
+    assert "--cpus-per-task=8" in request.sbatch_argv()
+    assert not any(arg.startswith("--mem") for arg in request.sbatch_argv())
     assert result["implementation_status"] == "implemented_only"
     assert result["runtime_admission"] is False and result["scientific_admission"] is False
     assert result["service_profile"]["allocation_verified"] is False
     assert "--no-enable-prefix-caching" in result["service_profile"]["service_argv"]
     assert result["service_profile"]["service_argv"].count("--language-model-only") == 1
-    assert result["service_profile"]["profile_version"] == 2
+    assert result["service_profile"]["profile_version"] == 3
+    assert result["service_profile"]["allocated_memory_verified"] is False
     assert result["service_profile"]["language_model_only"] is True
     assert result["service_profile"]["effective_multimodal_state_verified"] is False
     assert (root / "inputs/site_config.json").read_bytes() == path.read_bytes()

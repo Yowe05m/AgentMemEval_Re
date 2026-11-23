@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,7 +20,6 @@ from agentmemeval.path1_v1.operations.closure import inventory_tree
 from agentmemeval.path1_v1.operations.contracts import content_digest
 from agentmemeval.path1_v1.operations.slurm import TERMINAL_STATES, job_comment, job_name, utc
 from agentmemeval.path1_v1.operations.state import CampaignStore, RunClaim
-from agentmemeval.path1_v1.operations.submission_process import write_exclusive_json
 from agentmemeval.path1_v1.storage.archive import verify_file_manifest
 from agentmemeval.path1_v1.storage.snapshot_archive import (
     _verify_archive_members,
@@ -54,6 +53,9 @@ def _verifier_identity(repository: Path, config: dict) -> dict:
         ),
         "resource verifier is not published",
     )
+    from agentmemeval.path1_v1.operations.terminal_common import verify_implementation_source
+
+    verify_implementation_source(repository, identity)
     return identity
 
 
@@ -555,168 +557,6 @@ class ResourceTerminalResolution:
         return current
 
 
-def _terminal(path: Path, evidence: dict) -> dict:
-    return {
-        "schema_version": 1,
-        "kind": KIND,
-        "classification": "resource_terminal_observed",
-        "binding": evidence["binding"],
-        "evidence_path": str(path),
-        "evidence_file_sha256": er._sha(path),
-        "claim_status": evidence["claim_status"],
-        "scheduler_state": evidence["scheduler"]["state"],
-        "resource_observation_complete": evidence["facts"]["resource_observation_complete"],
-        "retry_eligible": False,
-        "runtime_admission": False,
-        "scientific_admission": False,
-        "primary_analysis_admitted": False,
-        "scientific_samples": 0,
-    }
-
-
-def validate_resource_terminal(
-    record: dict, claim: RunClaim, *, store: CampaignStore
-) -> ResourceTerminalResolution:
-    snapshot, current_record, current_claim = er._stored(store, claim.intent_id)
-    _assert(
-        record == current_record
-        and claim == current_claim
-        and claim.status in {"completed", "failed"},
-        "current authoritative terminal claim required",
-    )
-    path = _audit_path(store, claim.intent_id)
-    terminal = claim.terminal_receipt
-    _assert(
-        type(terminal) is dict
-        and terminal.get("kind") == KIND
-        and terminal.get("evidence_path") == str(path)
-        and terminal.get("evidence_file_sha256") == er._sha(er._path(path)),
-        "terminal evidence changed",
-    )
-    evidence = er._json(path)
-    er._keys(
-        evidence,
-        {
-            "schema_version",
-            "kind",
-            "binding",
-            "descriptor_path",
-            "original_record_sha256",
-            "claim_before",
-            "generation_before",
-            "sealed_at",
-            "first_inventory",
-            "second_inventory",
-            "quiet_seconds",
-            "scheduler_before",
-            "scheduler_after",
-            "processes_before",
-            "processes_after",
-            "verifier_runtime_identity",
-            "facts",
-            "scheduler",
-            "archives",
-            "claim_status",
-            "first_checked_at",
-        },
-        "resource evidence",
-    )
-    _assert(
-        evidence["schema_version"] == 1
-        and type(evidence["schema_version"]) is int
-        and evidence["kind"] == "path1_e0_resource_terminal_evidence_v1",
-        "evidence schema differs",
-    )
-    bound = er._bound_inputs(
-        store,
-        er._path(evidence["descriptor_path"]),
-        evidence["binding"]["descriptor_sha256"],
-        record,
-        claim,
-        require_empty_output=False,
-    )
-    _assert(
-        evidence["binding"]
-        == er._binding(store, bound, record, claim, evidence["binding"]["descriptor_sha256"])
-        and evidence["original_record_sha256"] == content_digest(record)
-        and terminal == _terminal(path, evidence),
-        "terminal source/submission binding differs",
-    )
-    old = evidence["claim_before"]
-    _assert(
-        old["status"] == "started"
-        and old["terminal_receipt"] is None
-        and {
-            k: v
-            for k, v in old.items()
-            if k not in {"status", "terminal_receipt", "updated_generation"}
-        }
-        == {
-            k: v
-            for k, v in asdict(claim).items()
-            if k not in {"status", "terminal_receipt", "updated_generation"}
-        }
-        and type(evidence["generation_before"]) is int
-        and claim.updated_generation == evidence["generation_before"] + 1
-        and snapshot.generation >= claim.updated_generation,
-        "terminal claim did not continue original reservation",
-    )
-    _assert(
-        evidence["first_inventory"]
-        == evidence["second_inventory"]
-        == er._content_inventory(bound["run"], bound["invocation"])
-        and type(evidence["quiet_seconds"]) in {int, float}
-        and evidence["quiet_seconds"] >= 10,
-        "original resource artifacts or quiescence evidence changed",
-    )
-    facts = _resource_facts(bound, record)
-    _assert(evidence["facts"] == facts, "resource evidence interpretation changed")
-    sealed = utc(datetime.fromisoformat(evidence["sealed_at"]))
-    first_checked = utc(datetime.fromisoformat(evidence["first_checked_at"]))
-    _assert(
-        first_checked <= sealed
-        and (
-            utc(datetime.fromisoformat(evidence["scheduler_after"]["observed_at"])) - first_checked
-        ).total_seconds()
-        >= 10,
-        "scheduler/quiet sequence is inconsistent",
-    )
-    for key, checked_at in (("scheduler_before", first_checked), ("scheduler_after", sealed)):
-        _assert(
-            validate_resource_scheduler(evidence[key], bound, record, facts, sealed_at=checked_at)
-            == evidence["scheduler"],
-            "scheduler observations differ",
-        )
-    for key in ("processes_before", "processes_after"):
-        er._validate_processes(evidence[key], record)
-    _verify_archives(path, bound, evidence["archives"])
-    verifier = evidence["verifier_runtime_identity"]
-    er._historical_identity(bound["repository"], verifier)
-    _assert(
-        any(row["path"] == _MODULE_PATH for row in verifier["operations_files"]),
-        "sealed verifier does not include resource terminal implementation",
-    )
-    _assert(
-        claim.status == evidence["claim_status"] == _claim_status(facts, evidence["scheduler"]),
-        "technical outcome/claim status differs",
-    )
-    return ResourceTerminalResolution(
-        intent_id=claim.intent_id,
-        job_id=record["job_id"],
-        campaign_id=record["campaign_id"],
-        submission_request_sha256=record["request_sha256"],
-        descriptor_sha256=evidence["binding"]["descriptor_sha256"],
-        evidence_file_sha256=er._sha(path),
-        terminal_receipt_sha256=content_digest(terminal),
-        original_code_sha=bound["contract"]["runtime_identity"]["core_sha"],
-        verifier_code_sha=verifier["core_sha"],
-        scheduler_state=evidence["scheduler"]["state"],
-        claim_status=claim.status,
-        resource_observation_complete=facts["resource_observation_complete"],
-        _issuer=_ISSUER,
-    )
-
-
 def _claim_status(facts: dict, scheduler: dict) -> str:
     success = (
         facts["resource_observation_complete"]
@@ -730,6 +570,43 @@ def _claim_status(facts: dict, scheduler: dict) -> str:
     return "completed" if success else "failed"
 
 
+def _policy():
+    from agentmemeval.path1_v1.operations.terminal_common import TerminalPolicy
+
+    return TerminalPolicy(
+        kind=KIND,
+        evidence_kind="path1_e0_resource_terminal_evidence_v1",
+        readonly_kind="path1_e0_resource_readonly_check_v1",
+        classification="resource_terminal_observed",
+        observation_key="resource_observation_complete",
+        module_path=_MODULE_PATH,
+        issuer=_ISSUER,
+        resolution_type=ResourceTerminalResolution,
+        audit_path=_audit_path,
+        bound_inputs=er._bound_inputs,
+        verifier_identity=_verifier_identity,
+        facts=_resource_facts,
+        scheduler=validate_resource_scheduler,
+        archive=_archive_sources,
+        verify_archives=_verify_archives,
+        claim_status=_claim_status,
+    )
+
+
+def _terminal(path: Path, evidence: dict) -> dict:
+    from agentmemeval.path1_v1.operations.terminal_common import _terminal as terminal
+
+    return terminal(_policy(), path, evidence)
+
+
+def validate_resource_terminal(
+    record: dict, claim: RunClaim, *, store: CampaignStore
+) -> ResourceTerminalResolution:
+    from agentmemeval.path1_v1.operations.terminal_common import validate_terminal
+
+    return validate_terminal(_policy(), record, claim, store=store)
+
+
 def check_resource_terminal(
     store: CampaignStore,
     *,
@@ -738,49 +615,16 @@ def check_resource_terminal(
     reader=None,
     clock=lambda: datetime.now(UTC),
 ) -> dict:
-    """Read current core facts without publishing evidence or releasing occupancy."""
-    descriptor_path = er._path(descriptor_path)
-    _assert(er._sha(descriptor_path) == er.digest(descriptor_sha256), "descriptor changed")
-    descriptor = er._json(descriptor_path)
-    reader = er.E0DeadlineReader() if reader is None else reader
-    with store.lock():
-        snapshot, record, claim = er._stored(store, descriptor["intent_id"])
-        _assert(
-            claim.status == "started" and claim.terminal_receipt is None,
-            "read-only precheck requires the original started claim",
-        )
-        bound = er._bound_inputs(
-            store, descriptor_path, descriptor_sha256, record, claim, require_empty_output=False
-        )
-        verifier = _verifier_identity(
-            bound["repository"],
-            {**bound["config"], "config_relative": descriptor["config_relative"]},
-        )
-        facts = _resource_facts(bound, record)
-        observed = reader.read(bound["request"], record["job_id"], bound["config"])
-        _assert(type(observed) is er.DeadlineObservation, "typed live observation required")
-        checked_at = utc(clock())
-        scheduler = validate_resource_scheduler(
-            observed.payload(), bound, record, facts, sealed_at=checked_at
-        )
-        processes = er._processes_gone(record)
-        er._validate_processes(processes, record)
-        inventory = er._content_inventory(bound["run"], bound["invocation"])
-        return {
-            "kind": "path1_e0_resource_readonly_check_v1",
-            "generation": snapshot.generation,
-            "intent_id": claim.intent_id,
-            "job_id": record["job_id"],
-            "checked_at": checked_at.isoformat(),
-            "scheduler": scheduler,
-            "facts": facts,
-            "inventory_sha256": content_digest(inventory),
-            "verifier_runtime_identity": verifier,
-            "technical_claim_closed": False,
-            "retry_eligible": False,
-            "runtime_admission": False,
-            "scientific_admission": False,
-        }
+    from agentmemeval.path1_v1.operations.terminal_common import check_terminal
+
+    return check_terminal(
+        _policy(),
+        store,
+        descriptor_path=descriptor_path,
+        descriptor_sha256=descriptor_sha256,
+        reader=reader,
+        clock=clock,
+    )
 
 
 def reconcile_resource_terminal(
@@ -793,98 +637,15 @@ def reconcile_resource_terminal(
     monotonic=time.monotonic,
     sleep=time.sleep,
 ) -> ResourceTerminalResolution:
-    """Create verified archives and seal the exact original claim; never submit or signal."""
-    descriptor = er._json(descriptor_path)
-    _assert(er._sha(descriptor_path) == er.digest(descriptor_sha256), "descriptor changed")
-    reader = er.E0DeadlineReader(clock=clock) if reader is None else reader
-    with store.lock():
-        snapshot, record, claim = er._stored(store, descriptor["intent_id"])
-        if claim.status in {"completed", "failed"}:
-            result = validate_resource_terminal(record, claim, store=store)
-            _assert(result.descriptor_sha256 == descriptor_sha256, "repeat descriptor differs")
-            return result
-        _assert(
-            claim.status == "started" and claim.terminal_receipt is None, "started claim required"
-        )
-        path = _audit_path(store, claim.intent_id)
-        if path.parent.exists():
-            raise FileExistsError(
-                "pending resource audit exists; preserve occupancy and review recovery"
-            )
-        bound = er._bound_inputs(
-            store, descriptor_path, descriptor_sha256, record, claim, require_empty_output=False
-        )
-        verifier = _verifier_identity(
-            bound["repository"],
-            {**bound["config"], "config_relative": descriptor["config_relative"]},
-        )
-        facts = _resource_facts(bound, record)
-        before = reader.read(bound["request"], record["job_id"], bound["config"])
-        _assert(type(before) is er.DeadlineObservation, "typed live observation required")
-        first_checked = utc(clock())
-        validate_resource_scheduler(before.payload(), bound, record, facts, sealed_at=first_checked)
-        before_process = er._processes_gone(record)
-        er._validate_processes(before_process, record)
-        first = er._content_inventory(bound["run"], bound["invocation"])
-        start = monotonic()
-        sleep(10.1)
-        second = er._content_inventory(bound["run"], bound["invocation"])
-        elapsed = monotonic() - start
-        _assert(first == second and elapsed >= 10, "resource source is not quiescent")
-        path.parent.mkdir(parents=True, exist_ok=False)
-        archives = _archive_sources(path, bound)
-        _verify_archives(path, bound, archives)
-        after_process = er._processes_gone(record)
-        after = reader.read(bound["request"], record["job_id"], bound["config"])
-        _assert(type(after) is er.DeadlineObservation, "typed live observation required")
-        sealed = utc(clock())
-        scheduler = validate_resource_scheduler(
-            before.payload(), bound, record, facts, sealed_at=first_checked
-        )
-        _assert(
-            scheduler
-            == validate_resource_scheduler(after.payload(), bound, record, facts, sealed_at=sealed),
-            "terminal scheduler evidence changed",
-        )
-        for value in (before_process, after_process):
-            er._validate_processes(value, record)
-        _assert(
-            second == er._content_inventory(bound["run"], bound["invocation"])
-            and facts == _resource_facts(bound, record)
-            and er._stored(store, claim.intent_id) == (snapshot, record, claim),
-            "original evidence/state changed before sealing",
-        )
-        evidence = {
-            "schema_version": 1,
-            "kind": "path1_e0_resource_terminal_evidence_v1",
-            "binding": er._binding(store, bound, record, claim, descriptor_sha256),
-            "descriptor_path": str(descriptor_path),
-            "original_record_sha256": content_digest(record),
-            "claim_before": asdict(claim),
-            "generation_before": snapshot.generation,
-            "sealed_at": sealed.isoformat(),
-            "first_checked_at": first_checked.isoformat(),
-            "first_inventory": first,
-            "second_inventory": second,
-            "quiet_seconds": elapsed,
-            "scheduler_before": before.payload(),
-            "scheduler_after": after.payload(),
-            "processes_before": before_process,
-            "processes_after": after_process,
-            "verifier_runtime_identity": verifier,
-            "facts": facts,
-            "scheduler": scheduler,
-            "archives": archives,
-            "claim_status": _claim_status(facts, scheduler),
-        }
-        write_exclusive_json(path, evidence)
-        _assert(er._json(path) == evidence, "published evidence changed")
-        store.finish_claim(
-            expected_generation=snapshot.generation,
-            run_id=claim.run_id,
-            token=claim.token,
-            status=evidence["claim_status"],
-            receipt=_terminal(path, evidence),
-        )
-        _, current_record, current_claim = er._stored(store, claim.intent_id)
-        return validate_resource_terminal(current_record, current_claim, store=store)
+    from agentmemeval.path1_v1.operations.terminal_common import reconcile_terminal
+
+    return reconcile_terminal(
+        _policy(),
+        store,
+        descriptor_path=descriptor_path,
+        descriptor_sha256=descriptor_sha256,
+        reader=reader,
+        clock=clock,
+        monotonic=monotonic,
+        sleep=sleep,
+    )

@@ -149,6 +149,7 @@ class SubmitSpec:
     gpus: int = 1
     cpus_per_task: int | None = None
     memory_mib: int | None = None
+    memory_policy: str | None = None
 
     def __post_init__(self) -> None:
         for value in (self.cluster, self.account, self.user, self.partition):
@@ -167,9 +168,16 @@ class SubmitSpec:
             type(x) is not str or any(c in x for c in "\x00\r\n") for x in self.script_args
         ):
             raise ValueError("script arguments must be literal single-line strings")
-        if (self.cpus_per_task is None) != (self.memory_mib is None):
+        if self.memory_policy is not None:
+            if (
+                type(self.memory_policy) is not str or self.memory_policy != "site_default"
+                or type(self.cpus_per_task) is not int or not 1 <= self.cpus_per_task <= 256
+                or self.memory_mib is not None
+            ):
+                raise ValueError("site_default requires explicit CPU and unspecified memory")
+        elif (self.cpus_per_task is None) != (self.memory_mib is None):
             raise ValueError("explicit CPU and memory must be supplied together")
-        if self.cpus_per_task is not None and (
+        if self.memory_policy is None and self.cpus_per_task is not None and (
             type(self.cpus_per_task) is not int or not 1 <= self.cpus_per_task <= 256
             or type(self.memory_mib) is not int or not 1 <= self.memory_mib <= 1048576
         ):
@@ -178,6 +186,8 @@ class SubmitSpec:
     def payload(self) -> dict:
         value = asdict(self)
         value["script_args"] = list(self.script_args)
+        if self.memory_policy is None:
+            del value["memory_policy"]
         if self.cpus_per_task is None:
             # Preserve every historical payload and SubmissionRequest digest.
             del value["cpus_per_task"]
@@ -188,7 +198,10 @@ class SubmitSpec:
     def from_payload(cls, value: dict) -> SubmitSpec:
         copied = dict(value)
         explicit = {"cpus_per_task", "memory_mib"} & copied.keys()
-        if explicit and (len(explicit) != 2 or any(copied[key] is None for key in explicit)):
+        if "memory_policy" in copied:
+            if copied["memory_policy"] != "site_default" or len(explicit) != 2:
+                raise ValueError("memory policy payload must explicitly bind CPU and memory")
+        elif explicit and (len(explicit) != 2 or any(copied[key] is None for key in explicit)):
             raise ValueError("explicit resource payload cannot contain partial/null fields")
         copied["script_args"] = tuple(copied["script_args"])
         return cls(**copied)
@@ -238,8 +251,9 @@ class SubmissionRequest:
             "--nodes=1",
             "--ntasks=1",
             "--gpus=1",
-            *((f"--cpus-per-task={self.spec.cpus_per_task}",
-               f"--mem={self.spec.memory_mib}") if self.spec.cpus_per_task is not None else ()),
+            *((f"--cpus-per-task={self.spec.cpus_per_task}",)
+              if self.spec.cpus_per_task is not None else ()),
+            *((f"--mem={self.spec.memory_mib}",) if self.spec.memory_mib is not None else ()),
             "--no-requeue",
             f"--time={walltime}",
             f"--output={self.spec.work_dir}/slurm-%j.out",
