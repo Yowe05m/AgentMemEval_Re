@@ -9,6 +9,7 @@ No model is loaded or claimed to have been verified by this reconciliation.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import math
 import re
@@ -54,6 +55,49 @@ _MODULE = "src/agentmemeval/path1_v1/operations/submission_rejection.py"
 
 def _require(value: bool, reason: str) -> None:
     er._require(value, "submission rejection: " + reason)
+
+
+def _baseline(path: Path, expected_sha256: str) -> list[dict]:
+    """Read the pinned rejection archive dialect without changing resource readers."""
+    _require(er._sha(er._path(path)) == er.digest(expected_sha256), "baseline manifest changed")
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle, delimiter="\t", strict=True)
+        header = next(reader, None)
+        if header == ["relative_path", "size_bytes", "sha256"]:
+            return er._baseline(path, expected_sha256)
+        _require(header == ["path", "size", "sha256"], "unsupported rejection manifest")
+        rows, seen = [], set()
+        metadata = {
+            "control/campaign.sqlite3",
+            "diagnostics/before.json",
+            "diagnostics/after.json",
+            "diagnostics/classification.json",
+            "diagnostics/hash_matched_stderr.txt",
+        }
+        for fields in reader:
+            _require(len(fields) == 3, "rejection manifest row must contain exactly three fields")
+            relative, size, checksum = fields
+            parts = PurePosixPath(relative)
+            _require(
+                bool(relative)
+                and not parts.is_absolute()
+                and ".." not in parts.parts
+                and str(parts) == relative
+                and "\\" not in relative
+                and ":" not in relative
+                and all(ord(char) >= 32 and ord(char) != 127 for char in relative),
+                "unsafe rejection baseline path",
+            )
+            _require(relative.casefold() not in seen, "duplicate rejection baseline path")
+            seen.add(relative.casefold())
+            _require(re.fullmatch(r"0|[1-9][0-9]*", size) is not None, "invalid baseline size")
+            checksum = er.digest(checksum)
+            content = relative.startswith(("run/", "executor/invocation/"))
+            _require(content or relative in metadata, "unknown rejection archive scope")
+            if content:
+                rows.append({"path": relative, "size": int(size), "sha256": checksum})
+    _require(bool(rows), "empty rejection content inventory")
+    return sorted(rows, key=lambda row: row["path"])
 
 
 def _evidence_path(store: CampaignStore, intent: str) -> Path:
@@ -635,7 +679,7 @@ def validate_rejection_terminal(record: dict, claim: RunClaim, *, store: Campaig
         and snapshot.generation >= claim.updated_generation,
         "original claim transition differs",
     )
-    baseline = er._baseline(
+    baseline = _baseline(
         er._path(evidence["baseline_manifest"]), evidence["baseline_manifest_sha256"]
     )
     inventory = er._content_inventory(bound["run"], bound["invocation"])
@@ -733,7 +777,7 @@ def reconcile_rejection(
             bound["repository"],
             {**bound["config"], "config_relative": descriptor["config_relative"]},
         )
-        baseline = er._baseline(baseline_manifest, baseline_manifest_sha256)
+        baseline = _baseline(baseline_manifest, baseline_manifest_sha256)
         before = reader.read(bound["request"], bound["config"])
         _require(type(before) is RejectionObservation, "typed live observation required")
         first_checked = utc(clock())
