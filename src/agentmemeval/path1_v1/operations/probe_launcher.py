@@ -22,6 +22,9 @@ def main(argv: list[str] | None = None) -> int:
     request = validate_probe_request(args.request, model_max_age_seconds=6600.0)
     _require(request.request["schema_version"] == 2, "fixed launcher requires E0 request v2")
     launch = request.request["launch"]
+    if "native_runtime" in launch:
+        from agentmemeval.path1_v1.operations.native_runtime import verify_loaded
+        verify_loaded(launch["native_runtime"])
     actual = Path(sys.executable)
     expected = Path(launch["python_executable"])
     _require(

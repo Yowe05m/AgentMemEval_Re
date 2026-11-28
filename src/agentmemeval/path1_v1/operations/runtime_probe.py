@@ -134,6 +134,11 @@ def validate_probe_request(request_path: Path | str, *, _collecting_resource: bo
         model_verification=model_verification,
         model_binding_sha256=request["request_sha256"] if model_verification else None)
     _require(observed == identity, "E0 source/model identity changed")
+    if version == 2 and kind == "service_probe":
+        config = _strict_json((repository / identity["config"]["path"]).read_bytes())
+        _require(("native_runtime" in config) == ("native_runtime" in request["launch"])
+                 and config.get("native_runtime") == request["launch"].get("native_runtime"),
+                 "native runtime launch/config binding differs")
     _require(not observed["dirty"] and observed["content_matches_head"]
              and not observed["untracked_declared_paths"]
              and not observed["untracked_execution_paths"]
@@ -162,11 +167,15 @@ def validate_probe_launch(launch: dict, kind: str) -> None:
     """v2 fixed execution identity; no arbitrary flags, commands or environment."""
     optional = {"language_model_only"} if (kind == "service_probe" and type(launch) is dict
                                           and "language_model_only" in launch) else set()
+    if kind == "service_probe" and type(launch) is dict and "native_runtime" in launch:
+        optional.add("native_runtime")
+        from agentmemeval.path1_v1.operations.native_runtime import verify_file
+        verify_file(launch["native_runtime"])
     _object(launch, {"python_executable", "python_sha256", "service_python",
                      "service_python_sha256", "service_port", "command_seconds",
                      "cleanup_seconds", "startup_seconds", "python_identity",
                      "service_python_identity"} | optional, "E0 launch")
-    if optional:
+    if "language_model_only" in optional:
         _require(type(launch["language_model_only"]) is bool,
                  "language_model_only must be an explicit boolean")
     from agentmemeval.path1_v1.operations.interpreters import verify_python_interpreter
@@ -358,6 +367,10 @@ def _service(owner, request: ValidatedProbeRequest, host: dict) -> dict:
              "service argv must come from the live kernel")
     _require(not any("api-key" in arg or "token=" in arg for arg in argv),
              "secret-bearing service argv is not admissible to raw evidence")
+    native = request.request.get("launch", {}).get("native_runtime")
+    if native is not None:
+        from agentmemeval.path1_v1.operations.native_runtime import verify_loaded
+        data["native_runtime"] = verify_loaded(native, pid=identity["pid"])
     return data
 
 
@@ -748,12 +761,19 @@ def run_service_probe(request_path: Path, output_directory: Path,
                              service_instance_id=uuid4().hex)
     env = dict(os.environ, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
     env.pop("PYTHONPATH", None)
+    native = request.request.get("launch", {}).get("native_runtime")
+    if native is not None:
+        from agentmemeval.path1_v1.operations.native_runtime import environment, verify_loaded
+        verify_loaded(native)
+        env = environment(native, env)
     endpoint = f"http://127.0.0.1:{port}/v1"
     launch_record = {"argv": argv, "binding": asdict(binding),
               "python_resolved": str(executable.resolve()),
               "python_sha256": _hash_file(executable.resolve())}
     if requested_language_model_only(request):
         launch_record["requested_service_policy"] = arguments
+    if native is not None:
+        launch_record["native_runtime"] = native
     _new_json(output / "launch.json", launch_record)
     with (output / "service_stdout.log").open("xb") as stdout, (
         output / "service_stderr.log"

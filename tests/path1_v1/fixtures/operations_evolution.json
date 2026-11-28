@@ -7,20 +7,22 @@
     "operations/worker.py": {
       "baseline_git_bytes_sha256": "3b7446e3a42546d8a66f6605e04891f7a5cbdf6e7f774486132a79711735092d",
       "baseline_normalized_ast_sha256": "63a8a75df7ab2d9cb5749198c82bd4938f1d5edc6515819d5fa6f6cc816314ec",
-      "current_worktree_bytes_sha256": "8aff1d346ef71cf2a2a943acda2d9b8464cc2b1b6c5d36fb91bfd3b4d2e3eb69",
-      "normalized_ast_sha256": "100491d7bc13e96913a0fcd94129984c688e06dad3f541a3bd8f3b96c413c187",
-      "reason": "Independent E0 request CLI and content-bound terminal artifact seal; research default remains closed.",
+      "current_worktree_bytes_sha256": "ebd154e094d7a6f38571d1a9be9b0e5356934455a11aad95d2a004069a031792",
+      "normalized_ast_sha256": "0909ab1d2130f0a623c912c0d801b4485c70dd576b213491e32aa9abaa93f9fa",
+      "reason": "Independent E0 request CLI and content-bound terminal artifact seal; research default remains closed. E1 retains full model verification on first admission and permits only the same-process, artifact-bound, metadata-stable capability on pre-go revalidation; worker HTTP additionally rechecks live service and verified backend process identities. E0/E2/E3 capability behavior and frozen scientific protocol remain unchanged.",
       "regression_tests": [
         "tests/path1_v1/unit/test_runtime_probe.py",
-        "tests/path1_v1/unit/test_operations_worker.py"
+        "tests/path1_v1/unit/test_operations_worker.py",
+        "tests/path1_v1/unit/test_e1_model_verification.py",
+        "tests/path1_v1/unit/test_e1_runtime.py"
       ]
     },
     "operations/intent_executor.py": {
       "baseline_git_bytes_sha256": "6ac00f61f5bd8bbba422c7c62b5fde9336835a28a3fb483b019ef6ac441f0040",
       "baseline_normalized_ast_sha256": "4db6ae3d6ff622b02d47ec942499daed0a778b44eacafa4d500e7a1148a74695",
-      "current_worktree_bytes_sha256": "ad94b7138a1af347dd5e1cd3b45d851402c3e909d1b81dcc0fb734a31a9942a4",
-      "normalized_ast_sha256": "e09874e489741589b022150101626d89b296bb721759272795bce05e4236a220",
-      "reason": "E0 profile3 site-default RAM validation, typed one-time service policy supersession with repeated pre-go lineage checks, and manifest-bound helper v2 raw-output verification. Changes from 765d1509 are limited to E0PreSubmitVerifier.__call__ and DurableIntentExecutor._ledger/_validate_e0_retry/_result/submit_once; all other AST nodes are unchanged. Existing unresolved occupancy, unstarted-only resource retry and default research admission gates remain enforced.",
+      "current_worktree_bytes_sha256": "401e76477484b54aa7ab3534600322e0dd8a57c1671703e7c7fe1faf9dc4687a",
+      "normalized_ast_sha256": "9e1b85b7c92bbdff7d6476d93beeb6a548a3540f3edafb0bc8be88df6593fd49",
+      "reason": "E0 profile3 site-default RAM validation, typed one-time service policy supersession with repeated pre-go lineage checks, and manifest-bound helper v2 raw-output verification. Changes from 765d1509 are limited to E0PreSubmitVerifier.__call__ and DurableIntentExecutor._ledger/_validate_e0_retry/_result/submit_once; all other AST nodes are unchanged. Existing unresolved occupancy, unstarted-only resource retry and default research admission gates remain enforced. The reviewed W1K24 service retry adds only typed technical-failure lineage verification in _validate_e0_retry; predecessor terminal evidence and one-time account-store ownership are rechecked before go. It grants no runtime or scientific admission and cannot resubmit the old intent. E1 binds typed prepared inputs and the reserved worker claim, enforces stage-one capacity and reuses only the same-process model capability before go. The E0 typed service retry method is copied exactly from the independently reviewed retry slice; all other merged AST nodes match the reviewed E1 overlay. Runtime admission remains separately required inside the allocation. Single content-pinned native runtime is bound to E0/E1 bootstrap argv and helper input pins; relative to the frozen W1K27 joint, only render_probe_script, _validate_launch and _validate_probe_launch change. Legacy missing-field scripts and all scientific/core rules remain unchanged.",
       "regression_tests": [
         "tests/path1_v1/unit/test_intent_executor.py",
         "tests/path1_v1/integration/test_intent_executor_faults.py",
@@ -34,7 +36,12 @@
         "tests/path1_v1/unit/test_service_memory_policy.py",
         "tests/path1_v1/unit/test_service_supersession.py",
         "tests/path1_v1/unit/test_accepted_submission_streams.py",
-        "tests/path1_v1/unit/test_submission_streams.py"
+        "tests/path1_v1/unit/test_submission_streams.py",
+        "tests/path1_v1/unit/test_service_retry.py",
+        "tests/path1_v1/unit/test_e1_prepared.py",
+        "tests/path1_v1/unit/test_e1_model_verification.py",
+        "tests/path1_v1/unit/test_e1_campaign.py",
+        "tests/path1_v1/unit/test_native_runtime.py"
       ]
     },
     "operations/submission_process.py": {

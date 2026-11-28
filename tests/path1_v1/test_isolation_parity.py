@@ -6,9 +6,9 @@ import ast
 import hashlib
 import json
 from importlib.resources import files
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from .parity_probe import collect
+from .parity_probe import collect, storage_conflict_message, storage_relative_path
 
 PREFIX = "agentmemeval.path1_v1"
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -161,3 +161,33 @@ def test_packaged_assets_match_frozen_source_bytes():
     root = files(PREFIX)
     for name, identity in expected["assets"].items():
         assert hashlib.sha256(root.joinpath(name).read_bytes()).hexdigest() == identity, name
+
+
+def test_storage_path_fields_have_one_representation_on_both_hosts():
+    results = []
+    for root in (PurePosixPath('/fixture'), PureWindowsPath('A:/fixture')):
+        run = root / 'files' / 'run'
+        results.append({
+            'directory': storage_relative_path(run / 'hero', root),
+            'message': storage_conflict_message('conflict / detail: ' + str(run), run, root),
+        })
+    assert results[0] == results[1] == {
+        'directory': 'files\\run\\hero',
+        'message': 'conflict / detail: <fixture-root>\\files\\run',
+    }
+
+
+def test_storage_path_normalization_keeps_non_path_and_payload_differences():
+    root = PurePosixPath('/fixture')
+    run = root / 'files' / 'run'
+    record = {
+        'directory': storage_relative_path(run / 'hero', root),
+        'message': storage_conflict_message('conflict / detail: ' + str(run), run, root),
+        'files': {'raw.txt': 'literal/with/slash'},
+    }
+    variants = [
+        {**record, 'directory': storage_relative_path(run / 'other', root)},
+        {**record, 'message': storage_conflict_message('other / detail: ' + str(run), run, root)},
+        {**record, 'files': {'raw.txt': 'literal\\with\\slash'}},
+    ]
+    assert all(digest(value) != digest(record) for value in variants)

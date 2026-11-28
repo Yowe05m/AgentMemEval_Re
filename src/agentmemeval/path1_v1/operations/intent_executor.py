@@ -276,12 +276,19 @@ def render_worker_script(
 
 
 def render_probe_script(
-    *, python_executable: Path, repository_root: Path, probe_request_path: Path
+    *, python_executable: Path, repository_root: Path, probe_request_path: Path,
+    native_runtime: dict | None = None,
 ) -> bytes:
     """Separate exact E0 topology: request v2 carries every execution parameter."""
     for path in (python_executable, repository_root, probe_request_path):
         if not path.is_absolute() or any(c in str(path) for c in "\x00\r\n"):
             raise ExecutorError("probe launcher paths must be absolute and single-line")
+    if native_runtime is not None:
+        from agentmemeval.path1_v1.operations.native_runtime import bootstrap_argv
+        argv = bootstrap_argv(python_executable, repository_root, native_runtime,
+            module="agentmemeval.path1_v1.operations.probe_launcher",
+            arguments=["--request", str(probe_request_path)])
+        return ("#!/bin/sh\nset -eu\nexec " + shlex.join(argv) + "\n").encode("utf-8")
     return ("#!/bin/sh\nset -eu\nexport PYTHONPATH="
             + shlex.quote(str(repository_root / "src")) + "\nexec "
             + shlex.quote(str(python_executable))
@@ -626,9 +633,15 @@ class DurableIntentExecutor:
         )
 
     def _validate_launch(
-        self, request: SubmissionRequest, *, e0_model_verification=None
+        self, request: SubmissionRequest, *, e0_model_verification=None,
+        e1_model_verification=None,
     ) -> tuple[Any, LaunchFiles, bytes, list[dict], dict | None]:
         # Lazy import avoids making package import an execution/admission action.
+        from agentmemeval.path1_v1.operations.e1_prepare import (
+            E1LaunchFiles,
+            read_prepared,
+            render_e1_script,
+        )
         from agentmemeval.path1_v1.operations.worker import validate_worker_request
 
         if (request.spec.cluster, request.spec.account) != (self.cluster, self.account):
@@ -638,19 +651,34 @@ class DurableIntentExecutor:
             raise ExecutorError("worker launcher takes no extra script arguments")
         files = self.launch_files(request)
         if type(files) is ProbeLaunchFiles:
+            if e1_model_verification is not None:
+                raise ExecutorError("E0 launcher cannot borrow E1 model verification")
             return self._validate_probe_launch(
                 request, files, effective_user, model_verification=e0_model_verification
             )
-        if type(files) is not LaunchFiles:
+        if type(files) not in (LaunchFiles, E1LaunchFiles):
             raise ExecutorError("launcher must explicitly select research or E0 topology")
-        if request.spec.cpus_per_task is not None or request.spec.memory_mib is not None:
+        if e0_model_verification is not None:
+            raise ExecutorError("research launcher cannot borrow E0 model verification")
+        prepared = None
+        if type(files) is E1LaunchFiles:
+            prepared = read_prepared(files.prepared_path,
+                                     model_verification=e1_model_verification)
+            if prepared.submission != request:
+                raise ExecutorError("E1 prepared submission differs from exact descriptor")
+            proof = prepared.descriptor["python_identity"]
+            python = Path(proof["entry_path"])
+            worker_path = _file(Path(prepared.descriptor["worker_request_path"]))
+            worker = prepared
+        elif request.spec.cpus_per_task is not None or request.spec.memory_mib is not None:
             raise ExecutorError("explicit host resources are currently service E0 only")
-        python = _file(files.python_executable)
-        digest(files.python_sha256)
-        if file_sha256(python) != files.python_sha256:
-            raise ExecutorError("worker interpreter content changed")
-        worker_path = _file(files.worker_request_path)
-        worker = validate_worker_request(worker_path)
+        else:
+            python = _file(files.python_executable)
+            digest(files.python_sha256)
+            if file_sha256(python) != files.python_sha256:
+                raise ExecutorError("worker interpreter content changed")
+            worker_path = _file(files.worker_request_path)
+            worker = validate_worker_request(worker_path, model_verification=e1_model_verification)
         if (
             worker.intent_id != request.intent_id
             or worker.contract["campaign_id"] != request.campaign_id
@@ -658,6 +686,12 @@ class DurableIntentExecutor:
             raise ExecutorError("worker request is bound to a different campaign/intent")
         repository = Path(worker.request["repository_root"]).resolve(strict=True)
         identity = worker.contract["runtime_identity"]
+        model_arguments = {}
+        if worker.contract["phase"] == "E1":
+            model_arguments = {
+                "model_verification": worker.model_verification,
+                "model_binding_sha256": worker.request_sha256,
+            }
         observed = build_runtime_identity(
             repository,
             core_paths=[x["path"] for x in identity["core_files"]],
@@ -666,11 +700,18 @@ class DurableIntentExecutor:
             dependency_lock_path=identity["dependency_lock"]["path"],
             model_manifest_path=worker.request["model_manifest_path"],
             model_root=worker.request["model_root"],
+            **model_arguments,
         )
         if observed != identity:
             raise ExecutorError("current source/model identity differs from planned worker")
         source_records = identity["core_files"] + identity["operations_files"]
         paths = {item["path"] for item in source_records}
+        if prepared is not None and not {
+            "src/agentmemeval/path1_v1/operations/" + name + ".py"
+            for name in ("e1_prepare", "e1_launcher", "e1_preflight", "interpreters",
+                         "intent_executor", "submission_process", "worker", "user_capacity")
+        } <= paths:
+            raise ExecutorError("E1 prepared execution module closure is incomplete")
         if (
             "src/agentmemeval/path1_v1/operations/worker.py" not in paths
             or identity["dirty"]
@@ -689,10 +730,16 @@ class DurableIntentExecutor:
         )
         if self._path(request.spec.work_dir).resolve() != job_dir.resolve():
             raise ExecutorError("Slurm working directory is not the worker job container")
-        expected_script = render_worker_script(
-            python_executable=python, repository_root=repository, worker_request_path=worker_path
-        )
+        expected_script = (
+            render_e1_script(python_executable=python, repository_root=repository,
+                             prepared_path=prepared.prepared_path,
+                             native_runtime=(prepared.runtime_plan or {}).get("native_runtime"))
+            if prepared is not None else render_worker_script(
+                python_executable=python, repository_root=repository,
+                worker_request_path=worker_path))
         script_path = _file(self._path(request.spec.script_path))
+        if prepared is not None and script_path != Path(prepared.descriptor["script_file"]):
+            raise ExecutorError("E1 script path differs from prepared artifact")
         script = script_path.read_bytes()
         if (
             hashlib.sha256(script).hexdigest() != request.spec.script_sha256
@@ -704,7 +751,6 @@ class DurableIntentExecutor:
             for item in source_records + [identity["config"], identity["dependency_lock"]]
         ]
         pinned += [
-            {"path": str(python), "sha256": files.python_sha256},
             {"path": str(worker_path), "sha256": file_sha256(worker_path)},
             {"path": str(script_path), "sha256": request.spec.script_sha256},
             {"path": worker.request["contract_path"], "sha256": worker.request["contract_sha256"]},
@@ -714,6 +760,15 @@ class DurableIntentExecutor:
                 "sha256": worker.request["seed_inventory_sha256"],
             },
         ]
+        if prepared is None:
+            pinned.append({"path": str(python), "sha256": files.python_sha256})
+        else:
+            if (prepared.runtime_plan or {}).get("native_runtime") is not None:
+                pinned.append(dict(prepared.runtime_plan["native_runtime"]))
+            pinned += [{"path": row["path"], "sha256": row["sha256"]}
+                       for row in proof["files"]]
+            pinned.append({"path": str(prepared.prepared_path),
+                           "sha256": file_sha256(prepared.prepared_path)})
         for path_key, sha_key in (("runtime_gate_path", "runtime_gate_sha256"),):
             if worker.request[path_key] is not None:
                 pinned.append({"path": worker.request[path_key], "sha256": worker.request[sha_key]})
@@ -779,7 +834,8 @@ class DurableIntentExecutor:
         script_path = _file(self._path(request.spec.script_path))
         script = script_path.read_bytes()
         if (script != render_probe_script(python_executable=Path(launch["python_executable"]),
-                repository_root=repository, probe_request_path=path)
+                repository_root=repository, probe_request_path=path,
+                native_runtime=launch.get("native_runtime"))
                 or file_sha256(script_path) != request.spec.script_sha256):
             raise ExecutorError("E0 launcher bytes/topology differ from the fixed template")
         pinned = [{"path": str(repository / item["path"]), "sha256": item["sha256"]}
@@ -790,6 +846,8 @@ class DurableIntentExecutor:
                     "sha256": probe.request["contract_sha256"]}]
         pinned += [{"path": row["path"], "sha256": row["sha256"]}
                    for row in launch["python_identity"]["files"]]
+        if "native_runtime" in launch:
+            pinned.append(dict(launch["native_runtime"]))
         if kind == "service_probe":
             pinned += [{"path": row["path"], "sha256": row["sha256"]}
                        for row in launch["service_python_identity"]["files"]]
@@ -799,6 +857,8 @@ class DurableIntentExecutor:
         return probe, files, script, pinned, effective_user
 
     def _admit(self, request: SubmissionRequest, worker: Any) -> SubmissionAdmission:
+        from agentmemeval.path1_v1.operations.e1_prepare import ValidatedE1Prepared
+
         self._validate_e0_retry(worker)
         if self.pre_submit_verifier is None:
             raise SubmissionDisabled("no trusted pre-submit admission verifier is installed")
@@ -806,11 +866,21 @@ class DurableIntentExecutor:
         if not isinstance(admission, SubmissionAdmission):
             raise SubmissionDisabled("pre-submit verifier returned no typed evidence")
         admission.validate(request, worker, self.clock())
+        if type(worker) is ValidatedE1Prepared and admission.stage_cap != 1:
+            raise SubmissionDisabled("prepared E1 submission is restricted to stage one")
         return admission
 
     def _validate_e0_retry(self, worker: Any):
         contract = worker.contract
         if contract["phase"] != "E0":
+            return
+        if contract["job"]["kind"] == "service_probe" and contract["job"]["attempt"] > 1:
+            from agentmemeval.path1_v1.operations.service_retry import validate_service_retry
+
+            if type(getattr(worker, "request", None)) is not dict:
+                raise SubmissionDisabled(
+                    "E0 retry lineage/campaign/attempt differs: missing service request")
+            validate_service_retry(self.store, contract, worker.request)
             return
         from agentmemeval.path1_v1.operations.contracts import canonical_intent_id
         from agentmemeval.path1_v1.operations.e0_reconcile import resolve_e0_terminal_intent
@@ -901,11 +971,11 @@ class DurableIntentExecutor:
         return prior
 
     def _capacity(self, request: SubmissionRequest, ledger: dict, stage_cap: int,
-                  *, validated_phase: str | None = None) -> dict:
+                  *, validated_phase: str | None = None, validated_e1=None) -> dict:
         if self.account_reader is None:
             raise SubmissionDisabled("no live account capacity reader is installed")
         resolved_e0 = {}
-        if validated_phase == "E0":
+        if validated_phase == "E0" or validated_e1 is not None:
             from agentmemeval.path1_v1.operations.e0_reconcile import (
                 validate_e0_terminal_receipt,
             )
@@ -926,7 +996,7 @@ class DurableIntentExecutor:
             if type(observed) is UserAssociationSnapshot:
                 result = validate_user_association_capacity(
                     observed, request, ledger, stage_cap, self.clock(), validated_phase,
-                    resolved_e0=resolved_e0, store=self.store)
+                    resolved_e0=resolved_e0, store=self.store, validated_e1=validated_e1)
                 # Raw archive/source verification can be slow. Capacity must
                 # still be fresh after that I/O, immediately before return.
                 finished_at = utc(self.clock())
@@ -958,9 +1028,10 @@ class DurableIntentExecutor:
             if job.comment.startswith("ame-v1:" + request.campaign_id + ":")
         }
         unknown_account = unknown_campaign = 0
+        strict_occupancy = validated_phase == "E0" or validated_e1 is not None
         for intent, record in ledger["intents"].items():
             if intent == request.intent_id or (
-                record["status"] == "claimed" and validated_phase != "E0"
+                record["status"] == "claimed" and not strict_occupancy
             ):
                 continue
             previous = self._stored_request(record)
@@ -972,7 +1043,7 @@ class DurableIntentExecutor:
                        for job in represented):
                     raise SubmissionDisabled("scheduler contradicts sealed E0 terminal")
                 continue
-            if not represented or (validated_phase == "E0" and not any(
+            if not represented or (strict_occupancy and not any(
                 job.active for job in represented
             )):
                 unknown_account += 1
@@ -1085,6 +1156,8 @@ class DurableIntentExecutor:
         return result
 
     def submit_once(self, request: SubmissionRequest, *, timeout_seconds: float) -> IntentReceipt:
+        from agentmemeval.path1_v1.operations.e1_prepare import ValidatedE1Prepared
+
         _timeout(timeout_seconds)
         with self.store.lock():
             snapshot = self._initialize()
@@ -1106,7 +1179,8 @@ class DurableIntentExecutor:
             worker, _files, script, pinned, effective_user = self._validate_launch(request)
             admission = self._admit(request, worker)
             capacity = self._capacity(request, ledger, admission.stage_cap,
-                                      validated_phase=worker.contract["phase"])
+                validated_phase=worker.contract["phase"],
+                validated_e1=worker if type(worker) is ValidatedE1Prepared else None)
             job_dir = self._path(request.spec.work_dir).resolve()
             invocation_dir = self.store.directory / "i" / request.intent_id[:16]
             record = {
@@ -1262,7 +1336,11 @@ class DurableIntentExecutor:
                         snapshot, ledger, "persist submitter identity before release"
                     )
                     current_worker, _, current_script, _, current_user = self._validate_launch(
-                        request, e0_model_verification=getattr(worker, "model_verification", None)
+                        request,
+                        e0_model_verification=(getattr(worker, "model_verification", None)
+                                               if worker.contract["phase"] == "E0" else None),
+                        e1_model_verification=(worker.model_verification
+                                               if worker.contract["phase"] == "E1" else None),
                     )
                     if (
                         current_worker.request_sha256 != worker.request_sha256
@@ -1274,6 +1352,8 @@ class DurableIntentExecutor:
                     record["capacity"] = self._capacity(
                         request, ledger, current_admission.stage_cap,
                         validated_phase=current_worker.contract["phase"],
+                        validated_e1=(current_worker
+                                      if type(current_worker) is ValidatedE1Prepared else None),
                     )
                     record["admission_sha256"] = current_admission.evidence_sha256
                     snapshot = self._commit(snapshot, ledger, "persist fresh pre-exec gates")

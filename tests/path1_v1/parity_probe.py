@@ -11,10 +11,21 @@ import importlib.util
 import json
 from dataclasses import asdict
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
+
+
+def storage_relative_path(path: PurePath, root: PurePath) -> str:
+    """Match the frozen Windows representation of this path field only."""
+    return str(PureWindowsPath(*path.relative_to(root).parts))
+
+
+def storage_conflict_message(message: str, run_dir: PurePath, root: PurePath) -> str:
+    """Normalize only the exact run path; preserve all other error text."""
+    replacement = "<fixture-root>\\" + storage_relative_path(run_dir, root)
+    return message.replace(str(run_dir), replacement)
 
 
 def collect(prefix: str, root: Path, helper_path: Path) -> dict:
@@ -119,13 +130,13 @@ def _collect(prefix: str, root: Path, helper_path: Path) -> dict:
         artifacts.ArtifactManager(root / "files", "run", {})
     except Exception as exc:
         conflict = {"error": type(exc).__name__,
-                    "message": str(exc).replace(str(root), "<fixture-root>")}
+                    "message": storage_conflict_message(str(exc), storage.run_dir, root)}
     else:
         raise AssertionError("non-empty directory accepted")
     files = {p.relative_to(storage.run_dir).as_posix(): p.read_text(encoding="utf-8")
              for p in sorted(storage.run_dir.rglob("*")) if p.is_file()}
     storage_result = {"files": files,
-                      "directories": [str(p.relative_to(root)) for p in directories],
+                      "directories": [storage_relative_path(p, root) for p in directories],
                       "conflict": conflict,
                       "safe_components": [artifacts._safe_path_component(v)
                                           for v in ("hero", "../escape", "", "中文", "a" * 90)]}

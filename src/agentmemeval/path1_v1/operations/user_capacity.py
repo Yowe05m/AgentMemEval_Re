@@ -341,9 +341,20 @@ def validate_user_association_capacity(
     *,
     resolved_e0: dict | None = None,
     store=None,
+    validated_e1=None,
 ) -> dict:
-    """Validate E0 capacity while the caller holds the account-scope ledger lock."""
-    if validated_phase != "E0":
+    """Validate E0 or fixed E1 stage-one capacity under the account ledger lock."""
+    from agentmemeval.path1_v1.operations.e1_prepare import ValidatedE1Prepared
+
+    if validated_phase == "E1":
+        if (type(validated_e1) is not ValidatedE1Prepared
+                or validated_e1.contract["phase"] != "E1"
+                or validated_e1.submission != request or type(stage_cap) is not int
+                or stage_cap != 1):
+            raise SubmissionDisabled(
+                "without fixed prepared evidence and stage one, capacity is enabled "
+                "only for validated E0")
+    elif validated_phase != "E0" or validated_e1 is not None:
         raise SubmissionDisabled("user association capacity is enabled only for validated E0")
     if type(snapshot) is not UserAssociationSnapshot or type(request) is not SubmissionRequest:
         raise SubmissionDisabled("typed user association snapshot/request required")

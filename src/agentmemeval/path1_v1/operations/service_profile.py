@@ -33,6 +33,11 @@ def validate_service_profile(config: dict) -> None:
     version = config.get("resource_profile_version")
     if type(version) is not int or version not in (1, 2, 3):
         raise SubmissionDisabled("unsupported service E0 profile version")
+    if "native_runtime" in config:
+        from agentmemeval.path1_v1.operations.native_runtime import validate_binding
+        if version != 3:
+            raise SubmissionDisabled("native runtime requires service profile 3")
+        validate_binding(config["native_runtime"])
     if version == 3:
         if ("memory_mib" not in config or config["memory_mib"] is not None
                 or type(config.get("memory_policy")) is not str
@@ -111,6 +116,12 @@ def validate_service_submission(request, probe, config: dict) -> dict:
                 (type(launch["language_model_only"]) is not bool
                  or launch["language_model_only"] != config["language_model_only"]))):
         raise SubmissionDisabled("service launch differs from its text-only profile")
+    if (("native_runtime" in launch) != ("native_runtime" in config)
+            or launch.get("native_runtime") != config.get("native_runtime")):
+        raise SubmissionDisabled("service native runtime differs from site config")
+    if "native_runtime" in config:
+        from agentmemeval.path1_v1.operations.native_runtime import validate_binding
+        validate_binding(config["native_runtime"])
     for key in (
         "python_executable",
         "python_sha256",
@@ -153,6 +164,8 @@ def validate_service_submission(request, probe, config: dict) -> dict:
         "allocation_verified": False,
         "runtime_admission": False,
     }
+    if "native_runtime" in config:
+        result["native_runtime"] = config["native_runtime"]
     if config["resource_profile_version"] in (2, 3):
         result.update(language_model_only=True, requested_modality_limit=0,
                       effective_multimodal_state_verified=False)

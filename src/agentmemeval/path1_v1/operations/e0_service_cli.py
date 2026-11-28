@@ -95,6 +95,11 @@ def _config(raw: bytes) -> dict:
         keys.add("language_model_only")
     if config["resource_profile_version"] == 3:
         keys.add("memory_policy")
+    if "native_runtime" in config:
+        from agentmemeval.path1_v1.operations.native_runtime import validate_binding
+        _require(config["resource_profile_version"] == 3, "native runtime requires profile 3")
+        validate_binding(config["native_runtime"])
+        keys.add("native_runtime")
     _require(set(config) == keys, "service config keys differ")
     for key in ("cluster", "account", "user", "partition"):
         identifier(config[key])
@@ -114,7 +119,8 @@ def _write_raw(path: Path, raw: bytes) -> None:
         os.fsync(stream.fileno())
 
 
-def prepare(repository: Path, run_root: Path, campaign_id: str, config_relative: str) -> dict:
+def prepare(repository: Path, run_root: Path, campaign_id: str, config_relative: str,
+            *, attempt: int = 1, prior_intent_id: str | None = None) -> dict:
     repository = _absolute(repository)
     _absolute(run_root, exists=False)
     if run_root.exists():
@@ -123,8 +129,13 @@ def prepare(repository: Path, run_root: Path, campaign_id: str, config_relative:
     config_path = _config_path(repository, config_relative)
     raw = config_path.read_bytes()
     config = _config(raw)
+    _require(type(attempt) is int and 1 <= attempt <= 3, "invalid service attempt")
+    _require((attempt == 1) == (prior_intent_id is None), "retry requires an explicit prior intent")
     _require(config["resource_profile_version"] == 3 and config["language_model_only"] is True,
              "new service preparation requires text-only site-default profile version 3")
+    if "native_runtime" in config:
+        from agentmemeval.path1_v1.operations.native_runtime import verify_loaded
+        verify_loaded(config["native_runtime"])
     lock_path = _config_path(repository, config["dependency_lock"])
     lock_raw = lock_path.read_bytes()
     verify_environment(lock_path)
@@ -213,14 +224,34 @@ def prepare(repository: Path, run_root: Path, campaign_id: str, config_relative:
             "pair_ids": [],
             "arms": [],
             "domain": "source",
-            "attempt": 1,
-            "output_relpath": campaign_id + "/E0/service/attempt_01",
+            "attempt": attempt,
+            "output_relpath": campaign_id + f"/E0/service/attempt_{attempt:02d}",
             "formation_receipt": None,
             "retry_evidence": None,
         },
         "not_for_paper": True,
         "execution_admission": "not_granted_by_contract_validation",
     }
+    if attempt > 1:
+        from agentmemeval.path1_v1.operations import e0_reconcile as er
+        from agentmemeval.path1_v1.operations.service_retry import (
+            resolve_service_retry,
+            validate_transition,
+        )
+        from agentmemeval.path1_v1.operations.state import CampaignStore
+
+        scope = content_digest({"cluster": config["cluster"], "account": config["account"]})
+        control = _absolute(Path(config["control_root"]) / "ie1" / scope[:16])
+        _require((control / "campaign.sqlite3").is_file(), "existing retry control store required")
+        store = CampaignStore(control, "executor_" + scope[:32])
+        eligibility = resolve_service_retry(store, prior_intent_id)
+        records = store.read_registry().registry["durable_intent_executor_v1"]["intents"]
+        previous = records[prior_intent_id]
+        prior = DurableIntentExecutor._stored_probe_contract(previous)
+        old_config = er._historical_identity(
+            repository, prior["runtime_identity"], allow_model=True)
+        contract["job"]["retry_evidence"] = eligibility.retry_evidence()
+        validate_transition(prior, contract, old_config, config)
     validate_campaign_contract(contract)
     run_root.mkdir(exist_ok=False)
     for name in ("output", "preflight", "inputs"):
@@ -252,6 +283,8 @@ def prepare(repository: Path, run_root: Path, campaign_id: str, config_relative:
         )
     }
     launch.update(python_identity=python_identity, service_python_identity=service_identity)
+    if "native_runtime" in config:
+        launch["native_runtime"] = config["native_runtime"]
     launch["language_model_only"] = config["language_model_only"]
     probe = {
         "schema_version": 2,
@@ -272,7 +305,8 @@ def prepare(repository: Path, run_root: Path, campaign_id: str, config_relative:
     _write_raw(
         script,
         render_probe_script(
-            python_executable=python, repository_root=repository, probe_request_path=request_path
+            python_executable=python, repository_root=repository, probe_request_path=request_path,
+            native_runtime=config.get("native_runtime")
         ),
     )
     spec = SubmitSpec(
@@ -405,7 +439,6 @@ def read_prepared(run_root: Path, expected_descriptor_sha256: str):
     _require(
         contract["phase"] == "E0"
         and contract["job"]["kind"] == "service_probe"
-        and contract["job"]["attempt"] == 1
         and canonical_intent_id(contract) == probe["intent_id"] == descriptor["intent_id"]
         and contract["campaign_id"] == descriptor["campaign_id"]
         and probe["repository_root"] == str(repository)
@@ -446,6 +479,7 @@ def read_prepared(run_root: Path, expected_descriptor_sha256: str):
             python_executable=Path(probe["launch"]["python_executable"]),
             repository_root=repository,
             probe_request_path=request_path,
+            native_runtime=probe["launch"].get("native_runtime"),
         ),
         "service script/spec differs",
     )
@@ -470,6 +504,9 @@ def execute(run_root: Path, expected_descriptor_sha256: str, *, lookup: bool) ->
             == descriptor["config_sha256"],
             "current service config changed",
         )
+        if "native_runtime" in config:
+            from agentmemeval.path1_v1.operations.native_runtime import verify_loaded
+            verify_loaded(config["native_runtime"])
         verify_environment(_config_path(repository, config["dependency_lock"]))
     commands = config["commands"]
 
@@ -519,13 +556,16 @@ def main(argv=None) -> int:
     prep.add_argument("--run-root", type=Path, required=True)
     prep.add_argument("--campaign-id", required=True)
     prep.add_argument("--config", required=True)
+    prep.add_argument("--attempt", type=int, default=1)
+    prep.add_argument("--prior-intent-id")
     for action in ("inspect", "submit", "lookup"):
         item = sub.add_parser(action)
         item.add_argument("--run-root", type=Path, required=True)
         item.add_argument("--descriptor-sha256", required=True)
     args = parser.parse_args(argv)
     if args.action == "prepare":
-        result = prepare(args.repository, args.run_root, args.campaign_id, args.config)
+        result = prepare(args.repository, args.run_root, args.campaign_id, args.config,
+                         attempt=args.attempt, prior_intent_id=args.prior_intent_id)
     elif args.action == "inspect":
         result = read_prepared(args.run_root, args.descriptor_sha256)[0]
     else:

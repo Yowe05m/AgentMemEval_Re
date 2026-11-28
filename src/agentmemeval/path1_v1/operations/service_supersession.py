@@ -90,7 +90,8 @@ class ServiceSupersession:
         }
 
 
-def resolve_service_supersession(store, contract: dict, probe: dict, previous: dict):
+def resolve_service_supersession(store, contract: dict, probe: dict, previous: dict,
+                                *, allow_validated_descendants: bool = False):
     """Derive one transition from the original store and both exact Git identities."""
     from agentmemeval.path1_v1.operations.intent_executor import NAMESPACE, DurableIntentExecutor
     from agentmemeval.path1_v1.operations.submission_rejection import (
@@ -148,6 +149,23 @@ def resolve_service_supersession(store, contract: dict, probe: dict, previous: d
         other = DurableIntentExecutor._stored_probe_contract(record)
         if (other["campaign_id"] == contract["campaign_id"]
                 and other["job"]["kind"] == "service_probe"):
+            if allow_validated_descendants and other["job"]["attempt"] > 1:
+                from agentmemeval.path1_v1.operations.service_retry import validate_service_retry
+
+                other_probe = er._json(er._path(record["probe_request_path"]))
+                validate_service_retry(store, other, other_probe)
+                ancestor = other
+                for _ in range(2):
+                    parent = ancestor["job"]["retry_evidence"]["prior_intent_id"]
+                    if parent == current_intent:
+                        break
+                    ancestor = DurableIntentExecutor._stored_probe_contract(records[parent])
+                    _require(ancestor["job"]["attempt"] > 1,
+                             "retry is not this transition's descendant")
+                else:
+                    raise SubmissionDisabled(
+                        "service supersession: descendant chain exceeds retry bound")
+                continue
             siblings.append(intent)
     _require(siblings == [previous["intent_id"]], "another service unit consumes this transition")
     return ServiceSupersession(
@@ -178,5 +196,6 @@ def validate_stored_supersession(record: dict, store) -> None:
     _require(type(previous) is dict, "persisted predecessor missing")
     contract = DurableIntentExecutor._stored_probe_contract(record)
     probe = er._json(er._path(record["probe_request_path"]))
-    expected = resolve_service_supersession(store, contract, probe, previous)
+    expected = resolve_service_supersession(store, contract, probe, previous,
+                                           allow_validated_descendants=True)
     _require(saved == expected.payload(), "persisted transition differs from original evidence")

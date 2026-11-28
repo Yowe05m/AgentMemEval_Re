@@ -12,7 +12,7 @@ import copy
 import hashlib
 import os
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -41,6 +41,11 @@ from agentmemeval.path1_v1.operations.contracts import (
     canonical_intent_id,
     content_digest,
     validate_campaign_contract,
+)
+from agentmemeval.path1_v1.operations.model_verification import (
+    VerifiedModelFiles,
+    reuse_model_files,
+    verify_model_files,
 )
 from agentmemeval.path1_v1.operations.state import CampaignStore
 from agentmemeval.path1_v1.storage.snapshots import load_snapshot
@@ -229,9 +234,12 @@ class ValidatedWorkerRequest:
     intent_id: str
     request_sha256: str
     output_directory: Path
+    model_verification: VerifiedModelFiles | None = field(default=None, compare=False, repr=False)
 
 
-def validate_worker_request(request_path: Path | str) -> ValidatedWorkerRequest:
+def validate_worker_request(
+    request_path: Path | str, *, model_verification: VerifiedModelFiles | None = None,
+) -> ValidatedWorkerRequest:
     """Read-only content/claim validation. Success grants no runtime admission."""
     request = _read_json(_absolute(str(request_path)))
     _object(
@@ -275,6 +283,8 @@ def validate_worker_request(request_path: Path | str) -> ValidatedWorkerRequest:
     )
     contract = _bound_json(request["contract_path"], request["contract_sha256"])
     _require(contract.get("phase") in {"E1", "E2", "E3"}, "worker supports E1/E2/E3, not E0 probes")
+    _require(model_verification is None or contract["phase"] == "E1",
+             "model verification reuse is currently E1 only")
     artifact_root = (
         None if request["artifact_root"] is None else _absolute(request["artifact_root"])
     )
@@ -286,6 +296,24 @@ def validate_worker_request(request_path: Path | str) -> ValidatedWorkerRequest:
         artifact_root=artifact_root,
     )
     identity = contract["runtime_identity"]
+    model_arguments = {}
+    if contract["phase"] == "E1":
+        # An in-process content capability is not runtime admission. New callers
+        # always hash the files; only the exact request can reuse this 120s lease.
+        if model_verification is None:
+            model_verification = verify_model_files(
+                model_manifest, model_root, expected_identity=identity["model"],
+                binding_sha256=request["request_sha256"], max_age_seconds=120.0,
+            )
+        else:
+            reuse_model_files(
+                model_verification, model_manifest, model_root,
+                binding_sha256=request["request_sha256"], expected_identity=identity["model"],
+            )
+        model_arguments = {
+            "model_verification": model_verification,
+            "model_binding_sha256": request["request_sha256"],
+        }
     # E1 also needs fresh source/model binding; being not-for-paper is not an
     # exemption from identifying the code and files that the worker will use.
     observed = build_runtime_identity(
@@ -296,6 +324,7 @@ def validate_worker_request(request_path: Path | str) -> ValidatedWorkerRequest:
         dependency_lock_path=identity["dependency_lock"]["path"],
         model_manifest_path=model_manifest,
         model_root=model_root,
+        **model_arguments,
     )
     _require(observed == identity, "worker source/model identity changed")
     intent = canonical_intent_id(contract)
@@ -354,7 +383,8 @@ def validate_worker_request(request_path: Path | str) -> ValidatedWorkerRequest:
         "worker claim is not an actual reservation",
     )
     return ValidatedWorkerRequest(
-        request, contract, seeds, claim, intent, request["request_sha256"], output
+        request, contract, seeds, claim, intent, request["request_sha256"], output,
+        model_verification,
     )
 
 
@@ -631,7 +661,9 @@ def run_worker(
     def live_request_gate() -> None:
         try:
             _check_runtime(admission, request, clock())
-        except (RuntimeAdmissionRequired, ContractError, OSError) as exc:
+            if hasattr(runtime_verifier, "verify_live"):
+                runtime_verifier.verify_live(request, admission)
+        except (RuntimeError, ContractError, OSError) as exc:
             raise Path1TerminalError("state", "runtime_evidence_revalidation_failed") from exc
 
     factory = StrictPath1ClientFactory(
