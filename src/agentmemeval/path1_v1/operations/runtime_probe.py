@@ -139,6 +139,9 @@ def validate_probe_request(request_path: Path | str, *, _collecting_resource: bo
         _require(("native_runtime" in config) == ("native_runtime" in request["launch"])
                  and config.get("native_runtime") == request["launch"].get("native_runtime"),
                  "native runtime launch/config binding differs")
+        _require(("cuda_toolkit" in config) == ("cuda_toolkit" in request["launch"])
+                 and config.get("cuda_toolkit") == request["launch"].get("cuda_toolkit"),
+                 "CUDA toolkit launch/config binding differs")
     _require(not observed["dirty"] and observed["content_matches_head"]
              and not observed["untracked_declared_paths"]
              and not observed["untracked_execution_paths"]
@@ -171,6 +174,10 @@ def validate_probe_launch(launch: dict, kind: str) -> None:
         optional.add("native_runtime")
         from agentmemeval.path1_v1.operations.native_runtime import verify_file
         verify_file(launch["native_runtime"])
+    if kind == "service_probe" and type(launch) is dict and "cuda_toolkit" in launch:
+        optional.add("cuda_toolkit")
+        from agentmemeval.path1_v1.operations.cuda_toolkit import verify_file
+        verify_file(launch["cuda_toolkit"])
     _object(launch, {"python_executable", "python_sha256", "service_python",
                      "service_python_sha256", "service_port", "command_seconds",
                      "cleanup_seconds", "startup_seconds", "python_identity",
@@ -766,6 +773,10 @@ def run_service_probe(request_path: Path, output_directory: Path,
         from agentmemeval.path1_v1.operations.native_runtime import environment, verify_loaded
         verify_loaded(native)
         env = environment(native, env)
+    toolkit = request.request.get("launch", {}).get("cuda_toolkit")
+    if toolkit is not None:
+        from agentmemeval.path1_v1.operations.cuda_toolkit import environment as toolkit_env
+        env = toolkit_env(toolkit, env)
     endpoint = f"http://127.0.0.1:{port}/v1"
     launch_record = {"argv": argv, "binding": asdict(binding),
               "python_resolved": str(executable.resolve()),
@@ -774,6 +785,8 @@ def run_service_probe(request_path: Path, output_directory: Path,
         launch_record["requested_service_policy"] = arguments
     if native is not None:
         launch_record["native_runtime"] = native
+    if toolkit is not None:
+        launch_record["cuda_toolkit"] = toolkit
     _new_json(output / "launch.json", launch_record)
     with (output / "service_stdout.log").open("xb") as stdout, (
         output / "service_stderr.log"

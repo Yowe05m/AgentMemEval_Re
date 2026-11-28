@@ -472,6 +472,9 @@ def run_e1_service(prepared):
         from agentmemeval.path1_v1.operations.native_runtime import verify_loaded
         verify_loaded(native)
         environment = native_env(native, environment)
+    if "cuda_toolkit" in plan:
+        from agentmemeval.path1_v1.operations.cuda_toolkit import environment as toolkit_env
+        environment = toolkit_env(plan["cuda_toolkit"], environment)
     _write(
         output / "launch.json",
         {

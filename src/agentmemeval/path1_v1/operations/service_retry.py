@@ -1,4 +1,4 @@
-"""Complete-unit E0 retry after a sealed pre-HTTP CUDA driver failure.
+"""Complete-unit E0 retry after a sealed pre-HTTP CUDA environment failure.
 
 This derives eligibility from original files and the authoritative failed claim;
 it neither retries an intent nor grants scientific/runtime admission.
@@ -26,6 +26,7 @@ ENVIRONMENT_FIELDS = frozenset(
     {
         "dependency_lock",
         "native_runtime",
+        "cuda_toolkit",
         "python_executable",
         "python_sha256",
         "python_prefix",
@@ -50,12 +51,12 @@ class ServiceRetryEligibility:
     prior_terminal_receipt_sha256: str
     prior_evidence_file_sha256: str
     driver_log_sha256: str
-    driver_api_version: int
+    driver_api_version: int | None
     _issuer: Any = field(default=None, repr=False, compare=False)
 
     def payload(self):
         _require(self._issuer is _ISSUER, "untrusted eligibility object")
-        return {
+        result = {
             "kind": "path1_e0_service_driver_retry_eligibility_v1",
             **{k: getattr(self, k) for k in self.__dataclass_fields__ if k != "_issuer"},
             "scope": "complete_unit",
@@ -63,6 +64,11 @@ class ServiceRetryEligibility:
             "runtime_admission": False,
             "scientific_admission": False,
         }
+        if self.driver_api_version is None:
+            result["kind"] = "path1_e0_service_missing_nvcc_retry_eligibility_v1"
+            result["failure_log_sha256"] = result.pop("driver_log_sha256")
+            result.pop("driver_api_version")
+        return result
 
     def retry_evidence(self):
         return {
@@ -130,10 +136,15 @@ def resolve_service_retry(store, prior_intent_id: str):
     matches = re.findall(
         r"The NVIDIA driver on your system is too old \(found version (\d+)\)", text
     )
-    _require(
-        len(matches) == 1 and "torch._C._cuda_init()" in text and "gpu_worker.py" in text,
-        "exact pre-initialization CUDA driver failure missing",
-    )
+    driver_failure = (len(matches) == 1 and "torch._C._cuda_init()" in text
+                      and "gpu_worker.py" in text)
+    missing_nvcc = (not matches and text.count(
+        "RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda' "
+        "doesn't exist") == 1
+        and all(marker in text for marker in ("flashinfer/jit/cpp_ext.py", "in get_cuda_path",
+            "flashinfer/sampling.py", "gen_sampling_module().build_and_load()")))
+    _require(driver_failure or missing_nvcc,
+             "exact pre-HTTP CUDA driver or missing nvcc failure missing")
     _require(store.read_registry() == snapshot, "store changed during eligibility verification")
     return ServiceRetryEligibility(
         store.campaign_id,
@@ -143,7 +154,7 @@ def resolve_service_retry(store, prior_intent_id: str):
         resolution.terminal_receipt_sha256,
         resolution.evidence_file_sha256,
         hashlib.sha256(raw).hexdigest(),
-        int(matches[0]),
+        int(matches[0]) if driver_failure else None,
         _issuer=_ISSUER,
     )
 

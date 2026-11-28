@@ -20,9 +20,9 @@
     "operations/intent_executor.py": {
       "baseline_git_bytes_sha256": "6ac00f61f5bd8bbba422c7c62b5fde9336835a28a3fb483b019ef6ac441f0040",
       "baseline_normalized_ast_sha256": "4db6ae3d6ff622b02d47ec942499daed0a778b44eacafa4d500e7a1148a74695",
-      "current_worktree_bytes_sha256": "401e76477484b54aa7ab3534600322e0dd8a57c1671703e7c7fe1faf9dc4687a",
-      "normalized_ast_sha256": "9e1b85b7c92bbdff7d6476d93beeb6a548a3540f3edafb0bc8be88df6593fd49",
-      "reason": "E0 profile3 site-default RAM validation, typed one-time service policy supersession with repeated pre-go lineage checks, and manifest-bound helper v2 raw-output verification. Changes from 765d1509 are limited to E0PreSubmitVerifier.__call__ and DurableIntentExecutor._ledger/_validate_e0_retry/_result/submit_once; all other AST nodes are unchanged. Existing unresolved occupancy, unstarted-only resource retry and default research admission gates remain enforced. The reviewed W1K24 service retry adds only typed technical-failure lineage verification in _validate_e0_retry; predecessor terminal evidence and one-time account-store ownership are rechecked before go. It grants no runtime or scientific admission and cannot resubmit the old intent. E1 binds typed prepared inputs and the reserved worker claim, enforces stage-one capacity and reuses only the same-process model capability before go. The E0 typed service retry method is copied exactly from the independently reviewed retry slice; all other merged AST nodes match the reviewed E1 overlay. Runtime admission remains separately required inside the allocation. Single content-pinned native runtime is bound to E0/E1 bootstrap argv and helper input pins; relative to the frozen W1K27 joint, only render_probe_script, _validate_launch and _validate_probe_launch change. Legacy missing-field scripts and all scientific/core rules remain unchanged.",
+      "current_worktree_bytes_sha256": "713e7f704f49f609a2e01f673d91bd8b5ca4e0528b21de847ba5e1a5e7c2c9f0",
+      "normalized_ast_sha256": "f6a6820a74dd06270c4702e8a32eab1bd941e87aeb76c8c977bb23c010368df4",
+      "reason": "E0 profile3 site-default RAM validation, typed one-time service policy supersession with repeated pre-go lineage checks, and manifest-bound helper v2 raw-output verification. Changes from 765d1509 are limited to E0PreSubmitVerifier.__call__ and DurableIntentExecutor._ledger/_validate_e0_retry/_result/submit_once; all other AST nodes are unchanged. Existing unresolved occupancy, unstarted-only resource retry and default research admission gates remain enforced. The reviewed W1K24 service retry adds only typed technical-failure lineage verification in _validate_e0_retry; predecessor terminal evidence and one-time account-store ownership are rechecked before go. It grants no runtime or scientific admission and cannot resubmit the old intent. E1 binds typed prepared inputs and the reserved worker claim, enforces stage-one capacity and reuses only the same-process model capability before go. The E0 typed service retry method is copied exactly from the independently reviewed retry slice; all other merged AST nodes match the reviewed E1 overlay. Runtime admission remains separately required inside the allocation. Single content-pinned native runtime is bound to E0/E1 bootstrap argv and helper input pins; relative to the frozen W1K27 joint, only render_probe_script, _validate_launch and _validate_probe_launch change. Legacy missing-field scripts and all scientific/core rules remain unchanged. W1K28 adds only exact nvcc helper input pins in _validate_launch and _validate_probe_launch; no other executor AST changes from 6cc9998d.",
       "regression_tests": [
         "tests/path1_v1/unit/test_intent_executor.py",
         "tests/path1_v1/integration/test_intent_executor_faults.py",
@@ -41,7 +41,8 @@
         "tests/path1_v1/unit/test_e1_prepared.py",
         "tests/path1_v1/unit/test_e1_model_verification.py",
         "tests/path1_v1/unit/test_e1_campaign.py",
-        "tests/path1_v1/unit/test_native_runtime.py"
+        "tests/path1_v1/unit/test_native_runtime.py",
+        "tests/path1_v1/unit/test_cuda_toolkit.py"
       ]
     },
     "operations/submission_process.py": {

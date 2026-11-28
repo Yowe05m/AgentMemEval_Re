@@ -90,20 +90,22 @@ def test_attempt_cannot_reset_skip_or_exceed_two_retries(structural, attempt):
         retry.validate_transition(prior, current, old, new)
 
 
-def sealed_driver(tmp_path, monkeypatch):
+def sealed_driver(tmp_path, monkeypatch, *, log=DRIVER_LOG, cleanup_returncode=1,
+                  missing_http=True, attempt=1):
     f = make_service_fixture(tmp_path, monkeypatch)
     # Real SQLite/archive/CAS mechanics; inherited binder/scheduler are explicit fixtures.
-    f.cleanup["returncode"] = 1
+    f.cleanup["returncode"] = cleanup_returncode
     write(f.root / "service_cleanup.json", f.cleanup)
-    (f.root / "service_stderr.log").write_bytes(DRIVER_LOG)
-    (f.root / "observations/host_service.json").unlink()
-    (f.root / "observations/probe_receipt.json").unlink()
+    (f.root / "service_stderr.log").write_bytes(log)
+    if missing_http:
+        (f.root / "observations/host_service.json").unlink()
+        (f.root / "observations/probe_receipt.json").unlink()
     for row in f.scheduler:
         row[5:7] = ["FAILED", "1:0"]
     f.close()
     actual = er.resolve_e0_terminal_intent(f.store, f.request.intent_id)
     assert actual.claim_status == "failed"
-    contract = {"phase": "E0", "job": {"kind": "service_probe", "attempt": 1}}
+    contract = {"phase": "E0", "job": {"kind": "service_probe", "attempt": attempt}}
     monkeypatch.setattr(DurableIntentExecutor, "_stored_probe_contract", lambda record: contract)
     return f, actual
 
@@ -115,9 +117,47 @@ def test_driver_seal(tmp_path, monkeypatch):
     assert value.driver_log_sha256 == hashlib.sha256(DRIVER_LOG).hexdigest()
     assert value.retry_evidence()["eligibility_receipt_sha256"] == content_digest(value.payload())
     assert value.payload()["scientific_admission"] is False
+    assert value.payload() == {
+        "kind": "path1_e0_service_driver_retry_eligibility_v1",
+        **{k: getattr(value, k) for k in value.__dataclass_fields__ if k != "_issuer"},
+        "scope": "complete_unit", "seed_changed": False,
+        "runtime_admission": False, "scientific_admission": False,
+    }
     (f.root / "service_stderr.log").write_bytes(DRIVER_LOG + b"changed")
     with pytest.raises((SubmissionDisabled, er.E0ReconciliationError)):
         retry.resolve_service_retry(f.store, f.request.intent_id)
+
+
+NVCC_LOG = (b'File "flashinfer/jit/cpp_ext.py", in get_cuda_path\n'
+            b'File "flashinfer/sampling.py", in get_sampling_module\n'
+            b'    gen_sampling_module().build_and_load()\n'
+            b"RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda' "
+            b"doesn't exist\n")
+
+
+@pytest.mark.parametrize("defect", [None, "unsealed_cleanup", "http_present", "other_error",
+                                  "wrong_stack", "duplicate"])
+def test_exact_sealed_missing_nvcc_can_retry_attempt_two_only(tmp_path, monkeypatch, defect):
+    log = NVCC_LOG
+    if defect == "other_error":
+        log = log.replace(b"Could not find nvcc", b"unsupported GPU")
+    if defect == "wrong_stack":
+        log = log.replace(b"flashinfer/jit/cpp_ext.py", b"other.py")
+    if defect == "duplicate":
+        log += NVCC_LOG
+    f, _ = sealed_driver(tmp_path, monkeypatch, log=log, attempt=2,
+        cleanup_returncode=0 if defect == "unsealed_cleanup" else 1,
+        missing_http=defect != "http_present")
+    if defect is not None:
+        with pytest.raises(SubmissionDisabled):
+            retry.resolve_service_retry(f.store, f.request.intent_id)
+    else:
+        value = retry.resolve_service_retry(f.store, f.request.intent_id)
+        payload = value.payload()
+        assert payload["kind"] == "path1_e0_service_missing_nvcc_retry_eligibility_v1"
+        assert payload["failure_log_sha256"] == hashlib.sha256(NVCC_LOG).hexdigest()
+        assert "driver_api_version" not in payload and "driver_log_sha256" not in payload
+        assert payload["runtime_admission"] is False and payload["scientific_admission"] is False
 
 
 def test_unissued_capability_cannot_grant_retry():

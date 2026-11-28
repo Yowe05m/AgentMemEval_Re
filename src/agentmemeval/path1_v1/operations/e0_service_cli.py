@@ -100,6 +100,10 @@ def _config(raw: bytes) -> dict:
         _require(config["resource_profile_version"] == 3, "native runtime requires profile 3")
         validate_binding(config["native_runtime"])
         keys.add("native_runtime")
+    if "cuda_toolkit" in config:
+        from agentmemeval.path1_v1.operations.cuda_toolkit import validate_binding
+        validate_binding(config["cuda_toolkit"])
+        keys.add("cuda_toolkit")
     _require(set(config) == keys, "service config keys differ")
     for key in ("cluster", "account", "user", "partition"):
         identifier(config[key])
@@ -136,6 +140,9 @@ def prepare(repository: Path, run_root: Path, campaign_id: str, config_relative:
     if "native_runtime" in config:
         from agentmemeval.path1_v1.operations.native_runtime import verify_loaded
         verify_loaded(config["native_runtime"])
+    if "cuda_toolkit" in config:
+        from agentmemeval.path1_v1.operations.cuda_toolkit import verify_file
+        verify_file(config["cuda_toolkit"])
     lock_path = _config_path(repository, config["dependency_lock"])
     lock_raw = lock_path.read_bytes()
     verify_environment(lock_path)
@@ -285,6 +292,8 @@ def prepare(repository: Path, run_root: Path, campaign_id: str, config_relative:
     launch.update(python_identity=python_identity, service_python_identity=service_identity)
     if "native_runtime" in config:
         launch["native_runtime"] = config["native_runtime"]
+    if "cuda_toolkit" in config:
+        launch["cuda_toolkit"] = config["cuda_toolkit"]
     launch["language_model_only"] = config["language_model_only"]
     probe = {
         "schema_version": 2,

@@ -168,7 +168,8 @@ def read_runtime_plan(path: Path, *, contract: dict, request: dict | None = None
     _object(value, {"schema_version", "kind", "service_port", "service_python_identity",
                     "source_pins", "startup_seconds", "cleanup_seconds", "backend_probe_seeds",
                     "prior_e0", "language_model_only"}
-            | ({"native_runtime"} if "native_runtime" in value else set()), "E1 runtime plan")
+            | ({"native_runtime"} if "native_runtime" in value else set())
+            | ({"cuda_toolkit"} if "cuda_toolkit" in value else set()), "E1 runtime plan")
     _require(type(value["schema_version"]) is int and value["schema_version"] == 1
              and value["kind"] == "path1_e1_runtime_plan"
              and contract["phase"] == "E1", "E1 runtime plan schema/phase differs")
@@ -202,6 +203,12 @@ def read_runtime_plan(path: Path, *, contract: dict, request: dict | None = None
     if "native_runtime" in value:
         from agentmemeval.path1_v1.operations.native_runtime import verify_file
         verify_file(value["native_runtime"])
+    _require(("cuda_toolkit" in value) == ("cuda_toolkit" in site)
+             and _same(value.get("cuda_toolkit"), site.get("cuda_toolkit")),
+             "E1 CUDA toolkit must match the observed E0 environment")
+    if "cuda_toolkit" in value:
+        from agentmemeval.path1_v1.operations.cuda_toolkit import verify_file
+        verify_file(value["cuda_toolkit"])
     if request is not None:
         _require(request["runtime_gate_path"] == str(path)
                  and request["runtime_gate_sha256"] == initial_sha,

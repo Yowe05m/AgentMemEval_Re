@@ -765,6 +765,9 @@ class DurableIntentExecutor:
         else:
             if (prepared.runtime_plan or {}).get("native_runtime") is not None:
                 pinned.append(dict(prepared.runtime_plan["native_runtime"]))
+            if (prepared.runtime_plan or {}).get("cuda_toolkit") is not None:
+                from agentmemeval.path1_v1.operations.cuda_toolkit import input_pin
+                pinned.append(input_pin(prepared.runtime_plan["cuda_toolkit"]))
             pinned += [{"path": row["path"], "sha256": row["sha256"]}
                        for row in proof["files"]]
             pinned.append({"path": str(prepared.prepared_path),
@@ -848,6 +851,9 @@ class DurableIntentExecutor:
                    for row in launch["python_identity"]["files"]]
         if "native_runtime" in launch:
             pinned.append(dict(launch["native_runtime"]))
+        if "cuda_toolkit" in launch:
+            from agentmemeval.path1_v1.operations.cuda_toolkit import input_pin
+            pinned.append(input_pin(launch["cuda_toolkit"]))
         if kind == "service_probe":
             pinned += [{"path": row["path"], "sha256": row["sha256"]}
                        for row in launch["service_python_identity"]["files"]]

@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "kind": "path1_e0_service_site_config",
+  "phase": "E0",
+  "job_kind": "service_probe",
+  "resource_profile_version": 3,
+  "language_model_only": true,
+  "cluster": "n16r4",
+  "account": "scze856",
+  "user": "scze856",
+  "partition": "gpu",
+  "walltime_seconds": 7200,
+  "command_seconds": 6600,
+  "cleanup_seconds": 600,
+  "startup_seconds": 1200,
+  "queue_policy": "no_scheduler_deadline",
+  "qos_policy": "site_default",
+  "gpus": 1,
+  "stage_cap": 1,
+  "cpus_per_task": 8,
+  "memory_mib": null,
+  "memory_policy": "site_default",
+  "control_root": "/data/run01/scze856/mcl/operations/path1_control",
+  "accounting_since": "2026-11-13T00:00:00+00:00",
+  "dependency_lock": "configs/path1_v1/e0_observed_environment_cu129_cxx.json",
+  "python_executable": "/data/run01/scze856/mcl/envs/20261124_agentmemeval_vllm023_cu129/bin/python",
+  "python_prefix": "/data/run01/scze856/mcl/envs/20261124_agentmemeval_vllm023_cu129",
+  "python_sha256": "57af0c0f63b4dd53a608c1b86704b09ff82d0565eecc5d9880870f7a058868a5",
+  "service_python": "/data/run01/scze856/mcl/envs/20261124_agentmemeval_vllm023_cu129/bin/python",
+  "service_python_prefix": "/data/run01/scze856/mcl/envs/20261124_agentmemeval_vllm023_cu129",
+  "service_python_sha256": "57af0c0f63b4dd53a608c1b86704b09ff82d0565eecc5d9880870f7a058868a5",
+  "service_port": 18231,
+  "model_root": "/data/run01/scze856/mcl/models/20261113_qwen35_9b_c202236_path1",
+  "model_manifest_path": "/data/run01/scze856/mcl/operations/20261113_path1_model_materialization/model_manifest.json",
+  "model_manifest_sha256": "9ece49b364d41d83503eacc000344bfdeb909dc82f797d88d5e5749af0ee32ca",
+  "commands": {
+    "sbatch": {
+      "path": "/usr/bin/sbatch",
+      "sha256": "29cdff25cd1e6886fafbad5046d1b4d3acecddb380f58ba7aaab23ae7eedf40c"
+    },
+    "scontrol": {
+      "path": "/usr/bin/scontrol",
+      "sha256": "b2d852b5d905e55c45d816c0f907b6aa9d578f1a0ec7ddfc1d26612f66f2eb6e"
+    },
+    "sacctmgr": {
+      "path": "/usr/bin/sacctmgr",
+      "sha256": "b8c58eed258a58573839864bff7b235c137d7302324d105aab5159abeac20cc1"
+    },
+    "squeue": {
+      "path": "/usr/bin/squeue",
+      "sha256": "969444a77780fc1300bc5863059b3440dfc8789d2617eccc8ac017137c9af3c9"
+    },
+    "sacct": {
+      "path": "/usr/bin/sacct",
+      "sha256": "deee5bcf762f14bb9c413139fa041e385ccedab995e4991826c48031ed9f9c58"
+    }
+  },
+  "native_runtime": {
+    "path": "/data/run01/scze856/mcl/envs/mtde-t2t-judge-cu124/lib/libstdc++.so.6.0.36",
+    "sha256": "e3549df69430b452252a93f037e7bb382ae1011ba247f39cf570e0927a3b3af0"
+  },
+  "cuda_toolkit": {
+    "cuda_home": "/data/apps/cuda/12.9",
+    "nvcc_sha256": "e4d89fec9260c0162c5afb820d5e7bfaea971f96d4eef94d47e0d08ec8bc85e7"
+  }
+}

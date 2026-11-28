@@ -38,6 +38,11 @@ def validate_service_profile(config: dict) -> None:
         if version != 3:
             raise SubmissionDisabled("native runtime requires service profile 3")
         validate_binding(config["native_runtime"])
+    if "cuda_toolkit" in config:
+        from agentmemeval.path1_v1.operations.cuda_toolkit import validate_binding
+        if version != 3:
+            raise SubmissionDisabled("CUDA toolkit requires service profile 3")
+        validate_binding(config["cuda_toolkit"])
     if version == 3:
         if ("memory_mib" not in config or config["memory_mib"] is not None
                 or type(config.get("memory_policy")) is not str
@@ -119,6 +124,9 @@ def validate_service_submission(request, probe, config: dict) -> dict:
     if (("native_runtime" in launch) != ("native_runtime" in config)
             or launch.get("native_runtime") != config.get("native_runtime")):
         raise SubmissionDisabled("service native runtime differs from site config")
+    if (("cuda_toolkit" in launch) != ("cuda_toolkit" in config)
+            or launch.get("cuda_toolkit") != config.get("cuda_toolkit")):
+        raise SubmissionDisabled("service CUDA toolkit differs from site config")
     if "native_runtime" in config:
         from agentmemeval.path1_v1.operations.native_runtime import validate_binding
         validate_binding(config["native_runtime"])
@@ -166,6 +174,8 @@ def validate_service_submission(request, probe, config: dict) -> dict:
     }
     if "native_runtime" in config:
         result["native_runtime"] = config["native_runtime"]
+    if "cuda_toolkit" in config:
+        result["cuda_toolkit"] = config["cuda_toolkit"]
     if config["resource_profile_version"] in (2, 3):
         result.update(language_model_only=True, requested_modality_limit=0,
                       effective_multimodal_state_verified=False)
