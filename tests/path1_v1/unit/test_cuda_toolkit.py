@@ -2,6 +2,8 @@
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +20,71 @@ def fixture(tmp_path):
     nvcc.chmod(0o755)
     return {"cuda_home": str(tmp_path),
             "nvcc_sha256": hashlib.sha256(nvcc.read_bytes()).hexdigest()}
+
+
+def ninja_fixture(tmp_path):
+    directory = tmp_path / "bound_ninja_bin"
+    directory.mkdir()
+    ninja = directory / "ninja"
+    ninja.write_bytes(b"#!/bin/sh\nprintf 'bound-ninja\\n'\n")
+    ninja.chmod(0o755)
+    return {"path": str(ninja), "sha256": hashlib.sha256(ninja.read_bytes()).hexdigest()}
+
+
+def test_ninja_binding_pins_exact_binary_and_overrides_polluted_search_path(tmp_path):
+    pin = fixture(tmp_path)
+    pin["ninja"] = ninja_fixture(tmp_path)
+    base = {"PATH": "/untrusted/bin:/usr/bin:/bin", "LD_PRELOAD": "existing"}
+    env = toolkit.environment(pin, base)
+    assert toolkit.input_pins(pin) == [toolkit.input_pin(pin), pin["ninja"]]
+    assert env["PATH"].split(os.pathsep)[:2] == [
+        str(Path(pin["ninja"]["path"]).parent), str(tmp_path / "bin")]
+    assert base["PATH"] == "/untrusted/bin:/usr/bin:/bin"
+    assert env["LD_PRELOAD"] == "existing" and "LD_LIBRARY_PATH" not in env
+    if sys.platform == "linux":
+        assert shutil.which("ninja", path=env["PATH"]) == pin["ninja"]["path"]
+        env.pop("LD_PRELOAD")  # This fixture value is not a real shared object.
+        result = subprocess.run(["ninja"], env=env, capture_output=True, check=True)
+        assert result.stdout == b"bound-ninja\n"
+
+
+@pytest.mark.parametrize("mode", ["changed", "missing", "not_executable", "symlink"])
+def test_ninja_bytes_and_executable_identity_are_required(tmp_path, mode):
+    if sys.platform != "linux" and mode in {"not_executable", "symlink"}:
+        pytest.skip("POSIX executable and symlink semantics")
+    pin = fixture(tmp_path)
+    pin["ninja"] = ninja_fixture(tmp_path)
+    path = Path(pin["ninja"]["path"])
+    if mode == "changed":
+        path.write_bytes(b"changed executable")
+    elif mode == "missing":
+        path.unlink()
+    elif mode == "not_executable":
+        path.chmod(0o644)
+        if os.access(path, os.X_OK):
+            pytest.skip("filesystem does not enforce POSIX execute permissions")
+    else:
+        original = path.with_name("original_ninja")
+        path.rename(original)
+        path.symlink_to(original)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        toolkit.environment(pin, {"PATH": "/usr/bin:/bin"})
+
+
+def test_old_toolkit_payload_and_single_input_pin_remain_exact(tmp_path):
+    pin = fixture(tmp_path)
+    assert toolkit.validate_binding(pin) == pin
+    assert set(toolkit.validate_binding(pin)) == {"cuda_home", "nvcc_sha256"}
+    assert toolkit.input_pins(pin) == [toolkit.input_pin(pin)]
+
+
+@pytest.mark.parametrize("ninja", [None, {}, {"path": "relative/ninja", "sha256": "a"*64},
+    {"path": "/bin/other", "sha256": "a"*64}, {"path": "/bin/ninja", "sha256": "bad"}])
+def test_invalid_ninja_binding_rejected(tmp_path, ninja):
+    pin = fixture(tmp_path)
+    pin["ninja"] = ninja
+    with pytest.raises(ValueError):
+        toolkit.validate_binding(pin)
 
 
 def test_exact_compiler_overrides_hidden_launchers_without_library_path_change(tmp_path):
@@ -61,6 +128,7 @@ def test_shared_profile_rejects_toolkit_on_legacy_policy(tmp_path, version):
 def test_e1_toolkit_plan_must_match_typed_prior_e0(tmp_path, monkeypatch, mode):
     from agentmemeval.path1_v1.operations import e1_campaign as campaign
     pin = fixture(tmp_path)
+    pin["ninja"] = ninja_fixture(tmp_path)
     nvcc = tmp_path / "bin/nvcc"
     proof = {"entry_path": str(tmp_path / "python"), "executable_sha256": "b" * 64,
              "prefix": str(tmp_path)}
@@ -95,6 +163,7 @@ def test_e0_preparation_binds_toolkit_config_request_and_profile(tmp_path, monke
     home = tmp_path / "toolkit"
     home.mkdir()
     pin = fixture(home)
+    pin["ninja"] = ninja_fixture(home)
     config["cuda_toolkit"] = pin
     path.write_bytes(canonical_json(config))
     _git(repo, "add", ".")
